@@ -78,6 +78,7 @@ export class TaskScheduler {
     const result=this.db.prepare(`
       UPDATE tasks SET lease_expires_at=? WHERE id=? AND status='LEASED'
       AND lease_owner=? AND lease_generation=? AND lease_expires_at>?
+      AND EXISTS (SELECT 1 FROM missions m WHERE m.id=tasks.mission_id AND m.status='RUNNING')
     `).run(expiresAt,id,worker,generation,now);
     return result.changes===1;
   }
