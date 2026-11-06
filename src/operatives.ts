@@ -22,6 +22,8 @@ function decode(row:Row):Operative {
     last_seen_at:row.last_seen_at,created_at:row.created_at};
 }
 const identifier=/^[a-z][a-z0-9._-]{0,63}$/;
+/** Operatives must renew liveness; a stale declaration cannot receive new work. */
+export const OPERATIVE_HEARTBEAT_TTL_MS=60_000;
 export class OperativeRegistry {
   private db:Database.Database;
   constructor(path:string) {
@@ -61,18 +63,26 @@ export class OperativeRegistry {
     return this.db.prepare("UPDATE operatives SET state=?,last_seen_at=? WHERE id=?")
       .run(state,state==="available"?new Date().toISOString():null,id).changes===1;
   }
+  /** Only an explicitly available operative can renew its liveness. */
+  heartbeat(id:string):boolean {
+    return this.db.prepare("UPDATE operatives SET last_seen_at=? WHERE id=? AND state='available'")
+      .run(new Date().toISOString(),id).changes===1;
+  }
   /** Deterministic candidate selection; does not grant tool or execution authority. */
   candidates(required:string[]):Operative[] {
     if(required.length===0||required.some(c=>!identifier.test(c)))throw new Error("Invalid capabilities");
-    return this.list().filter(o=>o.state==="available"&&
+    const cutoff=new Date(Date.now()-OPERATIVE_HEARTBEAT_TTL_MS).toISOString();
+    return this.list().filter(o=>o.state==="available"&&o.last_seen_at!==null&&o.last_seen_at>cutoff&&
       o.active_assignments<o.max_concurrency&&required.every(c=>o.capabilities.includes(c)))
       .sort((a,b)=>(a.active_assignments/a.max_concurrency)-(b.active_assignments/b.max_concurrency)
         ||a.name.localeCompare(b.name));
   }
   /** Reserve capacity atomically; caller must separately enforce policy before execution. */
   reserve(id:string):boolean {
+    const cutoff=new Date(Date.now()-OPERATIVE_HEARTBEAT_TTL_MS).toISOString();
     return this.db.prepare(`UPDATE operatives SET active_assignments=active_assignments+1
-      WHERE id=? AND state='available' AND active_assignments<max_concurrency`).run(id).changes===1;
+      WHERE id=? AND state='available' AND last_seen_at IS NOT NULL AND last_seen_at>?
+      AND active_assignments<max_concurrency`).run(id,cutoff).changes===1;
   }
   release(id:string):boolean {
     return this.db.prepare(`UPDATE operatives SET active_assignments=active_assignments-1
