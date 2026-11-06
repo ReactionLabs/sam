@@ -109,3 +109,59 @@ test("heartbeat cannot extend a lease while mission is paused or cancelled",()=>
     rmSync(dir,{recursive:true,force:true});
   }
 });
+
+test("heartbeat never shortens an existing lease and stale workers cannot complete",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"sam-lease-monotonic-"));
+  const path=join(dir,"missions.db");
+  const store=new MissionStore(path);
+  const db=new Database(path);
+  try {
+    const mission=store.create("Monotonic leases");
+    store.transition(mission.code,"PLANNING");
+    store.transition(mission.code,"READY");
+    store.transition(mission.code,"RUNNING");
+    const tasks=new TaskScheduler(db);
+    const task=tasks.add(mission.id,"Execute safely");
+    const first=tasks.claim(mission.id,"worker-a",1000,1000)!;
+    assert.equal(first.lease_expires_at,2000);
+    assert.equal(tasks.heartbeat(task.id,"worker-a",first.lease_generation,1100,100),false);
+    assert.equal(tasks.heartbeat(task.id,"worker-a",first.lease_generation,1100,900),false);
+    assert.equal(tasks.list(mission.id)[0].lease_expires_at,2000);
+    assert.equal(tasks.heartbeat(task.id,"worker-a",first.lease_generation,1200,1000),true);
+    assert.equal(tasks.list(mission.id)[0].lease_expires_at,2200);
+    assert.equal(tasks.claim(mission.id,"worker-b",2200,1000)?.lease_generation,first.lease_generation+1);
+    assert.equal(tasks.heartbeat(task.id,"worker-a",first.lease_generation,2201,1000),false);
+    assert.equal(tasks.complete(task.id,"worker-a",first.lease_generation,true,2201),false);
+    assert.equal(tasks.complete(task.id,"worker-b",first.lease_generation+1,true,2201),true);
+  } finally {
+    db.close();store.close();
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+test("paused and cancelled missions reject completion without mutating task",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"sam-complete-gate-"));
+  const path=join(dir,"missions.db");
+  const store=new MissionStore(path);
+  const db=new Database(path);
+  try {
+    const mission=store.create("Completion gate");
+    store.transition(mission.code,"PLANNING");
+    store.transition(mission.code,"READY");
+    store.transition(mission.code,"RUNNING");
+    const tasks=new TaskScheduler(db);
+    const task=tasks.add(mission.id,"Guard completion");
+    const lease=tasks.claim(mission.id,"worker",1000,1000)!;
+    store.transition(mission.code,"PAUSING");
+    assert.equal(tasks.complete(task.id,"worker",lease.lease_generation,true,1100),false);
+    store.transition(mission.code,"PAUSED");
+    assert.equal(tasks.complete(task.id,"worker",lease.lease_generation,true,1200),false);
+    assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+    store.transition(mission.code,"RUNNING");
+    assert.equal(tasks.complete(task.id,"worker",lease.lease_generation,true,1300),true);
+    assert.equal(tasks.list(mission.id)[0].status,"SUCCEEDED");
+  } finally {
+    db.close();store.close();
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
