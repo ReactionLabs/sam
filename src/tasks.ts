@@ -77,9 +77,9 @@ export class TaskScheduler {
     const expiresAt=leaseExpiry(now,ttlMs);
     const result=this.db.prepare(`
       UPDATE tasks SET lease_expires_at=? WHERE id=? AND status='LEASED'
-      AND lease_owner=? AND lease_generation=? AND lease_expires_at>?
+      AND lease_owner=? AND lease_generation=? AND lease_expires_at>? AND lease_expires_at<?
       AND EXISTS (SELECT 1 FROM missions m WHERE m.id=tasks.mission_id AND m.status='RUNNING')
-    `).run(expiresAt,id,worker,generation,now);
+    `).run(expiresAt,id,worker,generation,now,expiresAt);
     return result.changes===1;
   }
   complete(id:string,worker:string,generation:number,success:boolean,now=Date.now()):boolean {
