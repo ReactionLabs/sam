@@ -78,3 +78,34 @@ test("lease timestamps reject non-integer, negative and overflowing values",()=>
     rmSync(dir,{recursive:true,force:true});
   }
 });
+
+test("heartbeat cannot extend a lease while mission is paused or cancelled",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"sam-heartbeat-gate-"));
+  const path=join(dir,"missions.db");
+  const store=new MissionStore(path);
+  const db=new Database(path);
+  try {
+    const mission=store.create("Mission gate");
+    store.transition(mission.code,"PLANNING");
+    store.transition(mission.code,"READY");
+    store.transition(mission.code,"RUNNING");
+    const tasks=new TaskScheduler(db);
+    const task=tasks.add(mission.id,"Do work");
+    const lease=tasks.claim(mission.id,"worker",1000,1000)!;
+    assert.equal(lease.id,task.id);
+    store.transition(mission.code,"PAUSING");
+    assert.equal(tasks.heartbeat(task.id,"worker",lease.lease_generation,1100,1000),false);
+    assert.equal(tasks.list(mission.id)[0].lease_expires_at,2000,"rejected heartbeat must not mutate expiry");
+    store.transition(mission.code,"PAUSED");
+    assert.equal(tasks.heartbeat(task.id,"worker",lease.lease_generation,1200,1000),false);
+    store.transition(mission.code,"RUNNING");
+    assert.equal(tasks.heartbeat(task.id,"worker",lease.lease_generation,1300,1000),true);
+    assert.equal(tasks.list(mission.id)[0].lease_expires_at,2300);
+    store.transition(mission.code,"CANCELLED");
+    assert.equal(tasks.heartbeat(task.id,"worker",lease.lease_generation,1400,1000),false);
+    assert.equal(tasks.list(mission.id)[0].lease_expires_at,2300);
+  } finally {
+    db.close();store.close();
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
