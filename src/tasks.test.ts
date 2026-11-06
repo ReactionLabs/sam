@@ -45,3 +45,36 @@ test("cross-mission dependency rejected",()=>{
     db.close();store.close();
   }finally{rmSync(dir,{recursive:true,force:true});}
 });
+
+test("lease timestamps reject non-integer, negative and overflowing values",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"sam-lease-bounds-"));
+  const path=join(dir,"missions.db");
+  const store=new MissionStore(path);
+  const db=new Database(path);
+  try {
+    const mission=store.create("Lease bounds");
+    store.transition(mission.code,"PLANNING");
+    store.transition(mission.code,"READY");
+    store.transition(mission.code,"RUNNING");
+    const tasks=new TaskScheduler(db);
+    const task=tasks.add(mission.id,"safe claim");
+    for(const [now,ttl] of [[NaN,100],[-1,100],[1.5,100],[100,0],[100,-1],
+      [100,Infinity],[100,1.5],[Number.MAX_SAFE_INTEGER,1]]) {
+      assert.throws(()=>tasks.claim(mission.id,"worker",now,ttl),/Invalid lease/);
+    }
+    const lease=tasks.claim(mission.id,"worker",100,100);
+    assert.equal(lease?.id,task.id,"invalid attempts must not consume the task");
+    for(const [now,ttl] of [[NaN,10],[-1,10],[150,Infinity],[150,0],
+      [Number.MAX_SAFE_INTEGER,1]]) {
+      assert.throws(()=>tasks.heartbeat(task.id,"worker",lease!.lease_generation,now,ttl),
+        /Invalid lease/);
+    }
+    assert.throws(()=>tasks.complete(task.id,"worker",lease!.lease_generation,true,NaN),
+      /Invalid completion timestamp/);
+    assert.equal(tasks.heartbeat(task.id,"worker",lease!.lease_generation,150,100),true);
+    assert.equal(tasks.complete(task.id,"worker",lease!.lease_generation,true,200),true);
+  } finally {
+    db.close();store.close();
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
