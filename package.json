@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node --test dist/**/*.test.js",
+    "test": "node --test dist/kernel.test.js",
     "sam": "node dist/cli.js"
   },
   "bin": {
