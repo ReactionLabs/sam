@@ -3,6 +3,10 @@ import { Command } from "commander";
 import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
 import { requestDaemon, serveDaemon } from "./daemon.js";
+import { MemoryStore, type MemoryKind } from "./memory.js";
+import { ApprovalStore, type RiskClass } from "./approvals.js";
+import { OperativeRegistry, type OperativeState } from "./operatives.js";
+import { AssignmentLeases } from "./assignment-leases.js";
 import { join,resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -11,17 +15,24 @@ import { missionStatuses, type MissionStatus } from "./kernel.js";
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
 program.option("--workspace <path>","Workspace directory",process.cwd()).option("--json","JSON output");
+function dbPath():string {
+  return join(resolve(program.opts().workspace),".sam","missions.db");
+}
 function store():MissionStore {
-  const path=resolve(program.opts().workspace);
-  return new MissionStore(join(path,".sam","missions.db"));
+  return new MissionStore(dbPath());
+}
+function withDb<T>(fn:(db:Database.Database,missions:MissionStore)=>T):T {
+  const missions=store();
+  const db=new Database(dbPath());
+  db.pragma("foreign_keys = ON");
+  try { return fn(db,missions); }
+  finally { db.close(); missions.close(); }
+}
+function missionOrThrow(missions:MissionStore,code:string) {
+  const m=missions.get(code); if(!m) throw new Error("Mission not found: "+code); return m;
 }
 function withTasks<T>(fn:(tasks:TaskScheduler,missions:MissionStore)=>T):T {
-  const missions=store();
-  const path=join(resolve(program.opts().workspace),".sam","missions.db");
-  const db=new Database(path);
-  db.pragma("foreign_keys = ON");
-  try { return fn(new TaskScheduler(db),missions); }
-  finally { db.close(); missions.close(); }
+  return withDb((db,missions)=>fn(new TaskScheduler(db),missions));
 }
 function output(data:unknown):void { console.log(program.opts().json?JSON.stringify(data,null,2):typeof data==="string"?data:JSON.stringify(data,null,2)); }
 program.command("init").description("Initialize local mission workspace").action(()=>{
@@ -73,8 +84,84 @@ daemon.command("status").action(async()=>{
 daemon.command("stop").action(async()=>{
   output(await requestDaemon(resolve(program.opts().workspace),"stop"));
 });
-program.command("doctor").description("Check local runtime prerequisites").action(()=>{
-  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI and local IPC daemon available; agent execution not implemented"});
+
+const memory=program.command("memory").description("Durable mission memory (evidence, never authority over policy)");
+memory.command("add").argument("<kind>").argument("<content>").requiredOption("--source <source>","Provenance for this record").option("--mission <code>","Mission code to attach this record to").action((kind:string,content:string,options:{source:string,mission?:string})=>{
+  const mem=new MemoryStore(dbPath()); const missions=store();
+  try{ const missionId=options.mission?missionOrThrow(missions,options.mission).id:undefined; output(mem.add({missionId,kind:kind as MemoryKind,content,source:options.source})); }
+  finally{mem.close();missions.close();}
 });
-program.command("status").action(()=>{const db=store();try{output({missions:db.list().length,daemon:"use sam daemon status"});}finally{db.close();}});
+memory.command("list").option("--mission <code>","Only records for this mission").action((options:{mission?:string})=>{
+  const mem=new MemoryStore(dbPath()); const missions=store();
+  try{ output(mem.list(options.mission?missionOrThrow(missions,options.mission).id:undefined)); }
+  finally{mem.close();missions.close();}
+});
+memory.command("search").argument("<query>").action((query:string)=>{
+  const mem=new MemoryStore(dbPath()); try{output(mem.search(query));}finally{mem.close();}
+});
+memory.command("archive").argument("<id>").action((id:string)=>{
+  const mem=new MemoryStore(dbPath()); try{output({archived:mem.archive(id)});}finally{mem.close();}
+});
+
+const operative=program.command("operative").description("Operative capability registry (declarations, never credentials)");
+operative.command("register").argument("<name>").argument("<adapter>").argument("<capabilities>").option("--max <n>","Max concurrent assignments").action((name:string,adapter:string,capabilities:string,options:{max?:string})=>{
+  const reg=new OperativeRegistry(dbPath());
+  try{ output(reg.register({name,adapter,capabilities:capabilities.split(",").map(x=>x.trim()).filter(Boolean),maxConcurrency:options.max?Number(options.max):undefined})); }
+  finally{reg.close();}
+});
+operative.command("list").action(()=>{
+  const reg=new OperativeRegistry(dbPath()); try{output(reg.list());}finally{reg.close();}
+});
+operative.command("state").argument("<id>").argument("<state>").action((id:string,state:string)=>{
+  const reg=new OperativeRegistry(dbPath()); try{output({updated:reg.setState(id,state as OperativeState)});}finally{reg.close();}
+});
+operative.command("heartbeat").argument("<id>").action((id:string)=>{
+  const reg=new OperativeRegistry(dbPath()); try{output({renewed:reg.heartbeat(id)});}finally{reg.close();}
+});
+operative.command("candidates").argument("<capabilities>").action((capabilities:string)=>{
+  const reg=new OperativeRegistry(dbPath());
+  try{ output(reg.candidates(capabilities.split(",").map(x=>x.trim()).filter(Boolean))); }
+  finally{reg.close();}
+});
+
+const assignment=program.command("assignment").description("Durable operative assignment leases (a lease is not execution permission)");
+assignment.command("claim").argument("<operative-id>").argument("<task-id>").option("--ttl <ms>","Lease TTL in milliseconds").action((operativeId:string,taskId:string,options:{ttl?:string})=>{
+  const reg=new OperativeRegistry(dbPath()); reg.close();
+  const leases=new AssignmentLeases(dbPath());
+  try{ const lease=leases.claim(operativeId,taskId,Date.now(),options.ttl?Number(options.ttl):undefined); if(!lease) throw new Error("No lease granted: operative unavailable, at capacity, or task already claimed"); output(lease); }
+  finally{leases.close();}
+});
+assignment.command("active").argument("<operative-id>").action((operativeId:string)=>{
+  const leases=new AssignmentLeases(dbPath()); try{output(leases.active(operativeId));}finally{leases.close();}
+});
+assignment.command("finish").argument("<lease-id>").argument("<operative-id>").argument("<generation>").action((leaseId:string,operativeId:string,generation:string)=>{
+  const leases=new AssignmentLeases(dbPath()); try{output({finished:leases.finish(leaseId,operativeId,Number(generation))});}finally{leases.close();}
+});
+assignment.command("renew").argument("<lease-id>").argument("<operative-id>").argument("<generation>").option("--ttl <ms>","Lease TTL in milliseconds").action((leaseId:string,operativeId:string,generation:string,options:{ttl?:string})=>{
+  const leases=new AssignmentLeases(dbPath()); try{output({renewed:leases.renew(leaseId,operativeId,Number(generation),Date.now(),options.ttl?Number(options.ttl):undefined)});}finally{leases.close();}
+});
+
+const approval=program.command("approval").description("Action-bound approval ledger (request and inspect only; deciding requires an owner-authenticated boundary that is not built yet, so there is no decide command)");
+approval.command("request").argument("<mission>").argument("<risk>").argument("<action-json>").option("--ttl <ms>","Approval lifetime in milliseconds").action((code:string,risk:string,actionJson:string,options:{ttl?:string})=>{
+  output(withDb((db,missions)=>{
+    const mission=missionOrThrow(missions,code);
+    let action:unknown; try{action=JSON.parse(actionJson);}catch{throw new Error("Action must be valid JSON");}
+    return new ApprovalStore(db).request(mission.id,risk as RiskClass,action,Date.now(),options.ttl?Number(options.ttl):undefined);
+  }));
+});
+approval.command("list").argument("<mission>").action((code:string)=>{
+  output(withDb((db,missions)=>new ApprovalStore(db).list(missionOrThrow(missions,code).id)));
+});
+approval.command("inspect").argument("<id>").action((id:string)=>{
+  output(withDb((db)=>{ const a=new ApprovalStore(db).get(id); if(!a) throw new Error("Approval not found: "+id); return a; }));
+});
+
+program.command("doctor").description("Check local runtime prerequisites").action(()=>{
+  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; agent execution not implemented"});
+});
+program.command("status").action(()=>{
+  const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
+  try{output({missions:db.list().length,memories:mem.list().length,operatives:reg.list().length,daemon:"use sam daemon status"});}
+  finally{db.close();mem.close();reg.close();}
+});
 program.parseAsync().catch((err:unknown)=>{console.error("SAM error:",err instanceof Error?err.message:String(err));process.exitCode=1;});
