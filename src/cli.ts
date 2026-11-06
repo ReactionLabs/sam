@@ -2,6 +2,7 @@
 import { Command } from "commander";
 import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
+import { requestDaemon, serveDaemon } from "./daemon.js";
 import { join,resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -60,8 +61,20 @@ task.command("list").argument("<mission>").action((code:string)=>{
     return tasks.list(mission.id);
   }));
 });
-program.command("doctor").description("Check local runtime prerequisites").action(()=>{
-  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI ready; daemon and agent execution not implemented"});
+const daemon=program.command("daemon").description("Local-only SAM control daemon");
+daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
+  output("SAM daemon listening in workspace "+resolve(program.opts().workspace));
+  await serveDaemon(resolve(program.opts().workspace));
 });
-program.command("status").action(()=>{const db=store();try{output({missions:db.list().length,daemon:"not implemented"});}finally{db.close();}});
+daemon.command("status").action(async()=>{
+  try{output(await requestDaemon(resolve(program.opts().workspace),"ping"));}
+  catch(error){output({ok:false,reason:error instanceof Error?error.message:String(error)});process.exitCode=1;}
+});
+daemon.command("stop").action(async()=>{
+  output(await requestDaemon(resolve(program.opts().workspace),"stop"));
+});
+program.command("doctor").description("Check local runtime prerequisites").action(()=>{
+  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI and local IPC daemon available; agent execution not implemented"});
+});
+program.command("status").action(()=>{const db=store();try{output({missions:db.list().length,daemon:"use sam daemon status"});}finally{db.close();}});
 program.parseAsync().catch((err:unknown)=>{console.error("SAM error:",err instanceof Error?err.message:String(err));process.exitCode=1;});
