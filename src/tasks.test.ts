@@ -165,3 +165,57 @@ test("paused and cancelled missions reject completion without mutating task",()=
     rmSync(dir,{recursive:true,force:true});
   }
 });
+
+
+test("cancelled and failed missions fence completion without mutating the lease",()=>{
+  for(const terminal of ["CANCELLED","FAILED"] as const) {
+    const dir=mkdtempSync(join(tmpdir(),"sam-terminal-fence-"));
+    const path=join(dir,"missions.db");
+    const store=new MissionStore(path);
+    const db=new Database(path);
+    try {
+      const mission=store.create("Terminal fence "+terminal);
+      store.transition(mission.code,"PLANNING");
+      store.transition(mission.code,"READY");
+      store.transition(mission.code,"RUNNING");
+      const tasks=new TaskScheduler(db);
+      const task=tasks.add(mission.id,"Do not complete after termination");
+      const lease=tasks.claim(mission.id,"worker",1000,1000)!;
+      store.transition(mission.code,terminal);
+      const before=tasks.list(mission.id)[0];
+      assert.equal(tasks.complete(task.id,"worker",lease.lease_generation,true,1100),false);
+      assert.equal(tasks.complete(task.id,"worker",lease.lease_generation,false,1100),false);
+      assert.equal(tasks.heartbeat(task.id,"worker",lease.lease_generation,1100,1000),false);
+      assert.deepEqual(tasks.list(mission.id)[0],before,"rejected actions must not mutate task");
+      assert.equal(tasks.claim(mission.id,"other-worker",2000,1000),undefined);
+    } finally {
+      db.close();store.close();
+      rmSync(dir,{recursive:true,force:true});
+    }
+  }
+});
+
+test("expired lease cannot complete until a new generation is claimed",()=>{
+  const dir=mkdtempSync(join(tmpdir(),"sam-expired-complete-"));
+  const path=join(dir,"missions.db");
+  const store=new MissionStore(path);
+  const db=new Database(path);
+  try {
+    const mission=store.create("Expired completion");
+    store.transition(mission.code,"PLANNING");
+    store.transition(mission.code,"READY");
+    store.transition(mission.code,"RUNNING");
+    const tasks=new TaskScheduler(db);
+    const task=tasks.add(mission.id,"Complete with current lease only");
+    const old=tasks.claim(mission.id,"worker-a",1000,100)!;
+    assert.equal(tasks.complete(task.id,"worker-a",old.lease_generation,true,1100),false);
+    assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+    const fresh=tasks.claim(mission.id,"worker-b",1100,100)!;
+    assert.equal(fresh.lease_generation,old.lease_generation+1);
+    assert.equal(tasks.complete(task.id,"worker-a",old.lease_generation,true,1101),false);
+    assert.equal(tasks.complete(task.id,"worker-b",fresh.lease_generation,true,1101),true);
+  } finally {
+    db.close();store.close();
+    rmSync(dir,{recursive:true,force:true});
+  }
+});
