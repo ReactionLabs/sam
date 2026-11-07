@@ -1,4 +1,4 @@
-import {createHash, randomUUID} from "node:crypto";
+import {createHash} from "node:crypto";
 
 export type ExecutionOutcome = "SUCCEEDED" | "FAILED";
 export interface ExecutionRequest {
