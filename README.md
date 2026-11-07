@@ -1,10 +1,22 @@
 # S.A.M. | Secret Agent Man
 
-CLI-first agent commander and durable mission runtime.
+**A local-first commander for an AI agent workforce.**
 
-> Status: early implementation, not production ready. SAM plans, tracks,
-> leases, remembers, and gates work. It does not execute agent work yet:
-> there is no model adapter, MCP server, or tool executor in this build.
+SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
+
+**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
+
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, and local daemon foundations exist; end-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work. Some changes are proposed in open PRs and are not yet on `main`.
+
+**Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
+
+## Follow the build
+
+- [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
+- [Commit history](https://github.com/ReactionLabs/sam/commits/main/) for changes merged into the default branch.
+- [GitHub Actions](https://github.com/ReactionLabs/sam/actions) for available automated checks.
+
+> Public source can be viewed, cloned, and forked. Never commit API keys, tokens, or client credentials.
 
 ## Quick start
 
