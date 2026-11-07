@@ -1,0 +1,58 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {mkdtempSync,rmSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
+import Database from "better-sqlite3";
+import {MissionStore} from "./storage.js";
+import {TaskScheduler} from "./tasks.js";
+import {OfflineMissionRunner} from "./offline-runner.js";
+import {LocalEchoAdapter,type ExecutionAdapter} from "./execution.js";
+
+function fixture(fn:(db:Database.Database,store:MissionStore,tasks:TaskScheduler,runner:OfflineMissionRunner)=>Promise<void>) {
+  return async()=>{
+    const dir=mkdtempSync(join(tmpdir(),"sam-runner-"));
+    const path=join(dir,"missions.db"),store=new MissionStore(path),db=new Database(path);
+    db.pragma("foreign_keys = ON");
+    const tasks=new TaskScheduler(db),runner=new OfflineMissionRunner(db);
+    try { await fn(db,store,tasks,runner); }
+    finally {db.close();store.close();rmSync(dir,{recursive:true,force:true});}
+  };
+}
+test("offline task completes and verified result survives a new runner instance",fixture(async(db,store,tasks,runner)=>{
+  const mission=store.create("offline");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo me");store.transition(mission.code,"RUNNING");
+  const result=await runner.runOne(mission.id,"local-worker",new LocalEchoAdapter());
+  assert.equal(result?.task_id,task.id);
+  assert.equal(result?.output,"echo me");
+  assert.equal(tasks.list(mission.id)[0].status,"SUCCEEDED");
+  assert.deepEqual(new OfflineMissionRunner(db).result(task.id),result);
+}));
+test("tampered evidence is never stored or marked successful",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("tamper");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    return {...await new LocalEchoAdapter().execute(req),output:"tampered"};
+  }};
+  await assert.rejects(runner.runOne(mission.id,"worker",adapter),/Invalid execution evidence/);
+  assert.equal(runner.result(task.id),undefined);
+  assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+}));
+test("rejects non-offline adapters before claiming",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("safe");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+  await assert.rejects(runner.runOne(mission.id,"worker",{id:"remote",execute:async(req)=>new LocalEchoAdapter().execute(req)}),/offline/);
+  assert.equal(tasks.list(mission.id)[0].status,"PENDING");
+}));
+test("expired lease cannot persist evidence or mark task complete",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("expired");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    const evidence=await new LocalEchoAdapter().execute(req);
+    tasks.claim(mission.id,"replacement",Date.now()+60_000,30_000);
+    return evidence;
+  }};
+  await assert.rejects(runner.runOne(mission.id,"worker",adapter),/Lease expired/);
+  assert.equal(runner.result(task.id),undefined);
+  assert.equal(tasks.list(mission.id)[0].lease_owner,"replacement");
+}));
