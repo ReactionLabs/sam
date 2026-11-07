@@ -73,3 +73,19 @@ test("verified failure persists as FAILED and does not unlock dependent work",fi
   assert.equal(tasks.list(mission.id).find(t=>t.id===dependent.id)?.status,"PENDING");
   assert.equal(await runner.runOne(mission.id,"worker",new LocalEchoAdapter()),undefined);
 }));
+
+test("mission pause during execution rejects completion and leaves no evidence",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("pause during execution");
+  store.transition(mission.code,"PLANNING");
+  store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");
+  store.transition(mission.code,"RUNNING");
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    const evidence=await new LocalEchoAdapter().execute(req);
+    store.transition(mission.code,"PAUSING");
+    return evidence;
+  }};
+  await assert.rejects(runner.runOne(mission.id,"worker",adapter),/mission no longer running/);
+  assert.equal(runner.result(task.id),undefined);
+  assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+}));
