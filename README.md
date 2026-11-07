@@ -45,6 +45,16 @@ for machine-readable output).
   boundary that is not built yet. See `docs/approval-boundary.md`.
 - **Daemon** (`daemon serve|status|stop`): a single-instance, local-only
   IPC daemon over a workspace Unix socket.
+- **Configuration** (`config show`): environment configuration for the
+  future MiniMax model adapter and Second Shift MCP connection
+  (see `.env.example`). Remote endpoints must be HTTPS, URLs may not
+  carry credentials, and the CLI reports secrets only as present or
+  absent, never their values. `doctor` reports model/MCP readiness.
+- **MCP policy** (`mcp authorize`): a local dry-run of the deny-by-default
+  authorization boundary for a future MCP executor. Exact-match,
+  owner-approved read-only allowlist only: no wildcards, no prefix
+  matching, untrusted servers and duplicate tool names are denied.
+  The command makes no network connection. See `docs/mcp-security.md`.
 
 ## Verify
 
@@ -61,6 +71,8 @@ separate processes.
 
 ## Not implemented yet
 
-- Model adapters, MCP, and operative execution
+- Model adapters and operative execution
+- An authenticated MCP client/executor (configuration and the
+  authorization policy are in; no transport is connected)
 - Owner-authenticated approval decisions
 - Memory curation, deduplication, and automatic skill extraction

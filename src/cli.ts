@@ -7,6 +7,8 @@ import { MemoryStore, type MemoryKind } from "./memory.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
+import { parseSamConfig, configReadiness } from "./config.js";
+import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -156,8 +158,34 @@ approval.command("inspect").argument("<id>").action((id:string)=>{
   output(withDb((db)=>{ const a=new ApprovalStore(db).get(id); if(!a) throw new Error("Approval not found: "+id); return a; }));
 });
 
+
+const config=program.command("config").description("Environment configuration and readiness (never prints secret values)");
+config.command("show").description("Show the parsed configuration with secrets reduced to present/absent").action(()=>{
+  const cfg=parseSamConfig(process.env); const ready=configReadiness(cfg);
+  output({
+    modelProvider:cfg.modelProvider, model:cfg.model, minimaxBaseUrl:cfg.minimaxBaseUrl,
+    minimaxApiKey:cfg.minimaxApiKey?"present":"absent",
+    secondShiftMcpUrl:cfg.secondShiftMcpUrl, secondShiftMcpToken:cfg.secondShiftMcpToken?"present":"absent",
+    logLevel:cfg.logLevel, modelReady:ready.modelReady, mcpReady:ready.mcpReady
+  });
+});
+
+const mcp=program.command("mcp").description("MCP authorization policy (dry-run only; no server connection is made)");
+mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-default policy for one tool name, locally")
+  .option("--advertised <tools>","Comma-separated tool names the server advertised")
+  .option("--allow <tools>","Comma-separated owner-approved read-only tool names")
+  .option("--trust-server","Mark the server trusted for this evaluation")
+  .action((tool:string,options:{advertised?:string,allow?:string,trustServer?:boolean})=>{
+    const split=(s?:string)=>s?.split(",").map(x=>x.trim()).filter(Boolean)??[];
+    const advertised=split(options.advertised).map(name=>({name}));
+    const decision=authorizeMcpTool(tool,advertised,new Set(split(options.allow)),!!options.trustServer);
+    output(decision);
+    if(!decision.allowed)process.exitCode=1;
+  });
+
 program.command("doctor").description("Check local runtime prerequisites").action(()=>{
-  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; agent execution not implemented"});
+  const ready=configReadiness(parseSamConfig(process.env));
+  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),modelReady:ready.modelReady,mcpReady:ready.mcpReady,status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; configuration and MCP policy wired; agent execution not implemented"});
 });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
