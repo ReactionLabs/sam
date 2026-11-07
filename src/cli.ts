@@ -2,6 +2,8 @@
 import { Command } from "commander";
 import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
+import { OfflineMissionRunner } from "./offline-runner.js";
+import { LocalEchoAdapter } from "./execution.js";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
@@ -71,6 +73,18 @@ task.command("list").argument("<mission>").action((code:string)=>{
     if(!mission)throw new Error("Mission not found: "+code);
     return tasks.list(mission.id);
   }));
+});
+task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network").action(async(code:string)=>{
+  const missions=store(), db=new Database(dbPath());
+  db.pragma("foreign_keys = ON");
+  try {
+    const m=missionOrThrow(missions,code);
+    const result=await new OfflineMissionRunner(db).runOne(m.id,"local-echo-worker",new LocalEchoAdapter());
+    output(result??{status:"NO_ELIGIBLE_TASK"});
+  } finally {db.close();missions.close();}
+});
+task.command("result").argument("<task-id>").description("Inspect persisted verified offline evidence").action((id:string)=>{
+  output(withDb((db)=>new OfflineMissionRunner(db).result(id)??{status:"NO_RESULT"}));
 });
 const daemon=program.command("daemon").description("Local-only SAM control daemon");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
