@@ -89,3 +89,21 @@ test("mission pause during execution rejects completion and leaves no evidence",
   assert.equal(runner.result(task.id),undefined);
   assert.equal(tasks.list(mission.id)[0].status,"LEASED");
 }));
+
+
+test("mission cancellation during execution rejects completion and stores no evidence",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("cancel during execution");
+  store.transition(mission.code,"PLANNING");
+  store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");
+  store.transition(mission.code,"RUNNING");
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    const evidence=await new LocalEchoAdapter().execute(req);
+    store.transition(mission.code,"CANCELLED");
+    return evidence;
+  }};
+  await assert.rejects(runner.runOne(mission.id,"worker",adapter),/mission no longer running/);
+  assert.equal(runner.result(task.id),undefined);
+  assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+  assert.equal(await runner.runOne(mission.id,"worker",new LocalEchoAdapter()),undefined);
+}));
