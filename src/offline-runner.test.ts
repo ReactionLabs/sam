@@ -56,3 +56,20 @@ test("expired lease cannot persist evidence or mark task complete",fixture(async
   assert.equal(runner.result(task.id),undefined);
   assert.equal(tasks.list(mission.id)[0].lease_owner,"replacement");
 }));
+
+
+test("verified failure persists as FAILED and does not unlock dependent work",fixture(async(_db,store,tasks,runner)=>{
+  const mission=store.create("failure");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const first=tasks.add(mission.id,"first");
+  const dependent=tasks.add(mission.id,"dependent",[first.id]);
+  store.transition(mission.code,"RUNNING");
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    return {...await new LocalEchoAdapter().execute(req),outcome:"FAILED"};
+  }};
+  const result=await runner.runOne(mission.id,"worker",adapter);
+  assert.equal(result?.outcome,"FAILED");
+  assert.equal(runner.result(first.id)?.outcome,"FAILED");
+  assert.equal(tasks.list(mission.id).find(t=>t.id===first.id)?.status,"FAILED");
+  assert.equal(tasks.list(mission.id).find(t=>t.id===dependent.id)?.status,"PENDING");
+  assert.equal(await runner.runOne(mission.id,"worker",new LocalEchoAdapter()),undefined);
+}));
