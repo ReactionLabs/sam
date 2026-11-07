@@ -6,7 +6,7 @@ SAM is an experimental, CLI-first system for turning a goal into a coordinated m
 
 **Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
 
-**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, and local daemon foundations exist; end-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work. Some changes are proposed in open PRs and are not yet on `main`.
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It does not run models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
@@ -27,6 +27,9 @@ node dist/cli.js init
 node dist/cli.js mission create "Audit this repository"
 node dist/cli.js mission list
 node dist/cli.js status
+# For an offline test: create a mission, add a task, transition through
+# PLANNING, READY, RUNNING, then run task run-offline <mission-code>.
+# Inspect its durable evidence with task result <task-id>.
 ```
 
 All state lives in one SQLite database at `.sam/missions.db` in the
@@ -38,6 +41,7 @@ for machine-readable output).
 - **Missions** (`mission create|list|inspect|transition`): a 12-state
   mission state machine with an append-only event history, persisted in
   SQLite (WAL).
+- **Offline execution** (`task run-offline|result`): one deterministic local echo task per invocation, with request-bound SHA-256 evidence and transactional SQLite persistence. This is a test adapter, not a model or tool runner. The CLI requires a RUNNING mission and a valid scheduler lease. No automatic retries or network calls.
 - **Tasks** (`task add|list`): dependency-aware task planning per mission.
   The scheduler core also provides fenced worker leases (generation +
   expiry + heartbeat) so a crashed worker's task can be recovered safely.
@@ -83,8 +87,9 @@ separate processes.
 
 ## Not implemented yet
 
-- Model adapters and operative execution
+- Real model adapters (including MiniMax) and actual operative execution
 - An authenticated MCP client/executor (configuration and the
-  authorization policy are in; no transport is connected)
+  deny-by-default authorization policy are in; no transport is
+  connected and the policy is not yet integrated into one)
 - Owner-authenticated approval decisions
 - Memory curation, deduplication, and automatic skill extraction
