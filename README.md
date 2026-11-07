@@ -3,8 +3,7 @@
 CLI-first agent commander and durable mission runtime.
 
 > Status: early implementation, not production ready. SAM plans, tracks,
-> leases, remembers, and gates work. It does not execute agent work yet:
-> there is no model adapter, MCP server, or tool executor in this build.
+> leases, remembers, and gates work. It can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It does not run models, MCP tools, or real agent work.
 
 ## Quick start
 
@@ -15,6 +14,9 @@ node dist/cli.js init
 node dist/cli.js mission create "Audit this repository"
 node dist/cli.js mission list
 node dist/cli.js status
+# For an offline test: create a mission, add a task, transition through
+# PLANNING, READY, RUNNING, then run task run-offline <mission-code>.
+# Inspect its durable evidence with task result <task-id>.
 ```
 
 All state lives in one SQLite database at `.sam/missions.db` in the
@@ -26,6 +28,7 @@ for machine-readable output).
 - **Missions** (`mission create|list|inspect|transition`): a 12-state
   mission state machine with an append-only event history, persisted in
   SQLite (WAL).
+- **Offline execution** (`task run-offline|result`): one deterministic local echo task per invocation, with request-bound SHA-256 evidence and transactional SQLite persistence. This is a test adapter, not a model or tool runner. The CLI requires a RUNNING mission and a valid scheduler lease. No automatic retries or network calls.
 - **Tasks** (`task add|list`): dependency-aware task planning per mission.
   The scheduler core also provides fenced worker leases (generation +
   expiry + heartbeat) so a crashed worker's task can be recovered safely.
@@ -61,6 +64,6 @@ separate processes.
 
 ## Not implemented yet
 
-- Model adapters, MCP, and operative execution
+- Real model adapters (including MiniMax), authenticated MCP client, deny-by-default tool authorization integration, and actual operative execution
 - Owner-authenticated approval decisions
 - Memory curation, deduplication, and automatic skill extraction

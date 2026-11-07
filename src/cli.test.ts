@@ -26,3 +26,28 @@ test("CLI creates mission and dependency-aware tasks across processes",()=>{
     assert.notEqual(invalid.status,0);
   } finally { rmSync(workspace,{recursive:true,force:true}); }
 });
+
+test("CLI runs one offline task and retrieves durable verified evidence",()=>{
+  const workspace=mkdtempSync(join(tmpdir(),"sam-cli-offline-"));
+  const cli=new URL("./cli.js",import.meta.url).pathname;
+  const run=(...args:string[])=>{
+    const r=spawnSync(process.execPath,[cli,"--workspace",workspace,"--json",...args],{encoding:"utf8"});
+    assert.equal(r.status,0,r.stderr);
+    return JSON.parse(r.stdout);
+  };
+  try {
+    run("init");
+    const m=run("mission","create","offline mission");
+    const t=run("task","add",m.code,"test output");
+    run("mission","transition",m.code,"PLANNING");
+    run("mission","transition",m.code,"READY");
+    run("mission","transition",m.code,"RUNNING");
+    const result=run("task","run-offline",m.code);
+    assert.equal(result.task_id,t.id);
+    assert.equal(result.output,"test output");
+    assert.equal(result.output_sha256.length,64);
+    assert.deepEqual(run("task","result",t.id),result);
+    assert.equal(run("task","list",m.code)[0].status,"SUCCEEDED");
+    assert.equal(run("task","run-offline",m.code).status,"NO_ELIGIBLE_TASK");
+  } finally {rmSync(workspace,{recursive:true,force:true});}
+});
