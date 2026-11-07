@@ -3,6 +3,12 @@ import Database from "better-sqlite3";
 
 export type TaskStatus = "PENDING" | "READY" | "LEASED" | "SUCCEEDED" | "FAILED" | "CANCELLED";
 export interface Task { id:string; mission_id:string; objective:string; status:TaskStatus; lease_owner:string|null; lease_generation:number; lease_expires_at:number|null; attempts:number; created_at:string }
+/** Reject invalid or overflowing timestamps before they can corrupt durable leases. */
+function leaseExpiry(now:number,ttlMs:number):number {
+  if(!Number.isSafeInteger(now)||now<0||!Number.isSafeInteger(ttlMs)||ttlMs<=0||
+     !Number.isSafeInteger(now+ttlMs))throw new Error("Invalid lease timestamp or TTL");
+  return now+ttlMs;
+}
 export class TaskScheduler {
   constructor(private readonly db:Database.Database) {
     this.db.exec(`
@@ -45,7 +51,8 @@ export class TaskScheduler {
     return this.db.prepare("SELECT * FROM tasks WHERE mission_id=? ORDER BY created_at,id").all(missionId) as Task[];
   }
   claim(missionId:string,worker:string,now=Date.now(),ttlMs=30_000):Task|undefined {
-    if(!worker.trim()||ttlMs<=0)throw new Error("Invalid worker or lease TTL");
+    if(!worker.trim())throw new Error("Invalid worker");
+    const expiresAt=leaseExpiry(now,ttlMs);
     return this.db.transaction(()=>{
       const mission=this.db.prepare("SELECT status FROM missions WHERE id=?").get(missionId) as {status:string}|undefined;
       if(mission?.status!=="RUNNING")return undefined;
@@ -62,19 +69,21 @@ export class TaskScheduler {
       this.db.prepare(`
         UPDATE tasks SET status='LEASED', lease_owner=?, lease_generation=lease_generation+1,
         lease_expires_at=?, attempts=attempts+1 WHERE id=?
-      `).run(worker,now+ttlMs,eligible.id);
+      `).run(worker,expiresAt,eligible.id);
       return this.db.prepare("SELECT * FROM tasks WHERE id=?").get(eligible.id) as Task;
     })();
   }
   heartbeat(id:string,worker:string,generation:number,now=Date.now(),ttlMs=30_000):boolean {
-    if(ttlMs<=0)throw new Error("Invalid lease TTL");
+    const expiresAt=leaseExpiry(now,ttlMs);
     const result=this.db.prepare(`
       UPDATE tasks SET lease_expires_at=? WHERE id=? AND status='LEASED'
-      AND lease_owner=? AND lease_generation=? AND lease_expires_at>?
-    `).run(now+ttlMs,id,worker,generation,now);
+      AND lease_owner=? AND lease_generation=? AND lease_expires_at>? AND lease_expires_at<?
+      AND EXISTS (SELECT 1 FROM missions m WHERE m.id=tasks.mission_id AND m.status='RUNNING')
+    `).run(expiresAt,id,worker,generation,now,expiresAt);
     return result.changes===1;
   }
   complete(id:string,worker:string,generation:number,success:boolean,now=Date.now()):boolean {
+    if(!Number.isSafeInteger(now)||now<0)throw new Error("Invalid completion timestamp");
     const result=this.db.prepare(`
       UPDATE tasks SET status=?,lease_owner=NULL,lease_expires_at=NULL WHERE id=?
       AND status='LEASED' AND lease_owner=? AND lease_generation=? AND lease_expires_at>?

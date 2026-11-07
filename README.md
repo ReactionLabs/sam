@@ -1,10 +1,22 @@
 # S.A.M. | Secret Agent Man
 
-CLI-first agent commander and durable mission runtime.
+**A local-first commander for an AI agent workforce.**
 
-> Status: early implementation, not production ready. SAM plans, tracks,
-> leases, remembers, and gates work. It does not execute agent work yet:
-> there is no model adapter, MCP server, or tool executor in this build.
+SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
+
+**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
+
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It does not run models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
+
+**Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
+
+## Follow the build
+
+- [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
+- [Commit history](https://github.com/ReactionLabs/sam/commits/main/) for changes merged into the default branch.
+- [GitHub Actions](https://github.com/ReactionLabs/sam/actions) for available automated checks.
+
+> Public source can be viewed, cloned, and forked. Never commit API keys, tokens, or client credentials.
 
 ## Quick start
 
@@ -15,6 +27,9 @@ node dist/cli.js init
 node dist/cli.js mission create "Audit this repository"
 node dist/cli.js mission list
 node dist/cli.js status
+# For an offline test: create a mission, add a task, transition through
+# PLANNING, READY, RUNNING, then run task run-offline <mission-code>.
+# Inspect its durable evidence with task result <task-id>.
 ```
 
 All state lives in one SQLite database at `.sam/missions.db` in the
@@ -26,6 +41,7 @@ for machine-readable output).
 - **Missions** (`mission create|list|inspect|transition`): a 12-state
   mission state machine with an append-only event history, persisted in
   SQLite (WAL).
+- **Offline execution** (`task run-offline|result`): one deterministic local echo task per invocation, with request-bound SHA-256 evidence and transactional SQLite persistence. This is a test adapter, not a model or tool runner. The CLI requires a RUNNING mission and a valid scheduler lease. No automatic retries or network calls.
 - **Tasks** (`task add|list`): dependency-aware task planning per mission.
   The scheduler core also provides fenced worker leases (generation +
   expiry + heartbeat) so a crashed worker's task can be recovered safely.
@@ -45,6 +61,16 @@ for machine-readable output).
   boundary that is not built yet. See `docs/approval-boundary.md`.
 - **Daemon** (`daemon serve|status|stop`): a single-instance, local-only
   IPC daemon over a workspace Unix socket.
+- **Configuration** (`config show`): environment configuration for the
+  future MiniMax model adapter and Second Shift MCP connection
+  (see `.env.example`). Remote endpoints must be HTTPS, URLs may not
+  carry credentials, and the CLI reports secrets only as present or
+  absent, never their values. `doctor` reports model/MCP readiness.
+- **MCP policy** (`mcp authorize`): a local dry-run of the deny-by-default
+  authorization boundary for a future MCP executor. Exact-match,
+  owner-approved read-only allowlist only: no wildcards, no prefix
+  matching, untrusted servers and duplicate tool names are denied.
+  The command makes no network connection. See `docs/mcp-security.md`.
 
 ## Verify
 
@@ -61,6 +87,9 @@ separate processes.
 
 ## Not implemented yet
 
-- Model adapters, MCP, and operative execution
+- Real model adapters (including MiniMax) and actual operative execution
+- An authenticated MCP client/executor (configuration and the
+  deny-by-default authorization policy are in; no transport is
+  connected and the policy is not yet integrated into one)
 - Owner-authenticated approval decisions
 - Memory curation, deduplication, and automatic skill extraction

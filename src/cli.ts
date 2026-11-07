@@ -2,11 +2,15 @@
 import { Command } from "commander";
 import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
+import { OfflineMissionRunner } from "./offline-runner.js";
+import { LocalEchoAdapter } from "./execution.js";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
+import { parseSamConfig, configReadiness } from "./config.js";
+import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
 import { mkdirSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -71,6 +75,18 @@ task.command("list").argument("<mission>").action((code:string)=>{
     if(!mission)throw new Error("Mission not found: "+code);
     return tasks.list(mission.id);
   }));
+});
+task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network").action(async(code:string)=>{
+  const missions=store(), db=new Database(dbPath());
+  db.pragma("foreign_keys = ON");
+  try {
+    const m=missionOrThrow(missions,code);
+    const result=await new OfflineMissionRunner(db).runOne(m.id,"local-echo-worker",new LocalEchoAdapter());
+    output(result??{status:"NO_ELIGIBLE_TASK"});
+  } finally {db.close();missions.close();}
+});
+task.command("result").argument("<task-id>").description("Inspect persisted verified offline evidence").action((id:string)=>{
+  output(withDb((db)=>new OfflineMissionRunner(db).result(id)??{status:"NO_RESULT"}));
 });
 const daemon=program.command("daemon").description("Local-only SAM control daemon");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
@@ -156,8 +172,34 @@ approval.command("inspect").argument("<id>").action((id:string)=>{
   output(withDb((db)=>{ const a=new ApprovalStore(db).get(id); if(!a) throw new Error("Approval not found: "+id); return a; }));
 });
 
+
+const config=program.command("config").description("Environment configuration and readiness (never prints secret values)");
+config.command("show").description("Show the parsed configuration with secrets reduced to present/absent").action(()=>{
+  const cfg=parseSamConfig(process.env); const ready=configReadiness(cfg);
+  output({
+    modelProvider:cfg.modelProvider, model:cfg.model, minimaxBaseUrl:cfg.minimaxBaseUrl,
+    minimaxApiKey:cfg.minimaxApiKey?"present":"absent",
+    secondShiftMcpUrl:cfg.secondShiftMcpUrl, secondShiftMcpToken:cfg.secondShiftMcpToken?"present":"absent",
+    logLevel:cfg.logLevel, modelReady:ready.modelReady, mcpReady:ready.mcpReady
+  });
+});
+
+const mcp=program.command("mcp").description("MCP authorization policy (dry-run only; no server connection is made)");
+mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-default policy for one tool name, locally")
+  .option("--advertised <tools>","Comma-separated tool names the server advertised")
+  .option("--allow <tools>","Comma-separated owner-approved read-only tool names")
+  .option("--trust-server","Mark the server trusted for this evaluation")
+  .action((tool:string,options:{advertised?:string,allow?:string,trustServer?:boolean})=>{
+    const split=(s?:string)=>s?.split(",").map(x=>x.trim()).filter(Boolean)??[];
+    const advertised=split(options.advertised).map(name=>({name}));
+    const decision=authorizeMcpTool(tool,advertised,new Set(split(options.allow)),!!options.trustServer);
+    output(decision);
+    if(!decision.allowed)process.exitCode=1;
+  });
+
 program.command("doctor").description("Check local runtime prerequisites").action(()=>{
-  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; agent execution not implemented"});
+  const ready=configReadiness(parseSamConfig(process.env));
+  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),modelReady:ready.modelReady,mcpReady:ready.mcpReady,status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; configuration and MCP policy wired; agent execution not implemented"});
 });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
