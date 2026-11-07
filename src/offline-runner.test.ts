@@ -107,3 +107,45 @@ test("mission cancellation during execution rejects completion and stores no evi
   assert.equal(tasks.list(mission.id)[0].status,"LEASED");
   assert.equal(await runner.runOne(mission.id,"worker",new LocalEchoAdapter()),undefined);
 }));
+
+test("injected clock fences completion without consulting wall clock",fixture(async(db,store,tasks)=> {
+  const mission=store.create("clock fence");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+  let time=1_000;
+  const runner=new OfflineMissionRunner(db,()=>time);
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    time=1_010;
+    return {...await new LocalEchoAdapter().execute(req),completedAt:new Date(time).toISOString()};
+  }};
+  const result=await runner.runOne(mission.id,"worker",adapter,1_000,20);
+  assert.equal(result?.task_id,task.id);
+  assert.equal(tasks.list(mission.id)[0].status,"SUCCEEDED");
+}));
+test("expired injected lease rolls back evidence and task completion",fixture(async(db,store,tasks)=> {
+  const mission=store.create("clock expiry");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+  const task=tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+  let time=1_000;
+  const runner=new OfflineMissionRunner(db,()=>time);
+  const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+    time=1_021;
+    return {...await new LocalEchoAdapter().execute(req),completedAt:new Date(time).toISOString()};
+  }};
+  await assert.rejects(runner.runOne(mission.id,"worker",adapter,1_000,20),/Lease expired/);
+  assert.equal(runner.result(task.id),undefined);
+  assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+}));
+test("future or pre-claim evidence timestamps cannot persist",fixture(async(db,store,tasks)=> {
+  for(const timestamp of [999,1_011]){
+    const mission=store.create("invalid evidence time");store.transition(mission.code,"PLANNING");store.transition(mission.code,"READY");
+    const task=tasks.add(mission.id,"echo");store.transition(mission.code,"RUNNING");
+    let time=1_000;
+    const runner=new OfflineMissionRunner(db,()=>time);
+    const adapter:ExecutionAdapter={id:"local-echo-test",async execute(req){
+      time=1_010;
+      return {...await new LocalEchoAdapter().execute(req),completedAt:new Date(timestamp).toISOString()};
+    }};
+    await assert.rejects(runner.runOne(mission.id,"worker",adapter,1_000,20),/outside execution window/);
+    assert.equal(runner.result(task.id),undefined);
+    assert.equal(tasks.list(mission.id)[0].status,"LEASED");
+  }
+}));
