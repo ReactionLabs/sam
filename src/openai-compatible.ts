@@ -63,6 +63,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
         const visible = turn.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
         if (!visible && !turn.tool_calls?.length) throw new Error("Model returned no safe visible content");
         if (/<\/?think>/i.test(visible)) throw new Error("Model returned unsafe reasoning content");
+        if (/(?:<\|tool_call\|>|<\|invoke\b|\]\s*<\]\s*minimax|<tool_call>|<invoke\b|<\/invoke>)/i.test(visible))
+          throw new Error("Model returned raw tool markup instead of a final answer");
         turn.content = visible || null;
       }
       return turn;
