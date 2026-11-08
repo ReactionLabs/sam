@@ -129,6 +129,7 @@ export async function runMemoryToolTurn(
     for (const call of turn.tool_calls) {
       onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
       let result: string;
+      let denied = false;
       try {
         result = call.function.name === "memory_add"
           ? await (async()=>{
@@ -136,6 +137,7 @@ export async function runMemoryToolTurn(
               const proposal=parseMemoryAdd(call.function.arguments);
               const allowed=await approveWrite(proposal);
               if (!allowed) {
+                denied = true;
                 onAudit?.({tool:call.function.name,status:"denied",detail:call.id});
                 return JSON.stringify({saved:false,reason:"Owner denied memory write"});
               }
@@ -145,7 +147,7 @@ export async function runMemoryToolTurn(
           ? executeMemorySearch(dbPath, call.function.arguments)
           : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments)
           : (() => { throw new Error("Workspace tools not authorized"); })();
-        if (!result.includes('"saved":false')) onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
+        if (!denied) onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
       } catch (error) {
         onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
         result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
