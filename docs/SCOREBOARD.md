@@ -1,0 +1,26 @@
+# SAM build scoreboard
+
+Updated: 2026-11-08 UTC. This scoreboard describes the unmerged `feat/sam-model-output-hygiene-20261108` branch, not `main`.
+
+## Verified by owner on Windows
+
+- `npm run build`: passed on earlier `feat/model-conversation-contract` at `c6f47f8`.
+- `npm test`: 55/55 passed on that earlier commit.
+- `memory add observation ... --source owner-test`, `memory list`, and `memory search`: succeeded across separate CLI invocations.
+- `talk --live` with MiniMax: worked but could not access SQLite memory and displayed `<think>` content.
+
+## This sprint: code committed, tests pending
+
+- `src/openai-compatible.ts`: redact complete embedded `<think>` blocks; reject incomplete or reasoning-only content.
+- `src/openai-compatible.test.ts`: mock-provider regression tests for above.
+- `src/memory.ts`: enumerate valid memory kinds in error messages.
+- Test status: **NOT RUN** in the connected GitHub editing environment. No claim of passing CI or live MiniMax verification.
+
+## Next single assignment
+
+Implement a bounded and auditable model-to-memory bridge in `talk --live` using the existing `MemoryStore`, with explicit tool schemas and provenance, verified write/search in different processes, no tool authority from memory content, no false success reporting, and no unrestricted shell. Add Windows integration tests and documentation. Then add read-only discovery of standard `SKILL.md` from `.agents/skills` and `skills` with path and symlink controls.
+
+## Longer roadmap (not implemented)
+
+- Skills discovery/install/use/create/update and Agent Reach adapter.
+- Authorized filesystem reading, approved shell actions, durable missions, dashboard, and Obsidian/Blender integrations.
