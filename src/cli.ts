@@ -70,14 +70,17 @@ edits.command("propose").requiredOption("--path <relative>","Existing workspace 
 edits.command("suggest").requiredOption("--path <relative>","Existing workspace source file")
   .requiredOption("--instruction <text>","Requested edit (max 2000 characters)")
   .option("--model <id>","Model ID")
+  .option("--timeout <seconds>","Model request timeout, 5 to 120 seconds","90")
   .requiredOption("--live","Explicitly permit a model API request (may incur charges)")
-  .action(async(options:{path:string;instruction:string;model?:string;live:boolean})=>{
+  .action(async(options:{path:string;instruction:string;model?:string;live:boolean;timeout:string})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
     const model=options.model??process.env.SAM_MODEL;
     if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
     const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
-    const provider=new OpenAICompatibleProvider(endpoint,key);
+    const seconds=Number(options.timeout);
+    if(!Number.isInteger(seconds) || seconds<5 || seconds>120) throw new Error("Timeout must be 5 to 120 seconds");
+    const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
     output(await proposeModelEdit(program.opts().workspace,options.path,options.instruction,model,provider));
   });
 edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
