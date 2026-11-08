@@ -71,7 +71,7 @@ test("AI reviewer preserves critical security findings and cannot approve an edi
     });
     assert.equal(result.ai.verdict,"CONCERNS");
     assert.equal(result.ai.findings[0].severity,"BLOCKER");
-    assert.match(result.diff,/\\+  return true;/);
+    assert.ok(result.diff.includes("+  return true;"));
     assert.equal(readFileSync(file,"utf8"),original);
     assert.match(result.approval,/advisory only/);
   } finally {rmSync(root,{recursive:true,force:true});}
