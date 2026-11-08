@@ -33,3 +33,21 @@ test("memory write tool is rejected unless opt-in",()=>{
   assert.throws(()=>validateToolTurn(turn,false,false),/Unsupported/);
   assert.equal(validateToolTurn(turn,false,true).tool_calls?.length,1);
 });
+
+test("owner denial emits denied audit without completed and returns explicit failure evidence",async()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-memory-audit-")),db=join(root,"memory.db");
+  try{
+    let calls=0;
+    const audit:Array<{tool:string;status:string;detail:string}>=[];
+    const replies:string[]=[];
+    const response=await runMemoryToolTurn(async(messages)=>{
+      if(++calls===1)return {content:null,tool_calls:[{id:"deny1",type:"function" as const,function:{name:"memory_add",arguments:JSON.stringify({kind:"decision",content:"never persist this marker",source:"owner-test"})}}]};
+      replies.push(JSON.stringify(messages));
+      return {content:"I did not save the memory."};
+    },[{role:"user",content:"Remember this"}],db,e=>audit.push(e),undefined,undefined,async()=>false);
+    assert.match(response,/did not save/);
+    assert.deepEqual(audit.map(e=>e.status),["requested","denied"]);
+    assert.equal(JSON.parse((JSON.parse(replies[0]) as Array<{role:string;content:string}>).find(m=>m.role==="tool")!.content).saved,false);
+    assert.match(executeMemorySearch(db,JSON.stringify({query:"marker"})),/"records":\\[\\]/);
+  }finally{rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
+});

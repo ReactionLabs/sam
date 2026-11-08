@@ -69,3 +69,25 @@ test("model can inspect across multiple bounded tool rounds", async () => {
     assert.equal(turns,3);
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
+
+test("owner-denied memory write is audited as denied, not completed, and persists nothing", async () => {
+  const dir=mkdtempSync(join(tmpdir(),"sam-denied-"));
+  const db=join(dir,"memory.db");
+  const audit:string[]=[];
+  let turns=0;
+  try {
+    const result=await runMemoryToolTurn(async (messages:ToolMessage[]):Promise<ToolTurn>=>{
+      turns++;
+      if(turns===1)return {content:null,tool_calls:[{id:"write_1",type:"function",function:{
+        name:"memory_add",arguments:JSON.stringify({kind:"observation",content:"Harmless denied fact",source:"test"})
+      }}]};
+      assert.match(messages.at(-1)?.content??"",/Owner denied memory write/);
+      return {content:"Not saved"};
+    },[{role:"user",content:"Remember this"}],db,event=>audit.push(event.status),undefined,undefined,async()=>false);
+    assert.equal(result,"Not saved");
+    assert.deepEqual(audit,["requested","denied"]);
+    const reopened=new MemoryStore(db);
+    try {assert.equal(reopened.search("Harmless").length,0);}
+    finally {reopened.close();}
+  } finally {rmSync(dir,{recursive:true,force:true});}
+});

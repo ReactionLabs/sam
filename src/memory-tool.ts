@@ -108,7 +108,7 @@ export type ToolMessage = Message | { role: "tool"; tool_call_id: string; conten
 export async function runMemoryToolTurn(
   request: (messages: ToolMessage[], toolsEnabled: boolean) => Promise<ToolTurn>,
   messages: Message[], dbPath: string,
-  onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed"; detail: string }) => void,
+  onAudit?: (event: { tool: string; status: "requested" | "completed" | "denied" | "failed"; detail: string }) => void,
   workspace?: string,
   checkpoint?: (round: number, calls: number) => void,
   approveWrite?: (proposal:{kind:string;content:string;source:string})=>Promise<boolean>
@@ -129,19 +129,25 @@ export async function runMemoryToolTurn(
     for (const call of turn.tool_calls) {
       onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
       let result: string;
+      let denied = false;
       try {
         result = call.function.name === "memory_add"
           ? await (async()=>{
               if(!approveWrite) throw new Error("Memory write not authorized");
               const proposal=parseMemoryAdd(call.function.arguments);
               const allowed=await approveWrite(proposal);
-              return allowed?executeApprovedMemoryAdd(dbPath,call.function.arguments):JSON.stringify({saved:false,reason:"Owner denied memory write"});
+              if (!allowed) {
+                denied = true;
+                onAudit?.({tool:call.function.name,status:"denied",detail:call.id});
+                return JSON.stringify({saved:false,reason:"Owner denied memory write"});
+              }
+              return executeApprovedMemoryAdd(dbPath,call.function.arguments);
             })()
           : call.function.name === "memory_search"
           ? executeMemorySearch(dbPath, call.function.arguments)
           : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments)
           : (() => { throw new Error("Workspace tools not authorized"); })();
-        onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
+        if (!denied) onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
       } catch (error) {
         onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
         result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
