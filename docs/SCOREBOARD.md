@@ -39,3 +39,11 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Added `skills find <query>` for case-insensitive matching of all query terms against name and description, without executing skill instructions.
 - Added tests for matching, no matches, and invalid blank queries.
 - GitHub CI for prior commit `723c364` passed (SAM CI run 42507066587). **The new search commit is awaiting its own CI result.**
+
+## Read-only live memory recall slice (2026-11-08, unmerged)
+
+- Added `talk --live --with-memory` to include bounded, provenance-labeled, untrusted SQLite memory records in model context with explicit user opt-in.
+- Added tests for cross-instance persistence, provenance, and empty memory.
+- No model memory write/search tool calls yet, and no automatic memory retrieval without owner opt-in.
+- **Validation pending on new commit.** Prior owner Windows build passed 58/58 tests on the skill discovery branch, before this feature.
+- Next: typed model-to-memory tool bridge, permission checks, bounded tool loops, and durable audit.
