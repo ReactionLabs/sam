@@ -10,6 +10,12 @@ SAM is an experimental, CLI-first system for turning a goal into a coordinated m
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
+## Current sprint: model output hygiene (PR pending, unmerged)
+
+This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compatible model responses, rejects unterminated/reasoning-only replies, and makes invalid memory-kind errors actionable. Automated test coverage was added but has **not yet been run in this GitHub-only build environment**. Run `npm run build && npm test` on Windows before merging. This does **not** connect the model to SQLite memory or implement skills.
+
+**Next implementation:** bounded model-to-memory tool bridge, then local `SKILL.md` discovery from `.agents/skills/` with permissioned invocation. See [build scoreboard](docs/SCOREBOARD.md).
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
