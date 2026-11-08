@@ -18,3 +18,20 @@ test("untrusted provider output is validated", async () => {
   const bad:ModelProvider = {id:"bad",async complete(){return {provider:"bad",model:"x",message:{role:"assistant",content:""}};}};
   await assert.rejects(converse(bad,{model:"x",messages:[{role:"user",content:"hi"}]}));
 });
+
+test("malformed provider responses are rejected safely", async () => {
+  const request = {model:"x",messages:[{role:"user" as const,content:"hi"}]};
+  for (const payload of [null, {}, {provider:"bad",model:"x",message:null},
+    {provider:"bad",model:"x",message:{role:"assistant",content:42}},
+    {provider:"bad",model:"x",message:{role:"assistant",content:"x".repeat(100_001)}}]) {
+    const provider:ModelProvider = {id:"bad",async complete(){return payload as any;}};
+    await assert.rejects(converse(provider,request),/invalid response/);
+  }
+});
+test("malformed conversation inputs are rejected", async () => {
+  const provider = new FakeModelProvider();
+  for (const request of [null, {model:null,messages:[]}, {model:"x",messages:null},
+    {model:"x",messages:[null]}]) {
+    await assert.rejects(converse(provider,request as any));
+  }
+});
