@@ -26,7 +26,7 @@ export class ChatStore {
   list():ChatRecord[]{return this.db.prepare("SELECT * FROM chats ORDER BY updated_at DESC LIMIT 200").all() as ChatRecord[];}
   messages(id:string):ChatMessage[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
-    return this.db.prepare("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY created_at,id LIMIT 500").all(id) as ChatMessage[];
+    return this.db.prepare("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY rowid LIMIT 500").all(id) as ChatMessage[];
   }
   add(id:string,role:"user"|"assistant",content:string):ChatMessage {
     if(!["user","assistant"].includes(role)||!content.trim()||content.length>20000)throw new Error("Invalid chat message");
