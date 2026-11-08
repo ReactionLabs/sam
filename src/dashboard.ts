@@ -5,6 +5,7 @@ import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { discoverSkills } from "./skills.js";
+import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -78,6 +79,27 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     if(req.method==="POST"&&req.url===route+"/config"){
       try{json(200,saveDashboardConfig(workspace,await post()));}catch{json(400,{error:"Invalid configuration"});}return;
     }
+    if(req.method==="POST"&&req.url===route+"/connectors"){
+      try{const b=await post();if(typeof b.name!=="string"||typeof b.url!=="string"||typeof b.tokenEnv!=="string")throw Error("Invalid connector");
+        json(201,addConnector(workspace,b.name,b.url,b.tokenEnv));
+      }catch(e){json(400,{error:e instanceof Error?e.message:"Invalid connector"});}return;
+    }
+    const connectorRoute=req.url?.match(new RegExp("^/api/"+token+"/connectors/([0-9a-f-]{36})/(test|read|delete)$"));
+    if(connectorRoute&&req.method==="POST"){
+      try{await post();const id=connectorRoute[1],action=connectorRoute[2];
+        if(action==="delete"){json(removeConnector(workspace,id)?200:404,{ok:true});return;}
+        const c=getConnector(workspace,id);
+        if(action==="test"){json(200,await testConnector(c));return;}
+        const b=await Promise.resolve({}); // read parameters are intentionally fixed for this first slice
+        void b;
+        const tools=await testConnector(c);
+        if(!tools.approved.includes("whoami")||!tools.approved.includes("pipeline_summary")||!tools.approved.includes("list_leads"))throw Error("Required read tools unavailable");
+        const identity=await readConnectorTool(c,"whoami");
+        const summary=await readConnectorTool(c,"pipeline_summary");
+        const leads=await readConnectorTool(c,"list_leads",{limit:10});
+        json(200,{identity,summary,leads});
+      }catch(e){const m=e instanceof Error?e.message:"Connector request failed";json(400,{error:m.startsWith("MCP ")||m.startsWith("Connector ")||m.startsWith("Required ")||m.startsWith("Tool ") ?m:"Connector request failed"});}return;
+    }
     const branchMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/branch$"));
     if(req.method==="POST"&&branchMatch){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
@@ -128,7 +150,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const raw=readFileSync(audit,"utf8");
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }
