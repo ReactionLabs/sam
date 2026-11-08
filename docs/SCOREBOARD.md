@@ -36,6 +36,14 @@ Acceptance criteria:
 
 Dependencies: inspect current live-model branch and open PRs #19-#21, then implement on correct base. No merge without owner approval.
 
+## Autonomous mission loop acceptance gate
+
+After live chat and scoped tools work, build a durable worker independent of browser sessions. Persist mission queue, leases/checkpoints, bounded steps/time/token budgets, approval pauses, cancellation and recovery. Every step must append to a persistent outbox/activity feed. Acceptance: enqueue via chat, close browser, observe continued progress, reopen to see events, restart daemon and verify recovery. Running machine is required. **Status: planned, not tested.**
+
+## Desktop application adapter acceptance gate
+
+Prefer documented native APIs and CLI before GUI automation. First target: Blender discovery/version check, bounded `blender --background --python` execution, create low-poly mesh/materials, save editable `.blend`, export `.glb`, render `.png`, inspect and verify artifacts, then document a reusable `SKILL.md` with evidence. Blender installation and any new dependencies require owner approval. GUI automation is a later, separately permissioned capability. **Status: planned, not tested.**
+
 ## Roadmap after this milestone
 
 - Local-first Control Center: main chat, sidechats, agents/teams, missions, approvals and settings.
@@ -50,6 +58,6 @@ Dependencies: inspect current live-model branch and open PRs #19-#21, then imple
 
 | Date | Outcome | Verification | Next |
 | --- | --- | --- | --- |
-| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. No runtime feature claimed. | GitHub source review only; no local build or tests. | Live-chat memory tool integration. |
+| 2026-11-08 10:38 ET | Rechecked main README, latest main commit, open PRs and existing scoreboard PR #23. Added explicit mission-loop and Blender acceptance gates to the existing review branch; no runtime code changed. | GitHub source inspection only; no build/tests run. | Live-chat memory tools on canonical model branch. |\n| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. No runtime feature claimed. | GitHub source review only; no local build or tests. | Live-chat memory tool integration. |
 
 **Rule:** Never confuse a PR, a local build, or a plan with shipped default-branch behavior. No forced commit quota. Record blockers and no-change cycles honestly.
