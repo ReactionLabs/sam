@@ -12,6 +12,7 @@ import { inspectGitWorkspace } from "./git-inspection.js";
 import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
 import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
+import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -107,6 +108,14 @@ edits.command("reject").argument("<id>").description("Discard proposal without m
 edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
   .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
   .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
+const testRuns=program.command("run").description("Explicitly approved local build/test only; executes trusted project code without OS sandbox");
+testRuns.command("request").requiredOption("--kind <build-or-test>","build or test")
+  .action((options:{kind:string})=>output(requestTestRun(program.opts().workspace,options.kind)));
+testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
+  .requiredOption("--confirm <sha256>","Exact digest from run request")
+  .option("--timeout <ms>","Timeout from 1000 to 120000 milliseconds","30000")
+  .action(async(options:{id:string;confirm:string;timeout:string})=>
+    output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
