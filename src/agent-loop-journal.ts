@@ -76,6 +76,12 @@ export class AgentLoopJournal {
     return this.db.prepare("SELECT seq,event,detail,at FROM agent_loop_events WHERE loop_id=? ORDER BY seq")
       .all(id) as {seq:number;event:string;detail:string;at:string}[];
   }
+  list(limit = 20): LoopRecord[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
+      throw new Error("Invalid loop list limit");
+    return this.db.prepare("SELECT * FROM agent_loops ORDER BY created_at DESC, rowid DESC LIMIT ?")
+      .all(limit) as LoopRecord[];
+  }
   /** On restart, old running loops become interrupted. Never replay tool calls automatically. */
   interruptOrphans(): number {
     return this.db.prepare(`UPDATE agent_loops SET state='interrupted',
