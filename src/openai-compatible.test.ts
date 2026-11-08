@@ -35,3 +35,24 @@ test("model transport rejects insecure remote endpoints and missing credentials"
   const provider = new OpenAICompatibleProvider("https://example.com/v1/chat/completions", "");
   await assert.rejects(converse(provider, { model: "x", messages: [{ role: "user", content: "hi" }] }), /requires an API key/);
 });
+
+test("provider hides embedded reasoning and rejects reasoning-only replies", async () => {
+  let body = "<think>private planning</think>Visible answer";
+  const server = createServer((_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: body } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const request = { model: "mock", messages: [{ role: "user" as const, content: "hi" }] };
+    assert.equal((await converse(provider, request)).message.content, "Visible answer");
+    body = "<think>private planning</think>";
+    await assert.rejects(converse(provider, request), /no safe visible content/);
+    body = "<think>unterminated private planning";
+    await assert.rejects(converse(provider, request), /unterminated reasoning/);
+  } finally { server.close(); await once(server, "close"); }
+});
