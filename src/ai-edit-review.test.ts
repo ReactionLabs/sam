@@ -53,3 +53,26 @@ test("AI reviewer refuses stale proposals without contacting model",async()=>{
     }),/stale/);
   } finally {rmSync(root,{recursive:true,force:true});}
 });
+
+test("AI reviewer preserves critical security findings and cannot approve an edit",async()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-ai-security-"));
+  try {
+    const file=join(root,"auth.ts");
+    const original="export function canAccess(isAdmin: boolean): boolean {\\n  return isAdmin;\\n}\\n".replace(/\\n/g,"\n");
+    const unsafe="export function canAccess(isAdmin: boolean): boolean {\\n  return true;\\n}\\n".replace(/\\n/g,"\n");
+    writeFileSync(file,original);
+    const proposal=proposeEdit(root,"auth.ts",unsafe);
+    const result=await reviewEditWithAi(root,proposal.id,"mock",{
+      async complete(){return {message:{content:JSON.stringify({
+        verdict:"CONCERNS",
+        summary:"Authorization bypass introduced",
+        findings:[{severity:"BLOCKER",detail:"Access check now always allows requests",evidence:"return isAdmin changed to return true"}]
+      })}};}
+    });
+    assert.equal(result.ai.verdict,"CONCERNS");
+    assert.equal(result.ai.findings[0].severity,"BLOCKER");
+    assert.match(result.diff,/\\+  return true;/);
+    assert.equal(readFileSync(file,"utf8"),original);
+    assert.match(result.approval,/advisory only/);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
