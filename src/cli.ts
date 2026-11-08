@@ -9,7 +9,8 @@ import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { withIdentity } from "./identity.js";
 import { inspectDirectory } from "./local-inspection.js";
 import { inspectGitWorkspace } from "./git-inspection.js";
-import { proposeEdit, applyEdit } from "./file-edits.js";
+import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
+import { reviewEdit } from "./edit-review.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -83,6 +84,10 @@ edits.command("suggest").requiredOption("--path <relative>","Existing workspace 
     const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
     output(await proposeModelEdit(program.opts().workspace,options.path,options.instruction,model,provider));
   });
+edits.command("review").argument("<id>").description("Review bounded diff and deterministic findings; never writes target")
+  .action((id:string)=>output(reviewEdit(program.opts().workspace,id)));
+edits.command("reject").argument("<id>").description("Discard proposal without modifying target")
+  .action((id:string)=>output(rejectEdit(program.opts().workspace,id)));
 edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
   .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
   .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
