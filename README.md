@@ -30,6 +30,14 @@ Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI
 
 Run `node dist/cli.js talk --live --workspace-tools` to opt in to model-selected `list_directory`, `read_file`, `search_files` and `memory_search`. The workspace is the CLI's configured `--workspace` root. File reads are capped at 32KB, search is shallow and bounded, and hidden paths, .env, .git, .sam, node_modules, key files and symlinks are blocked. Tool results are untrusted content and may be sent to the configured model provider. No writes, command execution or Git modifications are granted. Windows and live model verification pending.
 
+## Local dashboard and scheduling (experimental PR branch)
+
+Run `node dist/cli.js dashboard` to start a read-only HTTP dashboard on 127.0.0.1:4317. The terminal prints a randomized local URL. Within `talk --live`, type `/dashboard` to start the same server without leaving chat. Open the printed URL in your browser. The dashboard displays missions, discovered skills, locally stored schedules and a 10-second UI status refresh.
+
+Use `node dist/cli.js schedule add "check repository" --every 60` to store an interval definition, and `node dist/cli.js schedule list` to inspect it. **These schedules are not yet executed.** The dashboard heartbeat is a UI status poll, not an autonomous mission scheduler. A durable single-owner scheduler, real cron expressions, background agent heartbeat and authenticated dashboard controls are upcoming work. Do not expose the dashboard port outside loopback.
+
+Verified on the preceding skill-tools branch: 88 passing tests and live model invocation of `list_skills`. The empty installed-skills list means no local SKILL.md was found. This dashboard branch requires a new build and test run.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
