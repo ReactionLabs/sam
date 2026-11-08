@@ -52,3 +52,9 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 
 - Added `/memory <query>` to `talk --live` for read-only SQLite search, up to ten results, bounded displayed content. No model call or memory write for the slash command.
 - This is NOT model-selected tool calling. Validation on new branch pending; owner verified prior 60/60 tests and live opt-in recall.
+
+## Native model-selected memory search (2026-11-08)
+
+- Added opt-in `talk --live --memory-tools`, OpenAI-compatible `memory_search` tool declaration, bounded one-call router, strict JSON arguments, read-only SQLite results, and terminal audit events.
+- Added offline mock tests for actual SQLite evidence, invalid tools/arguments and bounded call loop.
+- **Not yet validated on Windows or MiniMax live.** No writes, shell, filesystem access, persistent tool audit, or retries.
