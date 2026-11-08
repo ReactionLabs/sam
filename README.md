@@ -24,7 +24,7 @@ During `talk --live`, `/memory <query>` performs a local read-only SQLite FTS se
 
 ## Experimental native model-to-memory tool (unmerged)
 
-Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI-compatible model to request **read-only** `memory_search` against local SQLite. This explicitly sends relevant returned records to the model provider and may incur a second API request. Only one tool call per user turn is allowed; unsupported tool names and invalid arguments are rejected. Console audit lines report requested/completed/failed calls. Model-initiated writes, filesystem access, commands, skill execution, and durable tool audit logs are not implemented. Provider compatibility, Windows build, tests, and live behavior require verification before merge.
+Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI-compatible model to request **read-only** `memory_search` against local SQLite. This explicitly sends relevant returned records to the model provider and may incur a second API request. At most three read-only memory searches per user turn are allowed; unsupported tool names and invalid arguments are rejected. Console audit lines report requested/completed/failed calls. Model-initiated writes, filesystem access, commands, skill execution, and durable tool audit logs are not implemented. Provider compatibility, Windows build, tests, and live behavior require verification before merge.
 
 ## Follow the build
 
