@@ -2,6 +2,8 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { MissionStore } from "./storage.js";
 import { ChatStore } from "./chats.js";
+import { dashboardHtml } from "./dashboard-ui.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { discoverSkills } from "./skills.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -36,14 +38,50 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
-  const server:Server=createServer((req,res)=>{
+  const pending=new Set<string>();
+  const server:Server=createServer(async(req,res)=>{
     res.setHeader("Cache-Control","no-store");
     res.setHeader("X-Content-Type-Options","nosniff");
     res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
     const host=req.headers.host;
     if(host!==`127.0.0.1:${port}` && host!==`localhost:${port}`){res.writeHead(403);res.end();return;}
+    const origin=req.headers.origin;
+    if(origin && origin!==`http://127.0.0.1:${port}` && origin!==`http://localhost:${port}`){res.writeHead(403);res.end();return;}
+    const json=(status:number,data:unknown)=>{res.writeHead(status,{"Content-Type":"application/json"});res.end(JSON.stringify(data));};
+    const post=async()=>{
+      if(req.headers["x-sam-request"]!=="dashboard"||!String(req.headers["content-type"]??"").startsWith("application/json"))throw Error("Invalid dashboard request");
+      let body="";for await(const chunk of req){body+=chunk.toString("utf8");if(body.length>16000)throw Error("Request too large");}
+      const value:unknown=JSON.parse(body);if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid JSON body");return value as Record<string,unknown>;
+    };
+    const route=`/api/${token}`;
+    if(req.method==="POST" && req.url===route+"/chats"){
+      try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid title");const db=new ChatStore(workspace);try{json(201,db.create(body.title));}finally{db.close();}}catch{json(400,{error:"Unable to create chat"});}return;
+    }
+    const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
+    if(match && req.method==="GET" && !match[2]){
+      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+    }
+    if(match && req.method==="POST" && match[2]){
+      const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
+      pending.add(id);
+      try{
+        const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
+        const providerName=process.env.SAM_MODEL_PROVIDER??"";
+        const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+        const model=process.env.SAM_MODEL;
+        if(!endpoint||!model)throw Error("Model not configured");
+        const key=process.env.SAM_MODEL_API_KEY??(providerName==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+        const provider=new OpenAICompatibleProvider(endpoint,key,60000);
+        const db=new ChatStore(workspace);let history;
+        try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");db.add(id,"user",body.content);}finally{db.close();}
+        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. Be accurate about capabilities. You cannot execute tools or spawn agents from this dashboard chat."},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
+        const result=await provider.complete({model,messages});
+        const saved=new ChatStore(workspace);try{saved.add(id,"assistant",result.message.content); }finally{saved.close();}
+        json(200,{reply:result.message});
+      }catch(error){json(400,{error:error instanceof Error && ["Model not configured","Chat history limit reached"].includes(error.message)?error.message:"Message failed. Check model configuration and server logs."});}finally{pending.delete(id);}return;
+    }
     if(req.method!=="GET"){res.writeHead(405);res.end();return;}
-    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(html.replace("'/api/status'","'/api/status/"+token+"'"));return;}
+    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
     if(req.url===`/api/status/${token}`){
       try{
         const store=new MissionStore(join(workspace,".sam","missions.db"));
