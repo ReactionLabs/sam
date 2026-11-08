@@ -26,6 +26,10 @@ During `talk --live`, `/memory <query>` performs a local read-only SQLite FTS se
 
 Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI-compatible model to request **read-only** `memory_search` against local SQLite. This explicitly sends relevant returned records to the model provider and may incur a second API request. At most three read-only memory searches per user turn are allowed; unsupported tool names and invalid arguments are rejected. Console audit lines report requested/completed/failed calls. Model-initiated writes, filesystem access, commands, skill execution, and durable tool audit logs are not implemented. Provider compatibility, Windows build, tests, and live behavior require verification before merge.
 
+## Experimental scoped workspace read tools (unmerged)
+
+Run `node dist/cli.js talk --live --workspace-tools` to opt in to model-selected `list_directory`, `read_file`, `search_files` and `memory_search`. The workspace is the CLI's configured `--workspace` root. File reads are capped at 32KB, search is shallow and bounded, and hidden paths, .env, .git, .sam, node_modules, key files and symlinks are blocked. Tool results are untrusted content and may be sent to the configured model provider. No writes, command execution or Git modifications are granted. Windows and live model verification pending.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
