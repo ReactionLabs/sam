@@ -15,11 +15,11 @@ export interface ModelProvider {
   complete(request: ConversationRequest): Promise<ConversationResponse>;
 }
 export function validateConversation(request: ConversationRequest): void {
-  if (!request.model.trim()) throw new Error("Model is required");
-  if (request.messages.length === 0 || request.messages.length > 100)
+  if (typeof request?.model !== "string" || !request.model.trim()) throw new Error("Model is required");
+  if (!Array.isArray(request.messages) || request.messages.length === 0 || request.messages.length > 100)
     throw new Error("Conversation must contain 1 to 100 messages");
   for (const message of request.messages) {
-    if (!["system", "user", "assistant"].includes(message.role) ||
+    if (!message || !["system", "user", "assistant"].includes(message.role) ||
         typeof message.content !== "string" || !message.content.trim() ||
         message.content.length > 100_000)
       throw new Error("Invalid conversation message");
@@ -39,8 +39,10 @@ export class FakeModelProvider implements ModelProvider {
 export async function converse(provider: ModelProvider, request: ConversationRequest): Promise<ConversationResponse> {
   validateConversation(request);
   const result = await provider.complete(request);
-  if (result.provider !== provider.id || result.model !== request.model ||
-      result.message.role !== "assistant" || !result.message.content.trim())
+  if (!result || result.provider !== provider.id || result.model !== request.model ||
+      !result.message || result.message.role !== "assistant" ||
+      typeof result.message.content !== "string" || !result.message.content.trim() ||
+      result.message.content.length > 100_000)
     throw new Error("Provider returned an invalid response");
   return result;
 }
