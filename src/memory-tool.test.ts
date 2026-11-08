@@ -43,3 +43,14 @@ test("tool router rejects unsupported tools, malformed arguments, and repeated c
   try { await assert.rejects(runMemoryToolTurn(request, [{ role: "user", content: "x" }], join(dir, "db")), /additional tool call/); }
   finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("empty tool_calls array is a valid text-only provider response", () => {
+  assert.deepEqual(validateToolTurn({ content: "No search needed", tool_calls: [] }), { content: "No search needed" });
+});
+
+test("bounded parallel memory calls are accepted but over-limit and duplicate calls rejected", () => {
+  const call = (id: string) => ({ id, type: "function", function: { name: "memory_search", arguments: '{"query":"workspace"}' } });
+  assert.equal(validateToolTurn({ content: null, tool_calls: [call("one"), call("two")] }).tool_calls?.length, 2);
+  assert.throws(() => validateToolTurn({ content: null, tool_calls: [call("a"), call("b"), call("c"), call("d")] }), /At most three/);
+  assert.throws(() => validateToolTurn({ content: null, tool_calls: [call("a"), call("a")] }), /Unsupported or malformed/);
+});
