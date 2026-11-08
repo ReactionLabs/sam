@@ -14,6 +14,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
+import { ChatStore } from "./chats.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -118,6 +119,10 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
+const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
+chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
+chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
+chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
 const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
 schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
 schedules.command("add").argument("<name>").requiredOption("--every <minutes>","Interval in minutes").action((name:string,o:{every:string})=>output(addSchedule(program.opts().workspace,name,Number(o.every))));
