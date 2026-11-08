@@ -39,9 +39,9 @@ test("daemon serves status and stops over workspace-local socket",async()=>{
     }finally{duplicate.kill();}
     assert.equal((await requestDaemon(dir,"ping")).instance,reply?.instance);
     // Malformed or unknown commands must not stop the live daemon.
-    const malformed=JSON.parse((await sendRaw(dir,"not-json\\n")).trim());
+    const malformed=JSON.parse((await sendRaw(dir,"not-json\n")).trim());
     assert.deepEqual(malformed,{ok:false,error:"Invalid request"});
-    const unsupported=JSON.parse((await sendRaw(dir,JSON.stringify({command:"restart"})+"\\n")).trim());
+    const unsupported=JSON.parse((await sendRaw(dir,JSON.stringify({command:"restart"})+"\n")).trim());
     assert.deepEqual(unsupported,{ok:false,error:"Unsupported command"});
     assert.equal((await requestDaemon(dir,"ping")).instance,reply?.instance);
     assert.equal((await requestDaemon(dir,"stop")).ok,true);
