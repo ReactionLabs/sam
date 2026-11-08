@@ -29,7 +29,7 @@ export function validateToolTurn(value: unknown, workspaceTools = false): ToolTu
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model tool response");
   const item = value as Record<string, unknown>;
   const content = item.content;
-  if (content !== null && typeof content !== "string") throw new Error("Invalid tool response content");
+  if (content !== null && content !== undefined && typeof content !== "string") throw new Error("Invalid tool response content");
   if (typeof content === "string" && content.length > 100_000) throw new Error("Tool response content too long");
   if (item.tool_calls === undefined || (Array.isArray(item.tool_calls) && item.tool_calls.length === 0)) {
     if (typeof content !== "string" || !content.trim()) throw new Error("Empty model response");
