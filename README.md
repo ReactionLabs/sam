@@ -37,6 +37,26 @@ All state lives in one SQLite database at `.sam/missions.db` in the
 workspace (override the workspace with `--workspace <path>`; add `--json`
 for machine-readable output).
 
+## North-star milestone: SAM completes one real task on the owner's computer
+
+**Status: NOT YET IMPLEMENTED.** This is the next product milestone, not a claim of current computer control.
+
+**Demonstration:** The owner authorizes one disposable local project folder and asks SAM to inspect it, diagnose a deliberately failing test, propose a fix, request approval for any write or command, execute only the approved operation in an isolated environment, rerun the test, and show the actual diff and results. The owner can deny or cancel at any point.
+
+**Acceptance criteria:**
+
+1. Explicit workspace grant: no ambient filesystem browsing. Reject path traversal, symlink escapes, and sensitive files.
+2. Read-only inspection works first and returns grounded filenames and file contents with bounded output.
+3. Any write, shell command, or coding-agent CLI invocation requires an authenticated, action-bound owner approval. No prompt text can grant permission.
+4. Commands run under a real restricted boundary, not just a working-directory setting; enforce timeouts, output limits, cancellation, and no inherited secrets.
+5. Optionally delegate an approved coding task to a configurable CLI such as Claude Code or Codex; no dependency on any single model or paid provider.
+6. Record requests, approvals, tool actions, outcomes, and test evidence in an audit trail. Report failures without claiming success.
+7. Windows Node 22/24 automated tests cover unauthorized paths, denied commands, stale approvals, cancellation, and a successful disposable-folder end-to-end task.
+
+**Build order:** authorized read-only file tools -> owner-authenticated approval boundary -> sandboxed command runner -> coding CLI adapter -> end-to-end supervised task.
+
+**Definition of done:** A fresh user can reproduce the demo locally from documented setup instructions, see the tests pass, and inspect an honest audit log. Until then, SAM can converse but cannot operate the owner's computer.
+
 ## What is in this build
 
 - **Missions** (`mission create|list|inspect|transition`): a 12-state
