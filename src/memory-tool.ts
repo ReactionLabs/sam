@@ -77,25 +77,36 @@ export async function runMemoryToolTurn(
   workspace?: string
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
-  const first = validateToolTurn(await request(conversation, true), Boolean(workspace));
-  if (!first.tool_calls?.length) return first.content!;
-  conversation.push({ role: "assistant", content: first.content, tool_calls: first.tool_calls });
-  for (const call of first.tool_calls) {
-    onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
-    let result: string;
-    try {
-      result = call.function.name === "memory_search"
-        ? executeMemorySearch(dbPath, call.function.arguments)
-        : workspace ? executeWorkspaceTool(workspace,call.function.name,call.function.arguments)
-        : (()=>{throw new Error("Workspace tools not authorized");})();
-      onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
-    } catch (error) {
-      onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
-      result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
+  // Permit bounded sequential read-only exploration, never unlimited agent loops.
+  const MAX_ROUNDS = 4;
+  const MAX_CALLS = 8;
+  let usedCalls = 0;
+  for (let round = 0; round < MAX_ROUNDS; round++) {
+    const turn = validateToolTurn(await request(conversation, true), Boolean(workspace));
+    if (!turn.tool_calls?.length) return turn.content!;
+    if (usedCalls + turn.tool_calls.length > MAX_CALLS)
+      throw new Error("Read-only tool budget exhausted");
+    usedCalls += turn.tool_calls.length;
+    conversation.push({ role: "assistant", content: turn.content, tool_calls: turn.tool_calls });
+    for (const call of turn.tool_calls) {
+      onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
+      let result: string;
+      try {
+        result = call.function.name === "memory_search"
+          ? executeMemorySearch(dbPath, call.function.arguments)
+          : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments)
+          : (() => { throw new Error("Workspace tools not authorized"); })();
+        onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
+      } catch (error) {
+        onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
+        result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
+      }
+      conversation.push({ role: "tool", tool_call_id: call.id, content: result });
     }
-    conversation.push({ role: "tool", tool_call_id: call.id, content: result });
   }
+  // No more tools may be requested. A provider returning raw tool markup here
+  // is rejected by the transport rather than printed to the user.
   const final = validateToolTurn(await request(conversation, false));
-  if (final.tool_calls?.length) throw new Error("Model attempted an additional tool call");
+  if (final.tool_calls?.length) throw new Error("Model attempted a tool call after the budget");
   return final.content!;
 }
