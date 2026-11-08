@@ -83,3 +83,14 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Integrated with live model tool loop and added CLI inspect/recover operations.
 - No auto-replay or automatic resume. No coding writes or delegated CLI execution.
 - Tests added for persistence, restart, monotonic progress and terminal-state fencing. Windows verification pending.
+
+## 2026-11-08 19:37 UTC: owner-confirmed memory write slice
+
+- Branch: `feat/sam-memory-write-consent-20261108`, stacked on unmerged `feat/sam-review-gate-20261108`.
+- Added opt-in `talk --live --memory-write`, bounded typed `memory_add`, terminal exact-YES confirmation per record, SQLite provenance, and read-after-restart/denial tests.
+- Files: `src/memory-tool.ts`, `src/openai-compatible.ts`, `src/cli.ts`, `src/memory-write.test.ts`.
+- **Status: committed, unmerged, NOT VERIFIED** on Windows, CI or live MiniMax. No approval is granted by model output. No model-driven archive/update/delete.
+- Test commands (PowerShell): `git fetch origin; git switch -c test-sam-memory-write origin/feat/sam-memory-write-consent-20261108; npm run build; npm test`. For opt-in live check: `node dist/cli.js talk --live --memory-tools --memory-write` and explicitly confirm a harmless test memory, then restart and ask model to search it.
+- Next single assignment: validate Node 22/24 build and tests; fix regressions, verify MiniMax actually calls `memory_add` and `memory_search` across separate processes; then document observed evidence and add durable authenticated approvals.
+- Remaining planned: dashboard, durable mission worker, skills invocation, Obsidian, Agent Reach, Blender, webhook gateway, Tailscale, supervised command runner. None verified by this sprint.
+
