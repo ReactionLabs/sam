@@ -59,8 +59,7 @@ for machine-readable output).
   expiring, one-shot approval ledger. The CLI deliberately has **no**
   decide or consume command: deciding requires an owner-authenticated
   boundary that is not built yet. See `docs/approval-boundary.md`.
-- **Daemon** (`daemon serve|status|stop`): a single-instance, local-only
-  IPC daemon over a workspace Unix socket.
+- **Daemon** (`daemon serve|status|stop`): a single-instance, local IPC daemon using a workspace Unix socket on Linux/macOS and a named pipe on Windows. **Security warning:** the daemon's `stop` command is not yet owner-authenticated; the Windows pipe's cross-user access controls have not been verified. Do not expose this as a privileged control plane (see [issue #22](https://github.com/ReactionLabs/sam/issues/22)).
 - **Configuration** (`config show`): environment configuration for the
   future MiniMax model adapter and Second Shift MCP connection
   (see `.env.example`). Remote endpoints must be HTTPS, URLs may not
@@ -78,6 +77,8 @@ for machine-readable output).
 npm run build
 npm test
 ```
+
+CI runs the test suite on Ubuntu and Windows with Node.js 22 and 24. Local Windows verification passed 41/41 tests on Node 22 after the named-pipe fix; new regression tests and CI results must be checked independently.
 
 The test suite covers the state machine, the task scheduler, memory,
 operatives, assignment leases, approvals, the daemon, and an integrated
