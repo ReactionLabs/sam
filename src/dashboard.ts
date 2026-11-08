@@ -84,7 +84,7 @@ function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try
         const provider=new OpenAICompatibleProvider(endpoint,key,60000);
         const db=new ChatStore(workspace);let history;
         try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");db.add(id,"user",body.content);}finally{db.close();}
-        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. Be accurate about capabilities. You cannot execute tools or spawn agents from this dashboard chat."},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
+        const config=readDashboardConfig(workspace);const profiles=chatStoreAgents(workspace);const active=profiles.find(a=>a.name===config.defaultAgent);\n        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. Be accurate about capabilities. You cannot execute tools or spawn agents from this dashboard chat. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
         const result=await provider.complete({model,messages});
         const saved=new ChatStore(workspace);try{saved.add(id,"assistant",result.message.content); }finally{saved.close();}
         json(200,{reply:result.message});
