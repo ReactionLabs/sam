@@ -28,7 +28,7 @@ test("rejects traversal, Windows reserved names, wildcard and malformed IDs", ()
   assert.throws(() => provisionBoxStorage(root, "../owner", "sam"), /Invalid owner ID/);
 }));
 
-test("rejects symlinked state, owner, instance and child directories", () => fixture(root => {
+test("rejects symlinked state, owner, instance and child directories", { skip: process.platform === "win32" ? "Windows symlink creation may require developer mode" : false }, () => fixture(root => {
   const outside = mkdtempSync(join(tmpdir(), "sam-outside-"));
   try {
     symlinkSync(outside, join(root, ".sam"), "dir");
