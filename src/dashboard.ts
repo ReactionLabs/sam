@@ -67,6 +67,13 @@ function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try
     if(req.method==="POST"&&branchMatch){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
     }
+    const editChat=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/(rename|pin)$"));
+    if(req.method==="POST"&&editChat){
+      try{const body=await post();const db=new ChatStore(workspace);try{
+        const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned));
+        if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
+      }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
+    }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
       const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1]),events:db.events(match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
