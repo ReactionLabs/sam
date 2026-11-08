@@ -181,3 +181,7 @@ into chat or a GitHub issue.
 Live `chat --live` and `talk --live` inject a system identity describing SAM's actual abilities and limitations. Optionally create `SOUL.md` in the selected workspace to add local personality instructions (up to 16,000 characters). Do not put API keys or credentials in `SOUL.md`. This does not enable file access, tool execution, persistent chat history, or autonomous agents. The CLI reads this file itself; the model cannot browse your computer.
 
 The scheduled development cycle runs approximately hourly. Each run may produce a tested PR update, but does not guarantee a commit. Unmerged feature branches are not features on `main`.
+
+## Durable agent-loop journal (experimental)
+
+Live `talk --live --workspace-tools` and `--memory-tools` now record each user goal, tool events, round/call counts, and final outcome in workspace-local SQLite. `sam loop inspect <id>` inspects a known loop ID; `sam loop recover` explicitly marks orphaned running loops as interrupted without replaying tools. This is **checkpointing, not automatic resume**. The current loop remains limited to four tool rounds and eight tool calls; the journal is not a grant to execute commands or install skills. New tests and Windows live verification pending.
