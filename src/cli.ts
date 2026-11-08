@@ -13,6 +13,7 @@ import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
 import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
+import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -116,6 +117,10 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .option("--timeout <ms>","Timeout from 1000 to 120000 milliseconds","30000")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
+program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
+const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
+schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
+schedules.command("add").argument("<name>").requiredOption("--every <minutes>","Interval in minutes").action((name:string,o:{every:string})=>output(addSchedule(program.opts().workspace,name,Number(o.every))));
 const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
@@ -222,6 +227,11 @@ program.command("talk").description("Interactive terminal conversation with conf
         let line:string;
         try { line=await rl.question("You > "); } catch { break; }
         if (line.trim()==="/exit" || line.trim()==="/quit") break;
+        if (line.trim()==="/dashboard") {
+          console.log("SAM > Starting localhost dashboard. Open the URL printed below.");
+          void serveDashboard(program.opts().workspace).catch(e=>console.error("SAM dashboard:",e instanceof Error?e.message:"Unavailable"));
+          continue;
+        }
         if (!line.trim()) continue;
         if (line.trim().startsWith("/memory ")) {
           const query=line.trim().slice("/memory ".length).trim();
