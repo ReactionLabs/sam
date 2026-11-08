@@ -61,7 +61,10 @@ export async function executeApprovedTestRun(root:string,id:string,confirmedDige
   const start=Date.now();
   const result=await new Promise<{exitCode:number|null;signal:string|null;timedOut:boolean;output:string;truncated:boolean;error?:string}>(done=>{
     let output="",truncated=false,timedOut=false,settled=false;
-    // Node marks test workers with NODE_TEST_CONTEXT. Never propagate that marker\n    // to a new top-level test runner or it may skip every test and exit 0.\n    const env={...process.env,CI:"true"};\n    delete env.NODE_TEST_CONTEXT;\n    const child=spawn(process.execPath,args,{cwd:resolved,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"],env});
+    // Do not propagate Node's test-worker marker to a new test runner.
+    const env={...process.env,CI:"true"};
+    delete env.NODE_TEST_CONTEXT;
+    const child=spawn(process.execPath,args,{cwd:resolved,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"],env});
     const collect=(chunk:Buffer)=>{
       const str=chunk.toString("utf8");
       const remaining=16000-output.length;
