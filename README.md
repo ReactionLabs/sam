@@ -22,6 +22,10 @@ This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compa
 
 During `talk --live`, `/memory <query>` performs a local read-only SQLite FTS search and prints up to ten bounded records. It makes no model request and does not automatically insert results into model context. This is a stepping stone toward actual model tool calls, not an autonomous search tool.
 
+## Experimental native model-to-memory tool (unmerged)
+
+Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI-compatible model to request **read-only** `memory_search` against local SQLite. This explicitly sends relevant returned records to the model provider and may incur a second API request. Only one tool call per user turn is allowed; unsupported tool names and invalid arguments are rejected. Console audit lines report requested/completed/failed calls. Model-initiated writes, filesystem access, commands, skill execution, and durable tool audit logs are not implemented. Provider compatibility, Windows build, tests, and live behavior require verification before merge.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
