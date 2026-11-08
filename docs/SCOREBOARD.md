@@ -76,13 +76,11 @@ Prefer documented native APIs and CLI before GUI automation. First target: Blend
 
 ## Sprint history
 
-| 2026-11-08 12:42 ET | Inspected main CLI/memory/README and existing scoreboard branch. Added concrete Agent Skills/Agent Reach acceptance gate and corrected malformed sprint-history row; no runtime code changed. | GitHub source inspection only; build/tests not run. | Integrate live MiniMax model with bounded, audited memory tool dispatcher on the correct model branch. |
-
-
-
 | Date | Outcome | Verification | Next |
-| 2026-11-08 11:43 ET | Inspected main, open PRs and existing scoreboard. Added Obsidian vault integration acceptance gate and corrected sprint table formatting on review branch; no runtime change. | GitHub source inspection; no local build/tests. | Wire live-chat memory tools and cross-process verification. |
-| 2026-11-08 10:38 ET | Rechecked main README, latest main commit, open PRs and existing scoreboard PR #23. Added explicit mission-loop and Blender acceptance gates to the existing review branch; no runtime code changed. | GitHub source inspection only; no build/tests run. | Live-chat memory tools on canonical model branch. |
-| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. No runtime feature claimed. | GitHub source review only; no local build or tests. | Live-chat memory tool integration. |
+| --- | --- | --- | --- |
+| 2026-11-08 12:42 ET | Inspected main CLI/memory/README and scoreboard branch. Added Agent Skills/Agent Reach acceptance gate and repaired history table; no runtime code changed. | GitHub source inspection only; build/tests not run. | Integrate live MiniMax with bounded audited memory tools on the correct model branch. |
+| 2026-11-08 11:43 ET | Inspected main, open PRs and scoreboard. Added Obsidian acceptance gate; no runtime change. | GitHub source inspection only; no local build/tests. | Wire live-chat memory tools. |
+| 2026-11-08 10:38 ET | Rechecked main README, open PRs and scoreboard PR #23. Added mission-loop and Blender gates; no runtime change. | GitHub source inspection only. | Live-chat memory tools on canonical model branch. |
+| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. | GitHub source review only. | Live-chat memory tool integration. |
 
 **Rule:** Never confuse a PR, a local build, or a plan with shipped default-branch behavior. No forced commit quota. Record blockers and no-change cycles honestly.
