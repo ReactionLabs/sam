@@ -10,6 +10,7 @@ import { withIdentity } from "./identity.js";
 import { inspectDirectory } from "./local-inspection.js";
 import { inspectGitWorkspace } from "./git-inspection.js";
 import { proposeEdit, applyEdit } from "./file-edits.js";
+import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -66,6 +67,19 @@ const edits=program.command("edit").description("Explicit human-reviewed file re
 edits.command("propose").requiredOption("--path <relative>","Existing workspace file")
   .requiredOption("--from <file>","Local UTF-8 replacement content file")
   .action((options:{path:string;from:string})=>output(proposeEdit(program.opts().workspace,options.path,readFileSync(options.from,"utf8"))));
+edits.command("suggest").requiredOption("--path <relative>","Existing workspace source file")
+  .requiredOption("--instruction <text>","Requested edit (max 2000 characters)")
+  .option("--model <id>","Model ID")
+  .requiredOption("--live","Explicitly permit a model API request (may incur charges)")
+  .action(async(options:{path:string;instruction:string;model?:string;live:boolean})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_MODEL;
+    if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const provider=new OpenAICompatibleProvider(endpoint,key);
+    output(await proposeModelEdit(program.opts().workspace,options.path,options.instruction,model,provider));
+  });
 edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
   .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
   .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
