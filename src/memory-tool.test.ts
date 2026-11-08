@@ -76,3 +76,28 @@ test("OpenAI-compatible tool-call response may omit content but not on final ans
  assert.throws(()=>validateToolTurn({}),/Empty model response/);
  assert.throws(()=>validateToolTurn({content:42,tool_calls:[call]},true),/Invalid tool response content/);
 });
+
+test("tool call budget returns a grounded final response without executing excess calls",async()=>{
+ const dir=mkdtempSync(join(tmpdir(),"sam-budget-"));
+ try{
+  let requests=0;
+  let finalSeen=false;
+  const request=async(messages:ToolMessage[],enabled:boolean):Promise<ToolTurn>=>{
+   requests++;
+   if(!enabled){
+    finalSeen=true;
+    assert.ok(messages.some(m=>m.role==="tool"&&m.content.includes("Tool budget exhausted")));
+    return {content:"Partial findings; inspection limit reached."};
+   }
+   return {content:null,tool_calls:[
+    {id:"tool_"+requests+"_a",type:"function",function:{name:"read_file",arguments:'{"path":"missing.txt"}'}},
+    {id:"tool_"+requests+"_b",type:"function",function:{name:"read_file",arguments:'{"path":"missing2.txt"}'}},
+    {id:"tool_"+requests+"_c",type:"function",function:{name:"read_file",arguments:'{"path":"missing3.txt"}'}}
+   ]};
+  };
+  const answer=await runMemoryToolTurn(request,[{role:"user",content:"Inspect"}],join(dir,"memory.db"),undefined,dir);
+  assert.equal(answer,"Partial findings; inspection limit reached.");
+  assert.equal(finalSeen,true);
+  assert.equal(requests,4);
+ }finally{rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
+});
