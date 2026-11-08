@@ -13,6 +13,7 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
+import { recallMemory } from "./memory-recall.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
@@ -124,7 +125,8 @@ program.command("chat").description("Offline smoke test by default; --live expli
 program.command("talk").description("Interactive terminal conversation with configured model; explicit network opt-in required")
   .requiredOption("--live","Allow model API requests (may incur provider charges)")
   .option("--model <id>","Model ID")
-  .action(async(options:{live:boolean,model?:string})=>{
+  .option("--with-memory","Explicitly include recent workspace memory records in model context")
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
       (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
@@ -143,7 +145,10 @@ program.command("talk").description("Interactive terminal conversation with conf
         if (!line.trim()) continue;
         const proposed=[...messages,{role:"user" as const,content:line}];
         try {
-          const reply=await converse(provider,{model,messages:withIdentity(program.opts().workspace,proposed)});
+          const context=withIdentity(program.opts().workspace,proposed);
+          const recalled=options.withMemory?recallMemory(dbPath()):undefined;
+          if(recalled)context.splice(1,0,recalled);
+          const reply=await converse(provider,{model,messages:context});
           console.log("SAM > "+reply.message.content);
           messages.splice(0,messages.length,...proposed,{role:"assistant",content:reply.message.content});
           // Keep bounded in-memory context; no transcript is written to disk.
