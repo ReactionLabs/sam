@@ -55,7 +55,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         let logs:string[]=[];
         if(existsSync(audit)){
           const raw=readFileSync(audit,"utf8");
-          logs=raw.slice(-16000).split("\\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
+          logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
