@@ -94,3 +94,11 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Next single assignment: validate Node 22/24 build and tests; fix regressions, verify MiniMax actually calls `memory_add` and `memory_search` across separate processes; then document observed evidence and add durable authenticated approvals.
 - Remaining planned: dashboard, durable mission worker, skills invocation, Obsidian, Agent Reach, Blender, webhook gateway, Tailscale, supervised command runner. None verified by this sprint.
 
+
+## Owner consent audit correction (2026-11-08, unmerged)
+
+- Branch `fix/sam-memory-consent-audit-20261108`, stacked on `feat/sam-memory-write-consent-20261108` (PR #41).
+- Fixed misleading `tool_completed` audit on explicitly denied `memory_add` proposals; emits `tool_denied` instead, with no SQLite insert.
+- Added regression test checking exact requested/denied audit events and absence of persisted denied content after reopening SQLite.
+- **GitHub changes committed, build/tests/CI and live MiniMax NOT VERIFIED in this run.** No change to owner approval requirements or shell permissions.
+- Next: Windows `npm run build && npm test`; live `talk --live --memory-tools --memory-write` owner-approved write, exit, reopen and search, then denied write audit inspection. Do not merge before verification.
