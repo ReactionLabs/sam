@@ -132,6 +132,7 @@ teams.command("run").requiredOption("--chat <uuid>","Existing chat id").required
  const model=process.env.SAM_MODEL;
  if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
  const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+ if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
  const provider=new OpenAICompatibleProvider(endpoint,key,60000);
  output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined}));
 });
