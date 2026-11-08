@@ -6,7 +6,7 @@ SAM is an experimental, CLI-first system for turning a goal into a coordinated m
 
 **Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
 
-**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It does not run models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It has a provider-neutral text conversation contract and deterministic fake-provider CLI, but does not call real models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
@@ -27,6 +27,7 @@ node dist/cli.js init
 node dist/cli.js mission create "Audit this repository"
 node dist/cli.js mission list
 node dist/cli.js status
+node dist/cli.js chat "hello" # offline fake provider, no network
 # For an offline test: create a mission, add a task, transition through
 # PLANNING, READY, RUNNING, then run task run-offline <mission-code>.
 # Inspect its durable evidence with task result <task-id>.
@@ -84,6 +85,10 @@ operatives, assignment leases, approvals, the daemon, and an integrated
 CLI walk that runs a mission, task, memory record, operative, assignment
 lease, and approval request through one workspace database across
 separate processes.
+
+## Model conversation foundation
+
+The `chat` command exercises a provider-neutral text-only contract using a deterministic fake provider. It makes **no model API calls**, uses no credentials, and does not execute tools. The interface is groundwork for real provider adapters and future mission integration, not a working AI chat product.
 
 ## Not implemented yet
 
