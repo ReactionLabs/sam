@@ -85,8 +85,17 @@ export async function runMemoryToolTurn(
   for (let round = 0; round < MAX_ROUNDS; round++) {
     const turn = validateToolTurn(await request(conversation, true), Boolean(workspace));
     if (!turn.tool_calls?.length) return turn.content!;
-    if (usedCalls + turn.tool_calls.length > MAX_CALLS)
-      throw new Error("Read-only tool budget exhausted");
+    if (usedCalls + turn.tool_calls.length > MAX_CALLS) {
+      onAudit?.({ tool: "tool_budget", status: "failed", detail: "Maximum read-only tool calls reached" });
+      // A requested call is not executed once the budget is exhausted. Return a
+      // matching tool result for each call so the provider can finish cleanly.
+      conversation.push({ role: "assistant", content: turn.content, tool_calls: turn.tool_calls });
+      for (const call of turn.tool_calls) conversation.push({ role: "tool", tool_call_id: call.id,
+        content: JSON.stringify({ error: "Tool budget exhausted. No further tools are permitted; answer using evidence already collected." }) });
+      const final = validateToolTurn(await request([...conversation, { role: "user", content: "Tool budget exhausted. Finish now using only previously returned evidence. State any limitations." }], false));
+      if (final.tool_calls?.length) throw new Error("Model attempted a tool call after the budget");
+      return final.content!;
+    }
     usedCalls += turn.tool_calls.length;
     checkpoint?.(round + 1, usedCalls);
     conversation.push({ role: "assistant", content: turn.content, tool_calls: turn.tool_calls });
