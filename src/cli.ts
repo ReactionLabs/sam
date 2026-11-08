@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
 import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
+import { converse, FakeModelProvider } from "./model-conversation.js";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
@@ -88,6 +89,11 @@ task.command("run-offline").argument("<mission>").description("Execute one task 
 task.command("result").argument("<task-id>").description("Inspect persisted verified offline evidence").action((id:string)=>{
   output(withDb((db)=>new OfflineMissionRunner(db).result(id)??{status:"NO_RESULT"}));
 });
+program.command("chat").description("Offline provider-neutral conversation smoke test (fake provider only)")
+  .argument("<message>").option("--model <id>","Fake model identifier","offline-test")
+  .action(async (message:string, options:{model:string})=>{
+    output(await converse(new FakeModelProvider(),{model:options.model,messages:[{role:"user",content:message}]}));
+  });
 const daemon=program.command("daemon").description("Local-only SAM control daemon");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
   output("SAM daemon listening in workspace "+resolve(program.opts().workspace));
