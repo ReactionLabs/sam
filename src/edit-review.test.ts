@@ -30,3 +30,32 @@ test("review flags stale source",()=>{
     assert.ok(reviewEdit(root,proposal.id).findings.some(x=>x.code==="STALE_SOURCE"));
   } finally {rmSync(root,{recursive:true,force:true});}
 });
+
+test("review isolates a one-line change in a long file",()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-review-"));
+  try {
+    const original=Array.from({length:100},(_,i)=>"line "+i).join("\n")+"\n";
+    writeFileSync(join(root,"long.txt"),original);
+    const replacement=original.replace("line 10\n","line ten\n");
+    const proposal=proposeEdit(root,"long.txt",replacement);
+    const result=reviewEdit(root,proposal.id);
+    assert.equal(result.removedLines,1);
+    assert.equal(result.addedLines,1);
+    assert.equal(result.truncated,false);
+    assert.ok(result.diff.includes("-line 10\n+line ten"));
+    assert.ok(!result.diff.includes("line 50"));
+    assert.ok(!result.findings.some(x=>x.code==="LARGE_CHANGE"));
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+test("review emits separate hunks for distant edits",()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-review-"));
+  try {
+    const original=Array.from({length:70},(_,i)=>"line "+i).join("\n")+"\n";
+    writeFileSync(join(root,"long.txt"),original);
+    const proposal=proposeEdit(root,"long.txt",original.replace("line 4\n","first edit\n").replace("line 60\n","second edit\n"));
+    const result=reviewEdit(root,proposal.id);
+    assert.equal(result.removedLines,2);
+    assert.equal(result.addedLines,2);
+    assert.equal((result.diff.match(/@@/g)??[]).length,4);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
