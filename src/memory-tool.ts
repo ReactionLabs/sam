@@ -25,7 +25,42 @@ export const MEMORY_SEARCH_TOOL = {
   }
 } as const;
 
-export function validateToolTurn(value: unknown, workspaceTools = false): ToolTurn {
+export const MEMORY_ADD_TOOL = {
+  type:"function",
+  function:{
+    name:"memory_add",
+    description:"Propose saving a non-sensitive workspace memory. Each write requires owner confirmation.",
+    parameters:{type:"object",properties:{
+      kind:{type:"string",enum:["observation","decision","failure","procedure"]},
+      content:{type:"string"},
+      source:{type:"string"}
+    },required:["kind","content","source"],additionalProperties:false}
+  }
+} as const;
+
+function parseMemoryAdd(raw:string):{kind:"observation"|"decision"|"failure"|"procedure";content:string;source:string} {
+  let args:unknown;
+  try {args=JSON.parse(raw);} catch {throw new Error("Malformed memory add arguments");}
+  if(!args || typeof args!=="object" || Array.isArray(args)) throw new Error("Invalid memory add arguments");
+  const a=args as Record<string,unknown>;
+  if(Object.keys(a).sort().join(",")!=="content,kind,source" ||
+    typeof a.kind!=="string" || !["observation","decision","failure","procedure"].includes(a.kind) ||
+    typeof a.content!=="string" || !a.content.trim() || a.content.length>1000 || a.content.includes("\0") ||
+    typeof a.source!=="string" || !a.source.trim() || a.source.length>120 || a.source.includes("\0"))
+    throw new Error("Invalid memory add arguments");
+  return a as {kind:"observation"|"decision"|"failure"|"procedure";content:string;source:string};
+}
+
+export function executeApprovedMemoryAdd(path:string,raw:string):string {
+  const a=parseMemoryAdd(raw);
+  const store=new MemoryStore(path);
+  try {
+    const record=store.add({kind:a.kind,content:a.content,source:"model-proposed:"+a.source});
+    return JSON.stringify({saved:true,id:record.id,kind:record.kind,source:record.source,created_at:record.created_at});
+  } finally {store.close();}
+}
+
+export function validateToolTurn(value: unknown, workspaceTools = false, memoryWrite = false): ToolTurn {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model tool response");
   const item = value as Record<string, unknown>;
   const content = item.content;
@@ -41,7 +76,7 @@ export function validateToolTurn(value: unknown, workspaceTools = false): ToolTu
   for (const call of calls) {
     if (!call || call.type !== "function" || typeof call.id !== "string" ||
         !/^[a-zA-Z0-9_-]{1,100}$/.test(call.id) || ids.has(call.id) ||
-        !(call.function?.name === "memory_search" || (workspaceTools && ["list_directory","read_file","search_files"].includes(call.function?.name))) ||
+        !(call.function?.name === "memory_search" || (workspaceTools && ["list_directory","read_file","search_files"].includes(call.function?.name)) || (memoryWrite && call.function?.name === "memory_add")) ||
         typeof call.function.arguments !== "string" || call.function.arguments.length > 1000)
       throw new Error("Unsupported or malformed tool call");
     ids.add(call.id);
@@ -75,7 +110,8 @@ export async function runMemoryToolTurn(
   messages: Message[], dbPath: string,
   onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed"; detail: string }) => void,
   workspace?: string,
-  checkpoint?: (round: number, calls: number) => void
+  checkpoint?: (round: number, calls: number) => void,
+  approveWrite?: (proposal:{kind:string;content:string;source:string})=>Promise<boolean>
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
   // Permit bounded sequential read-only exploration, never unlimited agent loops.
@@ -83,7 +119,7 @@ export async function runMemoryToolTurn(
   const MAX_CALLS = 8;
   let usedCalls = 0;
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    const turn = validateToolTurn(await request(conversation, true), Boolean(workspace));
+    const turn = validateToolTurn(await request(conversation, true), Boolean(workspace),Boolean(approveWrite));
     if (!turn.tool_calls?.length) return turn.content!;
     if (usedCalls + turn.tool_calls.length > MAX_CALLS)
       throw new Error("Read-only tool budget exhausted");
@@ -94,7 +130,14 @@ export async function runMemoryToolTurn(
       onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
       let result: string;
       try {
-        result = call.function.name === "memory_search"
+        result = call.function.name === "memory_add"
+          ? await (async()=>{
+              if(!approveWrite) throw new Error("Memory write not authorized");
+              const proposal=parseMemoryAdd(call.function.arguments);
+              const allowed=await approveWrite(proposal);
+              return allowed?executeApprovedMemoryAdd(dbPath,call.function.arguments):JSON.stringify({saved:false,reason:"Owner denied memory write"});
+            })()
+          : call.function.name === "memory_search"
           ? executeMemorySearch(dbPath, call.function.arguments)
           : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments)
           : (() => { throw new Error("Workspace tools not authorized"); })();
