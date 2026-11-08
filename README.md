@@ -20,6 +20,8 @@ This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compa
 
 `node dist/cli.js talk --live --with-memory` sends up to ten recent workspace SQLite memory records (each truncated to 500 characters, total bounded to 6000 characters) to the configured model as explicitly untrusted context. This requires deliberate opt-in because memory content is sent to the model provider. It reads existing records across CLI restarts, but does **not** let the model search, write, edit, or archive memory. It does not persist conversation transcripts. Tests and live behavior must be verified before merge.
 
+During `talk --live`, `/memory <query>` performs a local read-only SQLite FTS search and prints up to ten bounded records. It makes no model request and does not automatically insert results into model context. This is a stepping stone toward actual model tool calls, not an autonomous search tool.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
