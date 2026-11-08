@@ -1,9 +1,15 @@
 import { createServer, connect, type Server } from "node:net";
 import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 
 export function socketPath(workspace:string):string {
+  if(process.platform==="win32") {
+    // Windows local IPC uses a named pipe, not a filesystem socket.
+    // Hash the canonical workspace path for a stable, non-disclosing pipe name.
+    const key=createHash("sha256").update(resolve(workspace).toLowerCase()).digest("hex").slice(0,32);
+    return `\\\\.\\pipe\\sam-${key}`;
+  }
   return join(resolve(workspace),".sam","daemon.sock");
 }
 export type DaemonReply = {ok:boolean; pid?:number; instance?:string; uptime?:number; error?:string};
@@ -34,7 +40,7 @@ export async function serveDaemon(workspace:string):Promise<void> {
   const path=socketPath(workspace);
   mkdirSync(join(resolve(workspace),".sam"),{recursive:true,mode:0o700});
   // Only remove a stale socket after a failed connection. Never unlink a live daemon.
-  if(existsSync(path)){
+  if(process.platform!=="win32" && existsSync(path)){
     try{await requestDaemon(workspace,"ping");throw new Error("Daemon already running");}
     catch(error){
       if(error instanceof Error && error.message==="Daemon already running")throw error;
@@ -69,7 +75,7 @@ export async function serveDaemon(workspace:string):Promise<void> {
       server.once("error",rej);
       server.listen(path,()=>{server.off("error",rej);res();});
     });
-    chmodSync(path,0o600);
+    if(process.platform!=="win32")chmodSync(path,0o600);
     await new Promise<void>(res=>{
       const shutdown=()=>{if(!stopping){stopping=true;server.close();}};
       process.once("SIGINT",shutdown);
@@ -79,8 +85,10 @@ export async function serveDaemon(workspace:string):Promise<void> {
   }finally{
     // The socket belongs to this instance only while no replacement exists.
     // A second daemon cannot bind until the first closes.
-    try{unlinkSync(path);}catch(error){
-      if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;
+    if(process.platform!=="win32") {
+      try{unlinkSync(path);}catch(error){
+        if((error as NodeJS.ErrnoException).code!=="ENOENT")throw error;
+      }
     }
   }
 }
