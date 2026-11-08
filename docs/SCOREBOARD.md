@@ -33,3 +33,9 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Added Node tests for valid metadata, invalid/oversized files and symlink escape.
 - **Not yet run in the connected GitHub-only editing environment.** No model skill invocation, installation, creation, or Agent Reach integration yet.
 - Verify on Windows: `npm run build`, `npm test`, `node dist/cli.js skills list`.
+
+## Follow-up sprint: installed skill search
+
+- Added `skills find <query>` for case-insensitive matching of all query terms against name and description, without executing skill instructions.
+- Added tests for matching, no matches, and invalid blank queries.
+- GitHub CI for prior commit `723c364` passed (SAM CI run 42507066587). **The new search commit is awaiting its own CI result.**
