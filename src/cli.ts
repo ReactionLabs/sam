@@ -14,6 +14,7 @@ import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { recallMemory } from "./memory-recall.js";
+import { runMemoryToolTurn } from "./memory-tool.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
@@ -126,7 +127,8 @@ program.command("talk").description("Interactive terminal conversation with conf
   .requiredOption("--live","Allow model API requests (may incur provider charges)")
   .option("--model <id>","Model ID")
   .option("--with-memory","Explicitly include recent workspace memory records in model context")
-  .action(async(options:{live:boolean,model?:string,withMemory?:boolean})=>{
+  .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
       (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
@@ -160,9 +162,12 @@ program.command("talk").description("Interactive terminal conversation with conf
           const context=withIdentity(program.opts().workspace,proposed);
           const recalled=options.withMemory?recallMemory(dbPath()):undefined;
           if(recalled)context.splice(1,0,recalled);
-          const reply=await converse(provider,{model,messages:context});
-          console.log("SAM > "+reply.message.content);
-          messages.splice(0,messages.length,...proposed,{role:"assistant",content:reply.message.content});
+          const answer=options.memoryTools
+            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled),context,dbPath(),
+              event=>console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail))
+            :(await converse(provider,{model,messages:context})).message.content;
+          console.log("SAM > "+answer);
+          messages.splice(0,messages.length,...proposed,{role:"assistant",content:answer});
           // Keep bounded in-memory context; no transcript is written to disk.
           if (messages.length>40) messages.splice(0,messages.length-40);
         } catch(error) {
