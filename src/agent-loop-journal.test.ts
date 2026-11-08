@@ -17,6 +17,8 @@ test("agent loop journal persists progress and events across restart", () => {
     journal = new AgentLoopJournal(db);
     assert.equal(journal.get(loop.id)?.calls,1);
     assert.equal(journal.events(loop.id).length,2);
+    assert.equal(journal.list()[0]?.id,loop.id);
+    assert.throws(()=>journal.list(0),/Invalid loop list limit/);
     journal.finish(loop.id,"completed","Verified source path");
     assert.equal(journal.get(loop.id)?.state,"completed");
     assert.throws(()=>journal.event(loop.id,"tool_requested","another"),/not running/);
