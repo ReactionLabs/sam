@@ -58,3 +58,10 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Added opt-in `talk --live --memory-tools`, OpenAI-compatible `memory_search` tool declaration, bounded one-call router, strict JSON arguments, read-only SQLite results, and terminal audit events.
 - Added offline mock tests for actual SQLite evidence, invalid tools/arguments and bounded call loop.
 - **Not yet validated on Windows or MiniMax live.** No writes, shell, filesystem access, persistent tool audit, or retries.
+
+## Workspace read tool sprint (2026-11-08)
+
+- Added opt-in model tools `list_directory`, `read_file`, and `search_files` with bounded shallow reads and path checks. Existing `memory_search` retained.
+- Tests added for valid operations and protected paths, traversal, symlinks and unauthorized tool names.
+- **New branch not yet Windows/live verified**. Owner verified 64/64 tests and two successful live model-selected memory searches on parent branch.
+- Next: verify on Windows, audit provider compatibility, improve path hardening, then Git read-only tools.
