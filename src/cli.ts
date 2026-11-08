@@ -8,7 +8,7 @@ import { converse, FakeModelProvider } from "./model-conversation.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { withIdentity } from "./identity.js";
 import { inspectDirectory } from "./local-inspection.js";
-import { discoverSkills, findSkill } from "./skills.js";
+import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
@@ -56,6 +56,7 @@ program.command("inspect-local").description("List one explicitly selected direc
   .action((options:{root:string;dir:string})=>output(inspectDirectory(options.root,options.dir)));
 const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
+skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
 skills.command("show").argument("<name>").description("Show skill metadata (not executable instructions)").action((name:string)=>output(findSkill(program.opts().workspace,name)));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
