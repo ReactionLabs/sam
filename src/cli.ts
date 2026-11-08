@@ -7,6 +7,7 @@ import { LocalEchoAdapter } from "./execution.js";
 import { converse, FakeModelProvider } from "./model-conversation.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { withIdentity } from "./identity.js";
+import { inspectDirectory } from "./local-inspection.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
@@ -48,6 +49,10 @@ program.command("init").description("Initialize local mission workspace").action
   const dir=join(resolve(program.opts().workspace),".sam");mkdirSync(dir,{recursive:true});
   const db=store();db.close();output("SAM initialized at "+dir);
 });
+program.command("inspect-local").description("List one explicitly selected directory; no model access, file contents, or commands")
+  .requiredOption("--root <path>","Authorized root folder")
+  .option("--dir <relative>","Relative subdirectory",".")
+  .action((options:{root:string;dir:string})=>output(inspectDirectory(options.root,options.dir)));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}
