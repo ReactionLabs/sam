@@ -8,7 +8,7 @@ import { discoverSkills } from "./skills.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-export type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
+export type DashboardConfig={defaultAgent:string;showTeamEvents:boolean};\nconst defaultDashboardConfig:DashboardConfig={defaultAgent:"sam",showTeamEvents:true};\nfunction configPath(root:string){return join(resolve(root),".sam","dashboard-config.json");}\nfunction readDashboardConfig(root:string):DashboardConfig{\n const file=configPath(root);if(!existsSync(file))return {...defaultDashboardConfig};\n const data=JSON.parse(readFileSync(file,"utf8")) as Partial<DashboardConfig>;\n return {defaultAgent:typeof data.defaultAgent==="string"?data.defaultAgent:"sam",showTeamEvents:data.showTeamEvents!==false};\n}\nfunction saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{\n if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean"||!(/^[a-z][a-z0-9._-]{0,63}$/.test(data.defaultAgent)))throw Error("Invalid dashboard configuration");\n const config={defaultAgent:data.defaultAgent,showTeamEvents:data.showTeamEvents};\n const db=new ChatStore(root);try{if(config.defaultAgent!=="sam"&&!db.agents().some(a=>a.name===config.defaultAgent))throw Error("Unknown agent");}finally{db.close();}\n mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(configPath(root),JSON.stringify(config,null,2),{mode:0o600});return config;\n}\nexport type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
 const MAX_SCHEDULES=32;
 function scheduleFile(root:string){return join(resolve(root),".sam","schedules.json");}
 export function listSchedules(root:string):Schedule[]{
@@ -34,7 +34,7 @@ const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta nam
 async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error('Unavailable');const d=await r.json();document.getElementById('health').textContent='Online';document.getElementById('clock').textContent='Last check: '+new Date().toLocaleTimeString();for(const k of ['missions','skills','schedules','chats','logs'])document.getElementById(k).textContent=JSON.stringify(d[k],null,2);}catch(e){document.getElementById('health').textContent='Offline';}}
 refresh();setInterval(refresh,10000);
 </script></body></html>`;
-export async function serveDashboard(root:string,port=4317):Promise<void>{
+function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}\nexport async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
@@ -56,6 +56,16 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     const route=`/api/${token}`;
     if(req.method==="POST" && req.url===route+"/chats"){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid title");const db=new ChatStore(workspace);try{json(201,db.create(body.title));}finally{db.close();}}catch{json(400,{error:"Unable to create chat"});}return;
+    }
+    if(req.method==="POST"&&req.url===route+"/agents"){
+      try{const body=await post();if(typeof body.name!=="string"||typeof body.instructions!=="string")throw Error("Invalid agent");const db=new ChatStore(workspace);try{json(201,db.createAgent(body.name,body.instructions));}finally{db.close();}}catch{json(400,{error:"Unable to create agent"});}return;
+    }
+    if(req.method==="POST"&&req.url===route+"/config"){
+      try{json(200,saveDashboardConfig(workspace,await post()));}catch{json(400,{error:"Invalid configuration"});}return;
+    }
+    const branchMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/branch$"));
+    if(req.method==="POST"&&branchMatch){
+      try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
@@ -95,7 +105,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const raw=readFileSync(audit,"utf8");
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }
