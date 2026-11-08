@@ -47,3 +47,8 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - No model memory write/search tool calls yet, and no automatic memory retrieval without owner opt-in.
 - **Validation pending on new commit.** Prior owner Windows build passed 58/58 tests on the skill discovery branch, before this feature.
 - Next: typed model-to-memory tool bridge, permission checks, bounded tool loops, and durable audit.
+
+## Local memory search in terminal (2026-11-08)
+
+- Added `/memory <query>` to `talk --live` for read-only SQLite search, up to ten results, bounded displayed content. No model call or memory write for the slash command.
+- This is NOT model-selected tool calling. Validation on new branch pending; owner verified prior 60/60 tests and live opt-in recall.
