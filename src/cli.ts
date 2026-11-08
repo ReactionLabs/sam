@@ -124,6 +124,17 @@ program.command("chat").description("Offline smoke test by default; --live expli
       output(await converse(new FakeModelProvider(),{model:options.model??"offline-test",messages:[{role:"user",content:message}]}));
     }
   });
+const loops=program.command("loop").description("Inspect durable read-only agent loop journal");
+loops.command("inspect").argument("<id>").action((id:string)=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output({loop:journal.get(id)??null,events:journal.events(id)}); }
+  finally { journal.close(); }
+});
+loops.command("recover").description("Fence orphaned running loops after a crash; never replay tool calls").action(()=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output({interrupted:journal.interruptOrphans()}); }
+  finally { journal.close(); }
+});
 program.command("talk").description("Interactive terminal conversation with configured model; explicit network opt-in required")
   .requiredOption("--live","Allow model API requests (may incur provider charges)")
   .option("--model <id>","Model ID")
