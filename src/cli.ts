@@ -95,11 +95,14 @@ program.command("chat").description("Offline smoke test by default; --live expli
   .option("--live","Explicitly allow one network model request (may incur provider charges)")
   .action(async (message:string, options:{model?:string,live?:boolean})=>{
     if (options.live) {
-      const endpoint=process.env.SAM_MODEL_ENDPOINT;
-      if (!endpoint) throw new Error("Set SAM_MODEL_ENDPOINT to an OpenAI-compatible /chat/completions URL");
+      const selected=process.env.SAM_MODEL_PROVIDER??"";
+      const endpoint=process.env.SAM_MODEL_ENDPOINT??
+        (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+      if (!endpoint) throw new Error("Set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT to an OpenAI-compatible /chat/completions URL");
       const model=options.model??process.env.SAM_MODEL;
       if (!model) throw new Error("Specify --model or SAM_MODEL");
-      const provider=new OpenAICompatibleProvider(endpoint,process.env.SAM_MODEL_API_KEY??"");
+      const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+      const provider=new OpenAICompatibleProvider(endpoint,key);
       output(await converse(provider,{model,messages:[{role:"user",content:message}]}));
     } else {
       output(await converse(new FakeModelProvider(),{model:options.model??"offline-test",messages:[{role:"user",content:message}]}));
