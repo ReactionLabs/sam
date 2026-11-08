@@ -1,5 +1,6 @@
 import { MemoryStore } from "./memory.js";
 import type { Message } from "./model-conversation.js";
+import { executeWorkspaceTool } from "./workspace-tools.js";
 
 export interface ToolCall {
   id: string;
@@ -24,7 +25,7 @@ export const MEMORY_SEARCH_TOOL = {
   }
 } as const;
 
-export function validateToolTurn(value: unknown): ToolTurn {
+export function validateToolTurn(value: unknown, workspaceTools = false): ToolTurn {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model tool response");
   const item = value as Record<string, unknown>;
   const content = item.content;
@@ -40,7 +41,7 @@ export function validateToolTurn(value: unknown): ToolTurn {
   for (const call of calls) {
     if (!call || call.type !== "function" || typeof call.id !== "string" ||
         !/^[a-zA-Z0-9_-]{1,100}$/.test(call.id) || ids.has(call.id) ||
-        call.function?.name !== "memory_search" ||
+        !(call.function?.name === "memory_search" || (workspaceTools && ["list_directory","read_file","search_files"].includes(call.function?.name))) ||
         typeof call.function.arguments !== "string" || call.function.arguments.length > 1000)
       throw new Error("Unsupported or malformed tool call");
     ids.add(call.id);
@@ -72,17 +73,21 @@ export type ToolMessage = Message | { role: "tool"; tool_call_id: string; conten
 export async function runMemoryToolTurn(
   request: (messages: ToolMessage[], toolsEnabled: boolean) => Promise<ToolTurn>,
   messages: Message[], dbPath: string,
-  onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed"; detail: string }) => void
+  onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed"; detail: string }) => void,
+  workspace?: string
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
-  const first = validateToolTurn(await request(conversation, true));
+  const first = validateToolTurn(await request(conversation, true), Boolean(workspace));
   if (!first.tool_calls?.length) return first.content!;
   conversation.push({ role: "assistant", content: first.content, tool_calls: first.tool_calls });
   for (const call of first.tool_calls) {
     onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
     let result: string;
     try {
-      result = executeMemorySearch(dbPath, call.function.arguments);
+      result = call.function.name === "memory_search"
+        ? executeMemorySearch(dbPath, call.function.arguments)
+        : workspace ? executeWorkspaceTool(workspace,call.function.name,call.function.arguments)
+        : (()=>{throw new Error("Workspace tools not authorized");})();
       onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
     } catch (error) {
       onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
