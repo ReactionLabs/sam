@@ -15,6 +15,7 @@ import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { recallMemory } from "./memory-recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
+import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
@@ -159,22 +160,27 @@ program.command("talk").description("Interactive terminal conversation with conf
           continue;
         }
         const proposed=[...messages,{role:"user" as const,content:line}];
+        const journal = options.memoryTools || options.workspaceTools ? new AgentLoopJournal(dbPath()) : undefined;
+        const loop = journal?.create(line);
         try {
           const context=withIdentity(program.opts().workspace,proposed);
           const recalled=options.withMemory?recallMemory(dbPath()):undefined;
           if(recalled)context.splice(1,0,recalled);
           const answer=options.memoryTools || options.workspaceTools
             ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools)),context,dbPath(),
-              event=>console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail),
-              options.workspaceTools ? program.opts().workspace : undefined)
+              event=>{console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail);journal?.event(loop!.id,"tool_"+event.status,event.tool+" "+event.detail);},
+              options.workspaceTools ? program.opts().workspace : undefined,
+              (round,calls)=>journal?.progress(loop!.id,round,calls))
             :(await converse(provider,{model,messages:context})).message.content;
+          if (journal && loop) journal.finish(loop.id,"completed",answer.slice(0,8000));
           console.log("SAM > "+answer);
           messages.splice(0,messages.length,...proposed,{role:"assistant",content:answer});
           // Keep bounded in-memory context; no transcript is written to disk.
           if (messages.length>40) messages.splice(0,messages.length-40);
         } catch(error) {
+          if (journal && loop) journal.finish(loop.id,"failed",error instanceof Error?error.message:"Unknown error");
           console.error("SAM request failed:",error instanceof Error?error.message:"Unknown error");
-        }
+        } finally { journal?.close(); }
       }
     } finally { rl.close(); }
   });
