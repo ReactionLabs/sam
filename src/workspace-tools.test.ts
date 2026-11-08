@@ -28,8 +28,16 @@ test("workspace read tools reject traversal, secrets, symlinks and unsupported w
     assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"../outside"}'),/outside|workspace/);
     assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":".env"}'),/Protected/);
     assert.throws(()=>executeWorkspaceTool(root,"write_file",'{"path":"safe.ts"}'),/Unsupported/);
-    symlinkSync(join(root,"safe.ts"),join(root,"alias.ts"));
-    assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"alias.ts"}'),/Symlink/);
+    try {
+      symlinkSync(join(root,"safe.ts"),join(root,"alias.ts"));
+      assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"alias.ts"}'),/Symlink/);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EPERM" &&
+          (error as NodeJS.ErrnoException).code !== "EACCES")
+        throw error;
+      // Windows may deny symlink creation without Developer Mode or elevated rights.
+      // The production symlink rejection remains enforced when links are available.
+    }
     assert.throws(()=>validateToolTurn({content:null,tool_calls:[{id:"c1",type:"function",function:{name:"read_file",arguments:'{"path":"safe.ts"}'}}]}),/Unsupported/);
     assert.equal(validateToolTurn({content:null,tool_calls:[{id:"c1",type:"function",function:{name:"read_file",arguments:'{"path":"safe.ts"}'}}]},true).tool_calls?.length,1);
   } finally { rmSync(root,{recursive:true,force:true}); }
