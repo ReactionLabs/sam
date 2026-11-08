@@ -35,13 +35,13 @@ export function validateToolTurn(value: unknown, workspaceTools = false): ToolTu
     if (typeof content !== "string" || !content.trim()) throw new Error("Empty model response");
     return { content };
   }
-  if (!Array.isArray(item.tool_calls) || item.tool_calls.length > 3) throw new Error("At most three read-only memory tool calls are permitted");
+  if (!Array.isArray(item.tool_calls) || item.tool_calls.length > 3) throw new Error("At most three read-only tool calls are permitted");
   const calls = item.tool_calls as ToolCall[];
   const ids = new Set<string>();
   for (const call of calls) {
     if (!call || call.type !== "function" || typeof call.id !== "string" ||
         !/^[a-zA-Z0-9_-]{1,100}$/.test(call.id) || ids.has(call.id) ||
-        !(call.function?.name === "memory_search" || (workspaceTools && ["list_directory","read_file","search_files"].includes(call.function?.name))) ||
+        !(call.function?.name === "memory_search" || (workspaceTools && ["list_directory","read_file","search_files","list_skills","read_skill"].includes(call.function?.name))) ||
         typeof call.function.arguments !== "string" || call.function.arguments.length > 1000)
       throw new Error("Unsupported or malformed tool call");
     ids.add(call.id);
