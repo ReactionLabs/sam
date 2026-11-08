@@ -40,6 +40,28 @@ export function readEditableFile(root:string,path:string):string {
   if(content.includes(0)) throw new Error("Binary file denied");
   return content.toString("utf8");
 }
+export function inspectProposal(root:string,id:string) {
+  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) throw new Error("Invalid proposal ID");
+  const file=join(proposalDir(root),"edit-"+id+".json");
+  const stat=lstatSync(file);
+  if(!stat.isFile() || stat.isSymbolicLink() || stat.nlink!==1 || stat.size>LIMIT+2048) throw new Error("Unsafe proposal");
+  const proposal=JSON.parse(readFileSync(file,"utf8")) as Proposal;
+  if(proposal.version!==1 || typeof proposal.path!=="string" || typeof proposal.originalHash!=="string" ||
+    typeof proposal.replacement!=="string" || typeof proposal.replacementHash!=="string" ||
+    typeof proposal.digest!=="string" || Buffer.byteLength(proposal.replacement)>LIMIT ||
+    proposal.replacement.includes("\0")) throw new Error("Malformed proposal");
+  const expected=payload(proposal.path,proposal.originalHash,proposal.replacement);
+  if(expected.digest!==proposal.digest || expected.replacementHash!==proposal.replacementHash)
+    throw new Error("Proposal integrity check failed");
+  const original=readEditableFile(root,proposal.path);
+  const stale=hash(Buffer.from(original))!==proposal.originalHash;
+  return {file,proposal,original,stale};
+}
+export function rejectEdit(root:string,id:string) {
+  const inspected=inspectProposal(root,id);
+  unlinkSync(inspected.file);
+  return {rejected:true,id,path:inspected.proposal.path};
+}
 /** CLI-controlled proposal. This does not authorize model writes. */
 export function proposeEdit(root:string,path:string,replacement:string) {
   if(Buffer.byteLength(replacement)>LIMIT || replacement.includes("\0")) throw new Error("Replacement too large or binary");
