@@ -8,7 +8,21 @@ import { discoverSkills } from "./skills.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-export type DashboardConfig={defaultAgent:string;showTeamEvents:boolean};\nconst defaultDashboardConfig:DashboardConfig={defaultAgent:"sam",showTeamEvents:true};\nfunction configPath(root:string){return join(resolve(root),".sam","dashboard-config.json");}\nfunction readDashboardConfig(root:string):DashboardConfig{\n const file=configPath(root);if(!existsSync(file))return {...defaultDashboardConfig};\n const data=JSON.parse(readFileSync(file,"utf8")) as Partial<DashboardConfig>;\n return {defaultAgent:typeof data.defaultAgent==="string"?data.defaultAgent:"sam",showTeamEvents:data.showTeamEvents!==false};\n}\nfunction saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{\n if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean"||!(/^[a-z][a-z0-9._-]{0,63}$/.test(data.defaultAgent)))throw Error("Invalid dashboard configuration");\n const config={defaultAgent:data.defaultAgent,showTeamEvents:data.showTeamEvents};\n const db=new ChatStore(root);try{if(config.defaultAgent!=="sam"&&!db.agents().some(a=>a.name===config.defaultAgent))throw Error("Unknown agent");}finally{db.close();}\n mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(configPath(root),JSON.stringify(config,null,2),{mode:0o600});return config;\n}\nexport type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
+export type DashboardConfig={defaultAgent:string;showTeamEvents:boolean};
+const defaultDashboardConfig:DashboardConfig={defaultAgent:"sam",showTeamEvents:true};
+function configPath(root:string){return join(resolve(root),".sam","dashboard-config.json");}
+function readDashboardConfig(root:string):DashboardConfig{
+ const file=configPath(root);if(!existsSync(file))return {...defaultDashboardConfig};
+ const data=JSON.parse(readFileSync(file,"utf8")) as Partial<DashboardConfig>;
+ return {defaultAgent:typeof data.defaultAgent==="string"?data.defaultAgent:"sam",showTeamEvents:data.showTeamEvents!==false};
+}
+function saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{
+ if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean"||!(/^[a-z][a-z0-9._-]{0,63}$/.test(data.defaultAgent)))throw Error("Invalid dashboard configuration");
+ const config={defaultAgent:data.defaultAgent,showTeamEvents:data.showTeamEvents};
+ const db=new ChatStore(root);try{if(config.defaultAgent!=="sam"&&!db.agents().some(a=>a.name===config.defaultAgent))throw Error("Unknown agent");}finally{db.close();}
+ mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(configPath(root),JSON.stringify(config,null,2),{mode:0o600});return config;
+}
+export type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
 const MAX_SCHEDULES=32;
 function scheduleFile(root:string){return join(resolve(root),".sam","schedules.json");}
 export function listSchedules(root:string):Schedule[]{
