@@ -76,3 +76,10 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - **Phase 5:** SAM-authored skills via staged proposals and automated evaluation, never silent self-installation or unrestricted privilege escalation.
 - **Acceptance:** SAM can fix a seeded bug with direct tools or delegated CLI, produce a reviewable patch, run verification, and report what was observed versus assumed.
 - Windows test feedback: 65/66 passed on first workspace-tool branch; symlink test failed due to Windows EPERM during fixture setup. Test updated to tolerate permission denial; re-verification pending.
+
+## Durable agent loop checkpoint sprint
+
+- Added SQLite journal for goals, read-only tool events, progress, outcomes and explicit interrupted-orphan fencing.
+- Integrated with live model tool loop and added CLI inspect/recover operations.
+- No auto-replay or automatic resume. No coding writes or delegated CLI execution.
+- Tests added for persistence, restart, monotonic progress and terminal-state fencing. Windows verification pending.
