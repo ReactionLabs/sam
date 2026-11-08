@@ -76,3 +76,19 @@ export function searchSkills(workspace: string, query: string): SkillEntry[] {
     return terms.every(term => haystack.includes(term));
   });
 }
+
+/** Load a validated installed skill as untrusted reference material, never execute it. */
+export function readSkill(workspace: string, name: string): { name: string; description: string; untrusted: true; instructions: string } {
+  if (!/^[a-z0-9][a-z0-9_-]{0,99}$/.test(name)) throw new Error("Invalid skill name");
+  const skill = findSkill(workspace, name);
+  const base = realpathSync(resolve(workspace));
+  const path = resolve(base, skill.path);
+  if (!inside(base, path)) throw new Error("Skill outside workspace");
+  const stat = lstatSync(path);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) throw new Error("Unsafe skill file");
+  if (!inside(base, realpathSync(path))) throw new Error("Skill outside workspace");
+  const instructions = readFileSync(path, "utf8");
+  if (instructions.includes("\\0")) throw new Error("Binary skill denied");
+  if (instructions.length > 16000) throw new Error("Skill instructions exceed 16000 characters");
+  return { name: skill.name, description: skill.description, untrusted: true, instructions };
+}
