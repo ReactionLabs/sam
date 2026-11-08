@@ -40,7 +40,7 @@ export class ChatStore {
   }
   events(id:string):TeamEvent[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
-    return this.db.prepare("SELECT * FROM team_events WHERE chat_id=? ORDER BY created_at,id LIMIT 500").all(id) as TeamEvent[];
+    return this.db.prepare("SELECT * FROM team_events WHERE chat_id=? ORDER BY rowid LIMIT 500").all(id) as TeamEvent[];
   }
   addEvent(id:string,agent:string,kind:TeamEvent["kind"],content:string):TeamEvent{
     if(!/^[a-z][a-z0-9._-]{0,63}$/.test(agent)||!["message","tool","result","assignment"].includes(kind)||!content.trim()||content.length>12000)throw new Error("Invalid team event");
