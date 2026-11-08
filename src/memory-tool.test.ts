@@ -69,3 +69,10 @@ test("model can inspect across multiple bounded tool rounds", async () => {
     assert.equal(turns,3);
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
+
+test("OpenAI-compatible tool-call response may omit content but not on final answer",()=>{
+ const call={id:"call_abc",type:"function",function:{name:"read_file",arguments:'{"path":"package.json"}'}};
+ assert.deepEqual(validateToolTurn({tool_calls:[call]},true),{content:null,tool_calls:[call]});
+ assert.throws(()=>validateToolTurn({}),/Empty model response/);
+ assert.throws(()=>validateToolTurn({content:42,tool_calls:[call]},true),/Invalid tool response content/);
+});
