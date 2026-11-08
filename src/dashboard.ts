@@ -59,7 +59,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1]),events:db.events(match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
     }
     if(match && req.method==="POST" && match[2]){
       const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
