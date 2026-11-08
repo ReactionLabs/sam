@@ -11,6 +11,7 @@ import { inspectDirectory } from "./local-inspection.js";
 import { inspectGitWorkspace } from "./git-inspection.js";
 import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
 import { reviewEdit } from "./edit-review.js";
+import { reviewEditWithAi } from "./ai-edit-review.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -86,6 +87,21 @@ edits.command("suggest").requiredOption("--path <relative>","Existing workspace 
   });
 edits.command("review").argument("<id>").description("Review bounded diff and deterministic findings; never writes target")
   .action((id:string)=>output(reviewEdit(program.opts().workspace,id)));
+edits.command("review-ai").argument("<id>").description("Independent advisory AI review; never applies edits")
+  .requiredOption("--live","Explicitly allow one model API request (may incur charges)")
+  .option("--model <id>","Reviewer model ID")
+  .option("--timeout <seconds>","Model request timeout, 5 to 120 seconds","90")
+  .action(async(id:string,options:{live:boolean;model?:string;timeout:string})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_REVIEW_MODEL??process.env.SAM_MODEL;
+    if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const seconds=Number(options.timeout);
+    if(!Number.isInteger(seconds) || seconds<5 || seconds>120) throw new Error("Timeout must be 5 to 120 seconds");
+    const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
+    output(await reviewEditWithAi(program.opts().workspace,id,model,provider));
+  });
 edits.command("reject").argument("<id>").description("Discard proposal without modifying target")
   .action((id:string)=>output(rejectEdit(program.opts().workspace,id)));
 edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
