@@ -38,6 +38,12 @@ Use `node dist/cli.js schedule add "check repository" --every 60` to store an in
 
 Verified on the preceding skill-tools branch: 88 passing tests and live model invocation of `list_skills`. The empty installed-skills list means no local SKILL.md was found. This dashboard branch requires a new build and test run.
 
+## Chat-first local dashboard (experimental)
+
+The `sam dashboard` command serves a three-column local mission-control UI. Open the randomized URL printed in the terminal, create a conversation with **New chat**, and send messages in the center panel. Each chat has a separate durable history in `.sam/chats.db`. The dashboard uses the configured `SAM_MODEL` and OpenAI-compatible provider (or MiniMax provider settings) to answer; requests may incur charges. One model reply per chat can be in flight at a time.
+
+**Scope:** this is text-only model conversation. Browser chat does not yet call workspace tools, run missions, spawn agents, stream model tokens, or install skills. The right panel shows existing mission, skill, schedule, and audit snapshots. The server binds only to 127.0.0.1 and uses a randomized URL token. Keep the URL private. This is not multi-user authentication or an OS sandbox.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
