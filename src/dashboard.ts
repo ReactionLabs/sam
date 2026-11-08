@@ -48,7 +48,8 @@ const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta nam
 async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw Error('Unavailable');const d=await r.json();document.getElementById('health').textContent='Online';document.getElementById('clock').textContent='Last check: '+new Date().toLocaleTimeString();for(const k of ['missions','skills','schedules','chats','logs'])document.getElementById(k).textContent=JSON.stringify(d[k],null,2);}catch(e){document.getElementById('health').textContent='Offline';}}
 refresh();setInterval(refresh,10000);
 </script></body></html>`;
-function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}\nexport async function serveDashboard(root:string,port=4317):Promise<void>{
+function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}
+export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
