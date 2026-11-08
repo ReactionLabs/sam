@@ -125,6 +125,11 @@ program.command("chat").description("Offline smoke test by default; --live expli
     }
   });
 const loops=program.command("loop").description("Inspect durable read-only agent loop journal");
+loops.command("list").option("--limit <n>","Number of recent loops","20").action((options:{limit:string})=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output(journal.list(Number(options.limit))); }
+  finally { journal.close(); }
+});
 loops.command("inspect").argument("<id>").action((id:string)=>{
   const journal=new AgentLoopJournal(dbPath());
   try { output({loop:journal.get(id)??null,events:journal.events(id)}); }
