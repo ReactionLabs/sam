@@ -26,7 +26,7 @@ export class ChatStore {
   create(title:string):ChatRecord {
     if(!title.trim()||title.length>120)throw new Error("Chat title must be 1 to 120 characters");
     const now=new Date().toISOString(),item={id:randomUUID(),title:title.trim(),created_at:now,updated_at:now};
-    this.db.prepare("INSERT INTO chats VALUES (@id,@title,@created_at,@updated_at)").run(item);return item;
+    this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at) VALUES (@id,@title,@created_at,@updated_at)").run(item);return item;
   }
   branch(parentId:string,title:string):ChatRecord {
     if(!title.trim()||title.length>120)throw new Error("Invalid branch title");
