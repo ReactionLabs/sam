@@ -4,7 +4,7 @@
 
 SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
 
-**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every hour. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
+**Built in public through hourly development sprints.** ChatGPT runs a scheduled SAM build cycle approximately once per hour, reviewing the repository, open PRs, and CI before attempting one focused improvement. Each sprint reports actual commits, tests, blockers, and the next assignment. These are scheduled development attempts, **not** SAM independently programming itself; an hourly sprint does not guarantee a commit, a completed feature, or passing tests.
 
 **Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It has a provider-neutral text conversation contract, deterministic fake-provider CLI, and opt-in live OpenAI-compatible text chat via `chat --live` and interactive `talk --live`. A user has verified live MiniMax chat from Windows. Live conversations inject SAM's built-in identity and optional workspace `SOUL.md`, but chat transcripts are not persistent. SAM does not yet execute MCP tools, use the computer, or perform real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
 
@@ -37,7 +37,7 @@ All state lives in one SQLite database at `.sam/missions.db` in the
 workspace (override the workspace with `--workspace <path>`; add `--json`
 for machine-readable output).
 
-## North-star milestone: SAM completes one real task on the owner's computer
+## Next major milestone: SAM completes one real task on the owner's computer
 
 **Status: NOT YET IMPLEMENTED.** This is the next product milestone, not a claim of current computer control.
 
