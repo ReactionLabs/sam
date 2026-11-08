@@ -8,6 +8,7 @@ import { converse, FakeModelProvider } from "./model-conversation.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { withIdentity } from "./identity.js";
 import { inspectDirectory } from "./local-inspection.js";
+import { inspectGitWorkspace } from "./git-inspection.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -57,6 +58,9 @@ program.command("inspect-local").description("List one explicitly selected direc
   .requiredOption("--root <path>","Authorized root folder")
   .option("--dir <relative>","Relative subdirectory",".")
   .action((options:{root:string;dir:string})=>output(inspectDirectory(options.root,options.dir)));
+const gitCommands=program.command("git").description("Bounded read-only Git inspection in the authorized workspace");
+gitCommands.command("status").description("Show branch and working-tree changes").action(()=>output(inspectGitWorkspace(program.opts().workspace,"status")));
+gitCommands.command("diff").description("Show unstaged workspace changes (bounded)").action(()=>output(inspectGitWorkspace(program.opts().workspace,"diff")));
 const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
