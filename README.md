@@ -16,6 +16,10 @@ This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compa
 
 **Next implementation:** bounded model-to-memory tool bridge, then local `SKILL.md` discovery from `.agents/skills/` with permissioned invocation. See [build scoreboard](docs/SCOREBOARD.md).
 
+## Experimental opt-in memory recall (unmerged feature branch)
+
+`node dist/cli.js talk --live --with-memory` sends up to ten recent workspace SQLite memory records (each truncated to 500 characters, total bounded to 6000 characters) to the configured model as explicitly untrusted context. This requires deliberate opt-in because memory content is sent to the model provider. It reads existing records across CLI restarts, but does **not** let the model search, write, edit, or archive memory. It does not persist conversation transcripts. Tests and live behavior must be verified before merge.
+
 ## Follow the build
 
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
