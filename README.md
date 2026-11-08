@@ -212,3 +212,14 @@ node dist/cli.js dashboard
 ```
 
 Research, QA and SAM each make a separate model request. Their attributed messages are persisted to the chat's team-event stream and appear in the dashboard after refresh. Configure `SAM_MODEL` and `SAM_MODEL_ENDPOINT`/`SAM_MODEL_API_KEY` (or the existing MiniMax provider environment). This costs up to three model requests per invocation. This initial workflow has no browsing, tool execution, agent spawning, background scheduling, or automated fact verification. It is not a substitute for sourced research.
+
+### Evidence-backed research (experimental)
+
+Use `--inspect-workspace` to read a fixed allowlist of small, non-secret local source files via SAM's existing read-only workspace tool policy. Use `--web` to request up to five HTTPS Brave Search results; requires a Brave Search API subscription key in `SAM_WEB_SEARCH_API_KEY`.
+
+```powershell
+$env:SAM_WEB_SEARCH_API_KEY = "YOUR_BRAVE_SEARCH_API_KEY"
+node dist/cli.js team run --chat YOUR_CHAT_ID --objective "Inspect SAM's architecture and compare it to current agent runtime patterns" --live --inspect-workspace --web
+```
+
+Both research and QA receive retrieved evidence and must cite file paths or source URLs. Web snippets are untrusted and may be inaccurate; this version does not fetch or verify full web pages. Workspace inspection is limited to a fixed list of project files. Each invocation uses three model calls plus one paid or quota-limited web search request. The dashboard displays recorded evidence activity after refresh.
