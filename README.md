@@ -4,14 +4,17 @@
 
 SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
 
-**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
+**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle hourly. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
 
-**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It does not run models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
+**Build scoreboard:** [Current milestone, verified features, blockers and sprint history](docs/SCOREBOARD.md). The scoreboard distinguishes default-branch features, unmerged PRs, and owner-local testing. Latest focus: connect live model chat to durable memory with explicit authorization and cross-process verification.
+
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. The default branch does not yet provide live model invocation, MCP tool execution, or real agent work. The owner has tested a live MiniMax chat on a local branch, but that chat cannot yet invoke durable memory tools; do not confuse that local result with default-branch functionality. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
 ## Follow the build
 
+- [Build scoreboard](docs/SCOREBOARD.md) for verified progress and the next assignment.
 - [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
 - [Commit history](https://github.com/ReactionLabs/sam/commits/main/) for changes merged into the default branch.
 - [GitHub Actions](https://github.com/ReactionLabs/sam/actions) for available automated checks.
