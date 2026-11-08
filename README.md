@@ -4,9 +4,9 @@
 
 SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
 
-**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every two hours. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
+**Built in public, one careful step at a time.** ChatGPT is contributing code to this repository through a scheduled build cycle approximately every hour. Each cycle is intended to inspect the current code and PRs, implement a focused improvement, and report verification honestly. This is an automated development workflow, **not** SAM independently running itself, and scheduled runs do not guarantee a new commit or a passing test.
 
-**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It has a provider-neutral text conversation contract and deterministic fake-provider CLI, but does not call real models, MCP tools, or real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
+**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It has a provider-neutral text conversation contract, deterministic fake-provider CLI, and opt-in live OpenAI-compatible text chat via `chat --live` and interactive `talk --live`. A user has verified live MiniMax chat from Windows. Live conversations inject SAM's built-in identity and optional workspace `SOUL.md`, but chat transcripts are not persistent. SAM does not yet execute MCP tools, use the computer, or perform real agent work. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
@@ -135,3 +135,9 @@ memory, and exits on `/exit`. Every turn sends conversation content to the
 configured provider and may incur charges. There is no tool access, persistent
 transcript, autonomous execution, or spending limit yet. Never paste your key
 into chat or a GitHub issue.
+
+## Experimental SAM identity (unmerged feature branch)
+
+Live `chat --live` and `talk --live` inject a system identity describing SAM's actual abilities and limitations. Optionally create `SOUL.md` in the selected workspace to add local personality instructions (up to 16,000 characters). Do not put API keys or credentials in `SOUL.md`. This does not enable file access, tool execution, persistent chat history, or autonomous agents. The CLI reads this file itself; the model cannot browse your computer.
+
+The scheduled development cycle runs approximately hourly. Each run may produce a tested PR update, but does not guarantee a commit. Unmerged feature branches are not features on `main`.
