@@ -179,8 +179,9 @@ program.command("talk").description("Interactive terminal conversation with conf
   .option("--model <id>","Model ID")
   .option("--with-memory","Explicitly include recent workspace memory records in model context")
   .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
+  .option("--memory-write","Offer memory_add to model; each write requires terminal owner confirmation")
   .option("--workspace-tools","Allow read-only model tools within the selected workspace (includes memory search)")
-  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean})=>{
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean,memoryWrite?:boolean})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
       (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
@@ -210,17 +211,22 @@ program.command("talk").description("Interactive terminal conversation with conf
           continue;
         }
         const proposed=[...messages,{role:"user" as const,content:line}];
-        const journal = options.memoryTools || options.workspaceTools ? new AgentLoopJournal(dbPath()) : undefined;
+        const journal = options.memoryTools || options.workspaceTools || options.memoryWrite ? new AgentLoopJournal(dbPath()) : undefined;
         const loop = journal?.create(line);
         try {
           const context=withIdentity(program.opts().workspace,proposed);
           const recalled=options.withMemory?recallMemory(dbPath()):undefined;
           if(recalled)context.splice(1,0,recalled);
-          const answer=options.memoryTools || options.workspaceTools
-            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools)),context,dbPath(),
+          const answer=options.memoryTools || options.workspaceTools || options.memoryWrite
+            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools),Boolean(options.memoryWrite)),context,dbPath(),
               event=>{console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail);journal?.event(loop!.id,"tool_"+event.status,event.tool+" "+event.detail);},
               options.workspaceTools ? program.opts().workspace : undefined,
-              (round,calls)=>journal?.progress(loop!.id,round,calls))
+              (round,calls)=>journal?.progress(loop!.id,round,calls),
+              options.memoryWrite ? async proposal=>{
+                console.log("[SAM memory proposal] "+JSON.stringify(proposal));
+                const answer=await rl.question("Save this exact memory? Type YES to confirm > ");
+                return answer.trim()==="YES";
+              } : undefined)
             :(await converse(provider,{model,messages:context})).message.content;
           if (journal && loop) journal.finish(loop.id,"completed",answer.slice(0,8000));
           console.log("SAM > "+answer);

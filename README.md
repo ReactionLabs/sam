@@ -10,6 +10,10 @@ SAM is an experimental, CLI-first system for turning a goal into a coordinated m
 
 **Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
 
+## Current experimental milestone: owner-approved live memory write (unmerged)
+
+On this branch, `node dist/cli.js talk --live --memory-write` offers a bounded `memory_add` model tool. Each proposed record is printed and requires the owner to type exact `YES` in the local terminal. A denied record is not saved; approved records are stored in workspace-local SQLite with model-proposed provenance. Existing `--memory-tools` supports read-only `memory_search`; combine flags to write and retrieve. Model text and stored memories are untrusted, not authority. No unattended writes, edits, deletion, external actions, or autonomous execution. **GitHub code committed; Windows build, tests and live MiniMax verification pending.** This work is stacked on unmerged review/timeout branches. See [scoreboard](docs/SCOREBOARD.md).
+
 ## Current sprint: model output hygiene (PR pending, unmerged)
 
 This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compatible model responses, rejects unterminated/reasoning-only replies, and makes invalid memory-kind errors actionable. Automated test coverage was added but has **not yet been run in this GitHub-only build environment**. Run `npm run build && npm test` on Windows before merging. This does **not** connect the model to SQLite memory or implement skills.
