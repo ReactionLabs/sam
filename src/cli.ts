@@ -9,6 +9,7 @@ import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { withIdentity } from "./identity.js";
 import { inspectDirectory } from "./local-inspection.js";
 import { inspectGitWorkspace } from "./git-inspection.js";
+import { proposeEdit, applyEdit } from "./file-edits.js";
 import { discoverSkills, findSkill, searchSkills } from "./skills.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
@@ -23,7 +24,7 @@ import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
@@ -61,6 +62,13 @@ program.command("inspect-local").description("List one explicitly selected direc
 const gitCommands=program.command("git").description("Bounded read-only Git inspection in the authorized workspace");
 gitCommands.command("status").description("Show branch and working-tree changes").action(()=>output(inspectGitWorkspace(program.opts().workspace,"status")));
 gitCommands.command("diff").description("Show unstaged workspace changes (bounded)").action(()=>output(inspectGitWorkspace(program.opts().workspace,"diff")));
+const edits=program.command("edit").description("Explicit human-reviewed file replacement; no model write access");
+edits.command("propose").requiredOption("--path <relative>","Existing workspace file")
+  .requiredOption("--from <file>","Local UTF-8 replacement content file")
+  .action((options:{path:string;from:string})=>output(proposeEdit(program.opts().workspace,options.path,readFileSync(options.from,"utf8"))));
+edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
+  .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
+  .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
 const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
