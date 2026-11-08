@@ -57,11 +57,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const obj = payload as { choices?: Array<{ message?: unknown }> };
       const turn = validateToolTurn(obj?.choices?.[0]?.message);
       if (typeof turn.content === "string") {
-        if (/<think>/i.test(turn.content) && !/<\\/think>/i.test(turn.content))
+        if (/<think>/i.test(turn.content) && !/<\/think>/i.test(turn.content))
           throw new Error("Model returned unterminated reasoning content");
-        const visible = turn.content.replace(/<think>[\\s\\S]*?<\\/think>/gi, "").trim();
+        const visible = turn.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
         if (!visible && !turn.tool_calls?.length) throw new Error("Model returned no safe visible content");
-        if (/<\\/?think>/i.test(visible)) throw new Error("Model returned unsafe reasoning content");
+        if (/<\/?think>/i.test(visible)) throw new Error("Model returned unsafe reasoning content");
         turn.content = visible || null;
       }
       return turn;
