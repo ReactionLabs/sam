@@ -123,6 +123,7 @@ const chats=program.command("chats").description("Persistent separate chat histo
 chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
+chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
 const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
 schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
 schedules.command("add").argument("<name>").requiredOption("--every <minutes>","Interval in minutes").action((name:string,o:{every:string})=>output(addSchedule(program.opts().workspace,name,Number(o.every))));
