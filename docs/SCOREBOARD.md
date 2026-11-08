@@ -24,3 +24,12 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 
 - Skills discovery/install/use/create/update and Agent Reach adapter.
 - Authorized filesystem reading, approved shell actions, durable missions, dashboard, and Obsidian/Blender integrations.
+
+## Skill discovery slice (2026-11-08, unmerged, tests pending)
+
+- Implemented read-only `skills list` and `skills show <name>` CLI commands.
+- Scans `.agents/skills/<name>/SKILL.md` and `skills/<name>/SKILL.md` within the chosen workspace.
+- Validates bounded frontmatter, rejects symlinked paths, limits files to 64 KiB and registry to 200 entries, and does not execute instructions or installation scripts.
+- Added Node tests for valid metadata, invalid/oversized files and symlink escape.
+- **Not yet run in the connected GitHub-only editing environment.** No model skill invocation, installation, creation, or Agent Reach integration yet.
+- Verify on Windows: `npm run build`, `npm test`, `node dist/cli.js skills list`.
