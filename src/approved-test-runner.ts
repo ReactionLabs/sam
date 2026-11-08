@@ -62,7 +62,7 @@ export async function executeApprovedTestRun(root:string,id:string,confirmedDige
   const result=await new Promise<{exitCode:number|null;signal:string|null;timedOut:boolean;output:string;truncated:boolean;error?:string}>(done=>{
     let output="",truncated=false,timedOut=false,settled=false;
     // Do not propagate Node's test-worker marker to a new test runner.
-    const env={...process.env,CI:"true"};
+    const env: NodeJS.ProcessEnv={...process.env,CI:"true"};
     delete env.NODE_TEST_CONTEXT;
     const child=spawn(process.execPath,args,{cwd:resolved,shell:false,windowsHide:true,stdio:["ignore","pipe","pipe"],env});
     const collect=(chunk:Buffer)=>{
