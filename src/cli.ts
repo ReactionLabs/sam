@@ -6,6 +6,7 @@ import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
 import { converse, FakeModelProvider } from "./model-conversation.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { withIdentity } from "./identity.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
@@ -105,7 +106,7 @@ program.command("chat").description("Offline smoke test by default; --live expli
       if (!model) throw new Error("Specify --model or SAM_MODEL");
       const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
       const provider=new OpenAICompatibleProvider(endpoint,key);
-      output(await converse(provider,{model,messages:[{role:"user",content:message}]}));
+      output(await converse(provider,{model,messages:withIdentity(program.opts().workspace,[{role:"user",content:message}])}));
     } else {
       output(await converse(new FakeModelProvider(),{model:options.model??"offline-test",messages:[{role:"user",content:message}]}));
     }
@@ -132,7 +133,7 @@ program.command("talk").description("Interactive terminal conversation with conf
         if (!line.trim()) continue;
         const proposed=[...messages,{role:"user" as const,content:line}];
         try {
-          const reply=await converse(provider,{model,messages:proposed});
+          const reply=await converse(provider,{model,messages:withIdentity(program.opts().workspace,proposed)});
           console.log("SAM > "+reply.message.content);
           messages.splice(0,messages.length,...proposed,{role:"assistant",content:reply.message.content});
           // Keep bounded in-memory context; no transcript is written to disk.
