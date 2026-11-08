@@ -47,7 +47,7 @@ test("owner denial emits denied audit without completed and returns explicit fai
     },[{role:"user",content:"Remember this"}],db,e=>audit.push(e),undefined,undefined,async()=>false);
     assert.match(response,/did not save/);
     assert.deepEqual(audit.map(e=>e.status),["requested","denied"]);
-    assert.match(replies[0],/"saved\\":false/);
+    assert.equal(JSON.parse((JSON.parse(replies[0]) as Array<{role:string;content:string}>).find(m=>m.role==="tool")!.content).saved,false);
     assert.match(executeMemorySearch(db,JSON.stringify({query:"marker"})),/"records":\\[\\]/);
   }finally{rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 });
