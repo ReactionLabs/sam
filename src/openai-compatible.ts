@@ -54,7 +54,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const obj = payload as { choices?: Array<{ message?: { role?: string; content?: unknown } }> };
       const content = obj?.choices?.[0]?.message?.content;
       if (typeof content !== "string" || !content.trim()) throw new Error("Invalid model response content");
-      return { provider: this.id, model: request.model, message: { role: "assistant", content } };
+      // Some compatible providers embed private reasoning in text instead of a separate field.
+      // Never display it or retain it in the next conversation turn.
+      if (/<think>/i.test(content) && !/<\/think>/i.test(content))
+        throw new Error("Model returned unterminated reasoning content");
+      const visible = content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+      if (!visible || /<\/?think>/i.test(visible))
+        throw new Error("Model returned no safe visible content");
+      return { provider: this.id, model: request.model, message: { role: "assistant", content: visible } };
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw new Error("Model request timed out");
       // Never echo network errors or response bodies: they can contain secrets.
