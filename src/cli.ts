@@ -14,7 +14,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { proposeModelEdit } from "./model-edit.js";
-import { discoverSkills, findSkill, searchSkills } from "./skills.js";
+import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
@@ -120,6 +120,7 @@ const skills=program.command("skills").description("Read-only discovery of proje
 skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
 skills.command("show").argument("<name>").description("Show skill metadata (not executable instructions)").action((name:string)=>output(findSkill(program.opts().workspace,name)));
+skills.command("read").argument("<name>").description("Read installed skill instructions as untrusted reference, without execution").action((name:string)=>output(readSkill(program.opts().workspace,name)));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}
@@ -204,7 +205,7 @@ program.command("talk").description("Interactive terminal conversation with conf
   .option("--model <id>","Model ID")
   .option("--with-memory","Explicitly include recent workspace memory records in model context")
   .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
-  .option("--workspace-tools","Allow read-only model tools within the selected workspace (includes memory search)")
+  .option("--workspace-tools","Allow read-only workspace tools and installed skill reading (includes memory search)")
   .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
