@@ -199,3 +199,16 @@ The scheduled development cycle runs approximately hourly. Each run may produce 
 ## Durable agent-loop journal (experimental)
 
 Live `talk --live --workspace-tools` and `--memory-tools` now record each user goal, tool events, round/call counts, and final outcome in workspace-local SQLite. `sam loop inspect <id>` inspects a known loop ID; `sam loop recover` explicitly marks orphaned running loops as interrupted without replaying tools. This is **checkpointing, not automatic resume**. The current loop remains limited to four tool rounds and eight tool calls; the journal is not a grant to execute commands or install skills. New tests and Windows live verification pending.
+
+
+### Experimental multi-agent research team
+
+Run a bounded, explicitly authorized three-turn model workflow in an existing chat:
+
+```powershell
+node dist/cli.js chats list
+node dist/cli.js team run --chat YOUR_CHAT_ID --objective "Compare two approaches to local agent orchestration" --live
+node dist/cli.js dashboard
+```
+
+Research, QA and SAM each make a separate model request. Their attributed messages are persisted to the chat's team-event stream and appear in the dashboard after refresh. Configure `SAM_MODEL` and `SAM_MODEL_ENDPOINT`/`SAM_MODEL_API_KEY` (or the existing MiniMax provider environment). This costs up to three model requests per invocation. This initial workflow has no browsing, tool execution, agent spawning, background scheduling, or automated fact verification. It is not a substitute for sourced research.
