@@ -143,6 +143,18 @@ program.command("talk").description("Interactive terminal conversation with conf
         try { line=await rl.question("You > "); } catch { break; }
         if (line.trim()==="/exit" || line.trim()==="/quit") break;
         if (!line.trim()) continue;
+        if (line.trim().startsWith("/memory ")) {
+          const query=line.trim().slice("/memory ".length).trim();
+          if (!query || query.length>200) { console.log("SAM > Usage: /memory <search terms> (max 200 characters)"); continue; }
+          try {
+            const mem=new MemoryStore(dbPath());
+            try {
+              const records=mem.search(query).slice(0,10).map(r=>({id:r.id,kind:r.kind,source:r.source,created_at:r.created_at,content:r.content.slice(0,500)}));
+              console.log("SAM memory > "+JSON.stringify(records,null,2));
+            } finally { mem.close(); }
+          } catch(error) { console.error("SAM memory search failed:",error instanceof Error?error.message:"Unknown error"); }
+          continue;
+        }
         const proposed=[...messages,{role:"user" as const,content:line}];
         try {
           const context=withIdentity(program.opts().workspace,proposed);
