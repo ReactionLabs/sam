@@ -30,17 +30,22 @@ export function validateToolTurn(value: unknown): ToolTurn {
   const content = item.content;
   if (content !== null && typeof content !== "string") throw new Error("Invalid tool response content");
   if (typeof content === "string" && content.length > 100_000) throw new Error("Tool response content too long");
-  if (item.tool_calls === undefined) {
+  if (item.tool_calls === undefined || (Array.isArray(item.tool_calls) && item.tool_calls.length === 0)) {
     if (typeof content !== "string" || !content.trim()) throw new Error("Empty model response");
     return { content };
   }
-  if (!Array.isArray(item.tool_calls) || item.tool_calls.length !== 1) throw new Error("Exactly one tool call is permitted");
-  const call = item.tool_calls[0] as ToolCall;
-  if (!call || call.type !== "function" || typeof call.id !== "string" ||
-      !/^[a-zA-Z0-9_-]{1,100}$/.test(call.id) || call.function?.name !== "memory_search" ||
-      typeof call.function.arguments !== "string" || call.function.arguments.length > 1000)
-    throw new Error("Unsupported or malformed tool call");
-  return { content: typeof content === "string" ? content : null, tool_calls: [call] };
+  if (!Array.isArray(item.tool_calls) || item.tool_calls.length > 3) throw new Error("At most three read-only memory tool calls are permitted");
+  const calls = item.tool_calls as ToolCall[];
+  const ids = new Set<string>();
+  for (const call of calls) {
+    if (!call || call.type !== "function" || typeof call.id !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,100}$/.test(call.id) || ids.has(call.id) ||
+        call.function?.name !== "memory_search" ||
+        typeof call.function.arguments !== "string" || call.function.arguments.length > 1000)
+      throw new Error("Unsupported or malformed tool call");
+    ids.add(call.id);
+  }
+  return { content: typeof content === "string" ? content : null, tool_calls: calls };
 }
 
 export function executeMemorySearch(path: string, rawArgs: string): string {
@@ -72,18 +77,19 @@ export async function runMemoryToolTurn(
   const conversation: ToolMessage[] = [...messages];
   const first = validateToolTurn(await request(conversation, true));
   if (!first.tool_calls?.length) return first.content!;
-  const call = first.tool_calls[0];
-  onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
-  let result: string;
-  try {
-    result = executeMemorySearch(dbPath, call.function.arguments);
-    onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
-  } catch (error) {
-    onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
-    result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
+  conversation.push({ role: "assistant", content: first.content, tool_calls: first.tool_calls });
+  for (const call of first.tool_calls) {
+    onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
+    let result: string;
+    try {
+      result = executeMemorySearch(dbPath, call.function.arguments);
+      onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
+    } catch (error) {
+      onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
+      result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
+    }
+    conversation.push({ role: "tool", tool_call_id: call.id, content: result });
   }
-  conversation.push({ role: "assistant", content: first.content, tool_calls: [call] });
-  conversation.push({ role: "tool", tool_call_id: call.id, content: result });
   const final = validateToolTurn(await request(conversation, false));
   if (final.tool_calls?.length) throw new Error("Model attempted an additional tool call");
   return final.content!;
