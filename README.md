@@ -110,3 +110,28 @@ Then run `node dist/cli.js chat "Hello" --live`.
 For local model servers, loopback HTTP is permitted and the API key may be blank.
 No streaming, multi-turn persistence, tools, agent planning, or autonomous execution yet.
 Do not commit keys, and never use `--live` until you intentionally accept the provider's terms and costs.
+
+### MiniMax terminal sprint (experimental PR branch only)
+
+These commands require the unmerged model conversation PR. In Windows PowerShell,
+check out `feat/model-conversation-contract`, then run `npm install` and
+`npm run build`. The default `main` branch does not include live chat.
+
+```powershell
+$env:SAM_MODEL_PROVIDER = "minimax"
+$env:SAM_MODEL = "MiniMax-M2"
+$env:MINIMAX_API_KEY = [System.Net.NetworkCredential]::new("", (Read-Host "MiniMax API key" -AsSecureString)).Password
+node dist/cli.js talk --live
+```
+
+Use the exact model ID enabled on your MiniMax developer account if different.
+The key stays in this PowerShell process environment, not in a repository file
+or command-history literal. Close the terminal or run
+`Remove-Item Env:MINIMAX_API_KEY` afterward. Environment variables may still
+be accessible to local processes running under your account.
+
+`talk --live` starts a multi-turn conversation, keeps up to 40 messages in
+memory, and exits on `/exit`. Every turn sends conversation content to the
+configured provider and may incur charges. There is no tool access, persistent
+transcript, autonomous execution, or spending limit yet. Never paste your key
+into chat or a GitHub issue.
