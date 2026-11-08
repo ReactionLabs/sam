@@ -54,6 +54,16 @@ Prefer documented native APIs and CLI before GUI automation. First target: Blend
 - **Sync:** Incrementally index changes; detect user edits and refuse stale writes rather than overwrite them. Treat vault text as untrusted source material. SAM SQLite mission/operational memory continues working when vault is disconnected.
 - **Verification:** Use a disposable vault fixture. Connect, read/search, create/edit/move, restart SAM, verify persistence; test concurrent edit conflicts, path/symlink escapes, secret exclusion, permissions and disconnect. Optional skill/learning export only with owner authorization.
 
+## Agent Skills and Agent Reach acceptance gate
+
+**Status: planned, not implemented or verified.** SAM's Windows workspace is `C:\\Projects\\sam`. Follow the Agent Skills `SKILL.md` convention rather than creating an incompatible SAM-only format.
+
+- **Discover:** Bounded, symlink-safe scanning of `.agents/skills/` and `skills/`, plus verified actual installation destinations for `npx skills add https://github.com/vercel-labs/skills --skill find-skills`. Reject traversal, duplicate/ambiguous names and malformed frontmatter; show name, description, provenance and permissions. Provide `skills list` and `skills show` CLI first.
+- **Use:** Load skill instructions as untrusted data and invoke actions only through SAM's scoped, auditable, permissioned tool router. Installed skill does not mean callable tool. Test prompt-injection and denial paths.
+- **Create:** Generate draft `SKILL.md` from evidenced task outcomes, validate and test in disposable workspace, version and propose activation. No self-authorized privilege expansion.
+- **Agent Reach:** Evaluate [Panniantong/agent-reach](https://github.com/Panniantong/agent-reach) upstream license, Windows support and external dependencies. Prefer per-tool adapters and dry-run inspection; no automatic installer, secret copying or network publication.
+- **Verification:** Windows-compatible fixture tests for discovery, duplicates, symlinks, permissions, restart and skill-use execution evidence. No claims of install or integration before testing.
+
 ## Roadmap after this milestone
 
 - Local-first Control Center: main chat, sidechats, agents/teams, missions, approvals and settings.
@@ -66,9 +76,13 @@ Prefer documented native APIs and CLI before GUI automation. First target: Blend
 
 ## Sprint history
 
+| 2026-11-08 12:42 ET | Inspected main CLI/memory/README and existing scoreboard branch. Added concrete Agent Skills/Agent Reach acceptance gate and corrected malformed sprint-history row; no runtime code changed. | GitHub source inspection only; build/tests not run. | Integrate live MiniMax model with bounded, audited memory tool dispatcher on the correct model branch. |
+
+
+
 | Date | Outcome | Verification | Next |
-| --- | --- | --- | --- |
 | 2026-11-08 11:43 ET | Inspected main, open PRs and existing scoreboard. Added Obsidian vault integration acceptance gate and corrected sprint table formatting on review branch; no runtime change. | GitHub source inspection; no local build/tests. | Wire live-chat memory tools and cross-process verification. |
-| 2026-11-08 10:38 ET | Rechecked main README, latest main commit, open PRs and existing scoreboard PR #23. Added explicit mission-loop and Blender acceptance gates to the existing review branch; no runtime code changed. | GitHub source inspection only; no build/tests run. | Live-chat memory tools on canonical model branch. |\n| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. No runtime feature claimed. | GitHub source review only; no local build or tests. | Live-chat memory tool integration. |
+| 2026-11-08 10:38 ET | Rechecked main README, latest main commit, open PRs and existing scoreboard PR #23. Added explicit mission-loop and Blender acceptance gates to the existing review branch; no runtime code changed. | GitHub source inspection only; no build/tests run. | Live-chat memory tools on canonical model branch. |
+| 2026-11-08 | Inspected main README, CLI/memory source and open PRs; proposed scoreboard and README update in review branch. No runtime feature claimed. | GitHub source review only; no local build or tests. | Live-chat memory tool integration. |
 
 **Rule:** Never confuse a PR, a local build, or a plan with shipped default-branch behavior. No forced commit quota. Record blockers and no-change cycles honestly.
