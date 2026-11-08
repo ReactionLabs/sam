@@ -1,5 +1,5 @@
 import { lstatSync, readdirSync, realpathSync } from "node:fs";
-import { basename, relative, resolve, sep } from "node:path";
+import { relative, resolve, sep } from "node:path";
 
 export type InspectedEntry = { name: string; type: "file" | "directory" | "blocked" };
 const SENSITIVE = /^(\.env(?:\..*)?|\.git|\.sam|node_modules|id_(?:rsa|ed25519)|.*\.(?:pem|key|p12|pfx))$/i;
@@ -17,7 +17,7 @@ export function inspectDirectory(root: string, requested = "."): { directory: st
   const rootPath = realpathSync(resolve(root));
   const target = resolve(rootPath, requested);
   const rel = relative(rootPath, target);
-  if (rel === ".." || rel.startsWith(".." + sep) || resolve(rel) === rel && rel.startsWith(sep)) throw new Error("Path escapes authorized root");
+  if (rel === ".." || rel.startsWith(".." + sep)) throw new Error("Path escapes authorized root");
   let current = rootPath;
   for (const segment of rel.split(sep).filter(Boolean)) {
     if (SENSITIVE.test(segment) || segment.startsWith(".")) throw new Error("Protected directory");
