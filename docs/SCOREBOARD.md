@@ -65,3 +65,14 @@ Implement a bounded and auditable model-to-memory bridge in `talk --live` using 
 - Tests added for valid operations and protected paths, traversal, symlinks and unauthorized tool names.
 - **New branch not yet Windows/live verified**. Owner verified 64/64 tests and two successful live model-selected memory searches on parent branch.
 - Next: verify on Windows, audit provider compatibility, improve path hardening, then Git read-only tools.
+
+## Coding agent and delegated CLI roadmap (owner direction, 2026-11-08)
+
+- **Goal:** SAM is a strong coding agent that can inspect, plan, patch, test and review work directly, or delegate scoped tasks to installed Codex CLI / Claude Code CLI.
+- **Phase 1:** finish read-only workspace tools and add Git status/diff; verify on Windows.
+- **Phase 2:** approval-gated local command adapter with executable allowlist, workspace confinement, timeouts, output caps, persisted stdout/stderr and explicit tool audit; no shell-string execution by default.
+- **Phase 3:** Codex and Claude Code adapters with installation/version detection, per-task workspace, explicit permissions, cost/time limits, structured result and independent diff/test verification. Do not pass credentials to the model.
+- **Phase 4:** skill/tool lifecycle: discover, inspect, propose, approve, install into workspace-local registry, pin versions/hashes, test, rollback and uninstall. Treat downloaded skill instructions and installation scripts as untrusted.
+- **Phase 5:** SAM-authored skills via staged proposals and automated evaluation, never silent self-installation or unrestricted privilege escalation.
+- **Acceptance:** SAM can fix a seeded bug with direct tools or delegated CLI, produce a reviewable patch, run verification, and report what was observed versus assumed.
+- Windows test feedback: 65/66 passed on first workspace-tool branch; symlink test failed due to Windows EPERM during fixture setup. Test updated to tolerate permission denial; re-verification pending.
