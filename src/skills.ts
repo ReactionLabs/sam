@@ -66,3 +66,13 @@ export function findSkill(workspace: string, name: string): SkillEntry {
   if (!skill) throw new Error("Skill not found: " + name);
   return skill;
 }
+
+/** Search installed skill metadata without loading or executing skill instructions. */
+export function searchSkills(workspace: string, query: string): SkillEntry[] {
+  const terms = query.toLowerCase().trim().split(/\s+/).filter(Boolean);
+  if (terms.length === 0 || terms.length > 12 || query.length > 200) throw new Error("Skill search requires 1 to 12 terms (max 200 characters)");
+  return discoverSkills(workspace).filter(skill => {
+    const haystack = (skill.name + " " + skill.description).toLowerCase();
+    return terms.every(term => haystack.includes(term));
+  });
+}
