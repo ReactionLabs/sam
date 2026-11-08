@@ -6,6 +6,8 @@ import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
 import { converse, FakeModelProvider } from "./model-conversation.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
@@ -107,6 +109,39 @@ program.command("chat").description("Offline smoke test by default; --live expli
     } else {
       output(await converse(new FakeModelProvider(),{model:options.model??"offline-test",messages:[{role:"user",content:message}]}));
     }
+  });
+program.command("talk").description("Interactive terminal conversation with configured model; explicit network opt-in required")
+  .requiredOption("--live","Allow model API requests (may incur provider charges)")
+  .option("--model <id>","Model ID")
+  .action(async(options:{live:boolean,model?:string})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??
+      (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_MODEL;
+    if (!endpoint || !model) throw new Error("Configure SAM_MODEL_PROVIDER=minimax and SAM_MODEL, or SAM_MODEL_ENDPOINT and SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const provider=new OpenAICompatibleProvider(endpoint,key);
+    const messages:Array<{role:"user"|"assistant";content:string}>=[];
+    const rl=createInterface({input:stdin,output:stdout,terminal:stdin.isTTY});
+    console.log("SAM terminal chat. Type /exit to quit. Each reply may incur provider charges.");
+    try {
+      while (true) {
+        let line:string;
+        try { line=await rl.question("You > "); } catch { break; }
+        if (line.trim()==="/exit" || line.trim()==="/quit") break;
+        if (!line.trim()) continue;
+        const proposed=[...messages,{role:"user" as const,content:line}];
+        try {
+          const reply=await converse(provider,{model,messages:proposed});
+          console.log("SAM > "+reply.message.content);
+          messages.splice(0,messages.length,...proposed,{role:"assistant",content:reply.message.content});
+          // Keep bounded in-memory context; no transcript is written to disk.
+          if (messages.length>40) messages.splice(0,messages.length-40);
+        } catch(error) {
+          console.error("SAM request failed:",error instanceof Error?error.message:"Unknown error");
+        }
+      }
+    } finally { rl.close(); }
   });
 const daemon=program.command("daemon").description("Local-only SAM control daemon");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
