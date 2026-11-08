@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -12,7 +13,7 @@ import { spawnSync } from "node:child_process";
  */
 test("config show reports readiness and never leaks secret values", () => {
   const workspace = mkdtempSync(join(tmpdir(), "sam-config-cli-"));
-  const cli = new URL("./cli.js", import.meta.url).pathname;
+  const cli = fileURLToPath(new URL("./cli.js", import.meta.url));
   const env = {
     ...process.env,
     SAM_MODEL_PROVIDER: "minimax",
@@ -47,7 +48,7 @@ test("config show reports readiness and never leaks secret values", () => {
 
 test("mcp authorize is a local dry-run that denies by default", () => {
   const workspace = mkdtempSync(join(tmpdir(), "sam-mcp-cli-"));
-  const cli = new URL("./cli.js", import.meta.url).pathname;
+  const cli = fileURLToPath(new URL("./cli.js", import.meta.url));
   const run = (...args: string[]) =>
     spawnSync(process.execPath, [cli, "--workspace", workspace, "--json", ...args], { encoding: "utf8" });
   try {
