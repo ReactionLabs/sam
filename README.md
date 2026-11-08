@@ -98,3 +98,15 @@ The `chat` command exercises a provider-neutral text-only contract using a deter
   connected and the policy is not yet integrated into one)
 - Owner-authenticated approval decisions
 - Memory curation, deduplication, and automatic skill extraction
+
+### Experimental live model chat (PR #20 only, not on main)
+
+By default `sam chat "hello"` uses a deterministic fake provider and makes **no network request**.
+An explicitly opted-in `--live` command supports an OpenAI-compatible chat-completions endpoint.
+It sends one prompt to the configured model service, which **may incur charges**. No key is saved by SAM.
+On PowerShell, set `SAM_MODEL_ENDPOINT` to the provider's HTTPS URL ending in
+`/chat/completions`, set `SAM_MODEL_API_KEY` locally, and set `SAM_MODEL` to its model ID.
+Then run `node dist/cli.js chat "Hello" --live`.
+For local model servers, loopback HTTP is permitted and the API key may be blank.
+No streaming, multi-turn persistence, tools, agent planning, or autonomous execution yet.
+Do not commit keys, and never use `--live` until you intentionally accept the provider's terms and costs.
