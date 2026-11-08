@@ -74,7 +74,8 @@ export async function runMemoryToolTurn(
   request: (messages: ToolMessage[], toolsEnabled: boolean) => Promise<ToolTurn>,
   messages: Message[], dbPath: string,
   onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed"; detail: string }) => void,
-  workspace?: string
+  workspace?: string,
+  checkpoint?: (round: number, calls: number) => void
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
   // Permit bounded sequential read-only exploration, never unlimited agent loops.
@@ -87,6 +88,7 @@ export async function runMemoryToolTurn(
     if (usedCalls + turn.tool_calls.length > MAX_CALLS)
       throw new Error("Read-only tool budget exhausted");
     usedCalls += turn.tool_calls.length;
+    checkpoint?.(round + 1, usedCalls);
     conversation.push({ role: "assistant", content: turn.content, tool_calls: turn.tool_calls });
     for (const call of turn.tool_calls) {
       onAudit?.({ tool: call.function.name, status: "requested", detail: call.id });
