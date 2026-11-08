@@ -15,6 +15,7 @@ import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { ChatStore } from "./chats.js";
+import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
 import { createInterface } from "node:readline/promises";
@@ -124,6 +125,16 @@ chats.command("new").argument("<title>").action((title:string)=>{const db=new Ch
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
+const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
+teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").action(async(o:{chat:string;objective:string;live:boolean})=>{
+ const selected=process.env.SAM_MODEL_PROVIDER??"";
+ const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+ const model=process.env.SAM_MODEL;
+ if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
+ const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+ const provider=new OpenAICompatibleProvider(endpoint,key,60000);
+ output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model));
+});
 const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
 schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
 schedules.command("add").argument("<name>").requiredOption("--every <minutes>","Interval in minutes").action((name:string,o:{every:string})=>output(addSchedule(program.opts().workspace,name,Number(o.every))));
