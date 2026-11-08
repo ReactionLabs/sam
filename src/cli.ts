@@ -128,7 +128,8 @@ program.command("talk").description("Interactive terminal conversation with conf
   .option("--model <id>","Model ID")
   .option("--with-memory","Explicitly include recent workspace memory records in model context")
   .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
-  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean})=>{
+  .option("--workspace-tools","Allow read-only model tools within the selected workspace (includes memory search)")
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean})=>{
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
       (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
@@ -162,9 +163,10 @@ program.command("talk").description("Interactive terminal conversation with conf
           const context=withIdentity(program.opts().workspace,proposed);
           const recalled=options.withMemory?recallMemory(dbPath()):undefined;
           if(recalled)context.splice(1,0,recalled);
-          const answer=options.memoryTools
-            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled),context,dbPath(),
-              event=>console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail))
+          const answer=options.memoryTools || options.workspaceTools
+            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools)),context,dbPath(),
+              event=>console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail),
+              options.workspaceTools ? program.opts().workspace : undefined)
             :(await converse(provider,{model,messages:context})).message.content;
           console.log("SAM > "+answer);
           messages.splice(0,messages.length,...proposed,{role:"assistant",content:answer});
