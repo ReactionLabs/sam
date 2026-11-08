@@ -34,6 +34,12 @@ function payload(path:string,originalHash:string,replacement:string):Proposal {
   const digest=hash(JSON.stringify([1,path,originalHash,replacementHash]));
   return {version:1,path,originalHash,replacement,replacementHash,digest};
 }
+/** Only expose files that pass the same protection checks as edit proposals. */
+export function readEditableFile(root:string,path:string):string {
+  const content=readFileSync(targetPath(root,path));
+  if(content.includes(0)) throw new Error("Binary file denied");
+  return content.toString("utf8");
+}
 /** CLI-controlled proposal. This does not authorize model writes. */
 export function proposeEdit(root:string,path:string,replacement:string) {
   if(Buffer.byteLength(replacement)>LIMIT || replacement.includes("\0")) throw new Error("Replacement too large or binary");
