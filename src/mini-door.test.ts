@@ -95,3 +95,14 @@ test("mini door: the core can hold a door, and the home-link flag rides the reco
   assert.equal(peekSessionChat(root,"alex","session-1234567890"),null);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("mini door page: copy path has the iOS fallback and honest feedback (defect 2026-11-09 18:00)",()=>{
+  const page=miniDoorPage("Dip","dip");
+  assert.match(page,/function fallbackCopyText\(text\)/);
+  assert.match(page,/ta\.readOnly=true/);
+  assert.match(page,/ta\.setSelectionRange\(0,text\.length\)/);
+  assert.match(page,/ok=document\.execCommand\("copy"\)/);
+  assert.match(page,/Long-press text to copy/);
+  assert.doesNotMatch(page,/catch\(e\)\{\}c\.textContent="Copied"/);
+  assert.match(page,/\.copy\{[^}]*min-height:36px/);
+});

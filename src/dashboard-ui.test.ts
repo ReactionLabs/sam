@@ -43,3 +43,32 @@ test("dashboard page: owner console surfaces (P8) - law revoke, approvals histor
   assert.match(dashboardHtml,/function renderActivityFilter\(/);
   assert.match(dashboardHtml,/\?actor=/);
 });
+
+test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:00)",()=>{
+  // The fallback runs synchronously inside the tap (iOS keeps user
+  // activation only for the synchronous path): a readonly textarea,
+  // explicitly selected with setSelectionRange, copied via execCommand
+  // whose result is CHECKED - never an unconditional Copied claim.
+  assert.match(dashboardHtml,/function fallbackCopyText\(text\)/);
+  assert.match(dashboardHtml,/ta\.readOnly=true/);
+  assert.match(dashboardHtml,/ta\.setSelectionRange\(0,text\.length\)/);
+  assert.match(dashboardHtml,/ok=document\.execCommand\('copy'\)/);
+  const copyFn=/async function copyText[\s\S]*?\nfunction copyButton/.exec(dashboardHtml);
+  assert.ok(copyFn,"copyText present");
+  assert.ok(copyFn[0].indexOf("fallbackCopyText(text)")<copyFn[0].indexOf("navigator.clipboard.writeText"),"fallback is attempted before the async clipboard API");
+  assert.match(dashboardHtml,/Long-press text to copy/);
+  // The affordance is a labeled, plainly tappable pill, not a faint icon.
+  assert.match(dashboardHtml,/\.bubble \.copy\{[^}]*min-height:36px/);
+  assert.match(dashboardHtml,/document\.createTextNode\(' Copy'\)/);
+  // Text selection is never eaten: bubbles and their text spans carry
+  // explicit selection + touch-callout CSS.
+  assert.match(dashboardHtml,/\.bubble \.msgtext[^}]*-webkit-touch-callout:default/);
+  // send() must never overwrite a bubble with textContent again - that
+  // destroyed the copy button on every live reply. It updates through
+  // the bubble setter, and the setter keeps the copy closure current.
+  assert.doesNotMatch(dashboardHtml,/lastElementChild\.textContent/);
+  assert.match(dashboardHtml,/pending\.setText\(d\.reply\.content\)/);
+  assert.match(dashboardHtml,/setText\(next\)\{holder\.text=next/);
+  // Team (agent) messages carry the same affordance.
+  assert.match(dashboardHtml,/copyButton\(\(\)=>event\.content\)/);
+});
