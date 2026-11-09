@@ -11,7 +11,8 @@ The dashboard is real and already exists on the integration branch. The current 
 - **Main:** still contains the earlier CLI and mission-runtime foundation.
 - **Integration PR [#64](https://github.com/ReactionLabs/sam/pull/64):** folds the post-#18 feature stack into main, including Mission Control, durable chats and branches, agent profiles, model chat, skills discovery, bounded CLI memory/workspace tools, research-team workflows, MCP connectors, and the offline-runner clock fence. It is open and unmerged.
 - **Connector hardening PR [#65](https://github.com/ReactionLabs/sam/pull/65):** validates the persisted MCP connector registry before credential use. It is a draft stacked on #64 and is also unmerged.
-- **Memory-write PR [#66](https://github.com/ReactionLabs/sam/pull/66):** adds opt-in `memory_add` to terminal chat with a local confirmation for every write. Source head `fd474ed0` passed GitHub Actions run [#42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), with 115/115 tests on Node 22 and Node 24. The current branch tip is a documentation-only sync. Windows and live MiniMax acceptance remain pending.
+- **Memory-write PR [#66](https://github.com/ReactionLabs/sam/pull/66):** adds opt-in `memory_add` to terminal chat with a local confirmation for every write. Source head `fd474ed0` passed GitHub Actions run [#42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), with 115/115 tests on Node 22 and Node 24. Windows and live MiniMax acceptance remain pending.
+- **Agent Box storage PR [#67](https://github.com/ReactionLabs/sam/pull/67):** open draft based on #64. It adds per-box mission/memory/chat/profile storage namespaces and passed 113/113 tests on Node 22 and Node 24 in run [#42556313860](https://github.com/ReactionLabs/sam/actions/runs/42556313860). It is a separate branch, not included in the #66/#68 stack, and does not yet provide process or credential isolation.
 - **Dashboard local-tool PR [#68](https://github.com/ReactionLabs/sam/pull/68):** open draft stacked on #66. It connects the existing main chat to opt-in, read-only SQLite memory and bounded workspace tools, with a separate file root and durable audit. GitHub Actions run [#42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520) passed build and 117/117 tests on both Node 22 and Node 24. Windows/live acceptance remain pending. It is not on `main`.
 
 Do not treat any unmerged PR as part of main. Do not merge or deploy without owner approval.
@@ -94,7 +95,7 @@ Skill install, update, enable/disable, removal, sandbox testing, self-authored s
 
 ### Agents, teams, connectors, and missions
 
-- Agent profiles can pin a model and one connector. A profile is not yet an independent Agent Box with isolated memory, credentials, and process environment.
+- Agent profiles can pin a model and one connector. Draft PR #67 adds per-box storage namespaces for missions, memory, chats, branches, and profiles, but it is separate from the #66/#68 stack and remains unmerged. It is not OS/process or credential isolation.
 - The bounded research-team command makes separate Research, QA, and SAM model calls and stores attributed events in a durable chat. Optional workspace evidence, bounded Brave Search snippets, and read-only workspace tools are explicit flags. This is not persistent autonomous delegation.
 - MCP connectors use environment-backed credentials, an exact host allowlist, and a read-only tool allowlist. The browser never receives the credential value. PR #65 adds strict validation of the saved connector registry. This is not a general MCP capability manager or a hardened multi-tenant credential vault.
 - Missions, tasks, leases, and an offline deterministic echo runner are durable. The daemon is a local control IPC process, not yet an asynchronous mission worker that continues plan/act/evaluate loops independently of the browser.
@@ -157,7 +158,7 @@ PRs #64, #65, #66, and #68 have successful Node 22/24 GitHub Actions runs. PR #6
 
 1. Verify PR #66's owner-approved terminal memory write/read flow on Windows with MiniMax, including a fresh-process read and denied-write test.
 2. Verify PR #68's dashboard memory/workspace read tools on Windows with MiniMax, including the split `C:\Projects\sam` state root and `C:\Projects` file root, disabled-tool denial, profile scoping, and durable chat/journal audit.
-3. Complete true per-Agent-Box identity, memory, connector, and credential isolation before claiming multi-instance isolation.
+3. Reconcile PR #67's per-box storage branch with the #66/#68 memory and dashboard tool stack before any merge; then complete authenticated identity, connector credential, and process isolation before claiming independent Agent Boxes.
 4. Add memory update/archive tools through action-bound owner approval.
 5. Build the durable background mission loop, then the standards-based Skill Engine and reviewed Agent Reach adapter.
 6. Add optional Obsidian vault access, webhook wake-ups, Tailscale Serve, and later application adapters such as Blender only after the core permission model is verified.
