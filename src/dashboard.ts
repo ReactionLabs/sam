@@ -169,7 +169,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const reply=await runChatTurn(workspace,id,body.content);
         const result={message:{role:"assistant" as const,content:reply}};
         json(200,{reply:result.message,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
-      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
+      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
     const doorMatch=/^\/mini\/([0-9a-f]{32,64})(\/(message|history))?(\?.*)?$/.exec(req.url??"");
     if(doorMatch){
@@ -211,7 +211,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
               const reply=await runChatTurn(workspace,fresh,content.trim());json(200,{reply:{role:"assistant",content:reply}});
             }else throw error;
           }
-        }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";json(400,{error:safe});}
+        }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";console.error("[SAM door chat]",safe,"| cause:",message);json(400,{error:safe});}
         return;
       }
       res.writeHead(405);res.end();return;
