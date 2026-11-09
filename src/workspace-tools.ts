@@ -34,7 +34,7 @@ export const WORKSPACE_TOOLS = [
   { type: "function", function: { name: "search_files", description: "Search UTF-8 files in one workspace directory, read-only and bounded.", parameters: { type: "object", properties: { query: { type: "string" }, path: { type: "string" } }, required: ["query","path"], additionalProperties: false } } }
 ] as const;
 
-export function executeWorkspaceTool(root: string, name: string, rawArgs: string): string {
+export function executeWorkspaceTool(root: string, name: string, rawArgs: string, skillRoot = root): string {
   let input: unknown;
   try { input = JSON.parse(rawArgs); } catch { throw new Error("Invalid workspace tool JSON"); }
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error("Invalid workspace tool arguments");
@@ -45,10 +45,10 @@ export function executeWorkspaceTool(root: string, name: string, rawArgs: string
       keys.length !== expected.length || keys.some(k => !expected.includes(k)) ||
       (name !== "list_skills" && name !== "read_skill" && (typeof args.path !== "string" || args.path.length > 240)))
     throw new Error("Unsupported workspace tool or arguments");
-  if (name === "list_skills") return JSON.stringify({ untrusted: true, skills: discoverSkills(root) }).slice(0,16000);
+  if (name === "list_skills") return JSON.stringify({ untrusted: true, skills: discoverSkills(skillRoot) }).slice(0,16000);
   if (name === "read_skill") {
     if (typeof args.name !== "string") throw new Error("Invalid skill name");
-    return JSON.stringify(readSkill(root,args.name));
+    return JSON.stringify(readSkill(skillRoot,args.name));
   }
   const path = args.path as string;
   if (name === "list_directory") return JSON.stringify({ untrusted: true, result: inspectDirectory(root,path) });
