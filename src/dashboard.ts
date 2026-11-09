@@ -5,7 +5,9 @@ import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { discoverSkills } from "./skills.js";
-import { connectorChat } from "./connector-chat.js";
+import { runChatTurn } from "./agent-turn.js";
+import { PreferenceStore } from "./preferences.js";
+import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -13,7 +15,7 @@ import { join, resolve } from "node:path";
 export type DashboardConfig={defaultAgent:string;showTeamEvents:boolean};
 const defaultDashboardConfig:DashboardConfig={defaultAgent:"sam",showTeamEvents:true};
 function configPath(root:string){return join(resolve(root),".sam","dashboard-config.json");}
-function readDashboardConfig(root:string):DashboardConfig{
+export function readDashboardConfig(root:string):DashboardConfig{
  const file=configPath(root);if(!existsSync(file))return {...defaultDashboardConfig};
  const data=JSON.parse(readFileSync(file,"utf8")) as Partial<DashboardConfig>;
  return {defaultAgent:typeof data.defaultAgent==="string"?data.defaultAgent:"sam",showTeamEvents:data.showTeamEvents!==false};
@@ -129,31 +131,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       pending.add(id);
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
-        const providerName=process.env.SAM_MODEL_PROVIDER??"";
-        const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
-        if(!endpoint)throw Error("Model not configured");
-        const key=process.env.SAM_MODEL_API_KEY??(providerName==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
-        const provider=new OpenAICompatibleProvider(endpoint,key,60000);
-        const db=new ChatStore(workspace);let history;let chatAgent:string|null=null;
-        try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");chatAgent=db.list().find(c=>c.id===id)?.agent_name??null;db.add(id,"user",body.content);}finally{db.close();}
-        const config=readDashboardConfig(workspace);const profiles=chatStoreAgents(workspace);const active=profiles.find(a=>a.name===(chatAgent??config.defaultAgent));
-        const model=active?.model??process.env.SAM_MODEL;
-        if(!model)throw Error("Model not configured");
-        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Approved read-only MCP connector tools may be available if configured for the active profile. Do not invent folders, archive, search, or other unsupported UI features. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
-        let result;
-        if(active?.connector_id){
-          // A profile connector pin governs absolutely: that connector, or a loud failure.
-          const pinned=connectors(workspace).find(c=>c.id===active.connector_id);
-          if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-          result={message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages,active.connector_id)}};
-        }else if(chatAgent){
-          // A chat pinned to a profile without a connector is sandboxed: plain model, no live data.
-          result=await provider.complete({model,messages});
-        }else{
-          const useConnectors=connectors(workspace).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-          result=useConnectors?{message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}}:await provider.complete({model,messages});
-        }
-        const saved=new ChatStore(workspace);try{saved.add(id,"assistant",result.message.content); }finally{saved.close();}
+        const reply=await runChatTurn(workspace,id,body.content);
+        const result={message:{role:"assistant" as const,content:reply}};
         json(200,{reply:result.message});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
@@ -172,7 +151,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const raw=readFileSync(audit,"utf8");
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),logs}));
+        const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

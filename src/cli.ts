@@ -14,6 +14,9 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
+import { PreferenceStore } from "./preferences.js";
+import { heartbeatJobs, addHeartbeatJob, removeHeartbeatJob, runHeartbeat, deliverToChannel } from "./heartbeat.js";
+import { runChatTurn } from "./agent-turn.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
 import { serveWebhookChannel } from "./webhook.js";
@@ -157,6 +160,37 @@ program.command("discord-post").description("Post a message to a Discord channel
   const channel=channels(root).find(c=>c.enabled&&c.kind==="discord"&&c.name===o.channel);
   if(!channel)throw new Error("No enabled discord channel with that name");
   output({posted:await postDiscord(channel,o.text)});
+ });
+const prefCmd=program.command("preferences").description("Preference memory and standing law, per profile");
+prefCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.list(o.profile));}finally{store.close();}});
+prefCmd.command("add").argument("<profile>").argument("<statement>").action((profile:string,statement:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.note(profile,statement,"rule","operator"));}finally{store.close();}});
+prefCmd.command("revoke").argument("<id>").action((id:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output({revoked:store.revoke(id)});}finally{store.close();}});
+const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
+hbCmd.command("add").argument("<name>").argument("<minutes>").argument("<profile>").argument("<prompt>").option("--channel <id>","Deliver replies to this channel id").action((name:string,minutes:string,profile:string,prompt:string,o:{channel?:string})=>output(addHeartbeatJob(program.opts().workspace,name,Number(minutes),profile,prompt,o.channel??null)));
+hbCmd.command("list").action(()=>output(heartbeatJobs(program.opts().workspace)));
+hbCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeHeartbeatJob(program.opts().workspace,id)}));
+program.command("heartbeat").description("Run one heartbeat tick now: consolidate preference memory, promote law, run due jobs")
+ .action(async()=>{
+  const root=program.opts().workspace as string;
+  const ensureChat=async(title:string,profile:string)=>{
+   const db=new ChatStore(root);
+   try{
+    const found=db.list().find(c=>c.title===title&&(c.agent_name??null)===(profile==="sam"?null:profile));
+    if(found)return found.id;
+    return db.create(title,profile==="sam"?null:profile).id;
+   }finally{db.close();}
+  };
+  const deliver=async(channelId:string,text:string)=>{
+   const channel=channels(root).find(c=>c.id===channelId);
+   await deliverToChannel(root,channelId,text,
+    async(chatId:number,body:string)=>{
+     if(!channel||channel.kind!=="telegram")return;
+     const token=process.env[channel.tokenEnv];if(!token)throw new Error("Telegram credential missing");
+     await new TelegramApi(token).sendMessage(chatId,body);
+    },
+    async(ch,body)=>postDiscord(ch,body));
+  };
+  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content),ensureChat,deliver}));
  });
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
