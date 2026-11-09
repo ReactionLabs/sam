@@ -49,6 +49,7 @@ import { MissionStore } from "./storage.js";
 import { listActions, proposeAction, decideAction } from "./actions.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
+import { detectCorrection, proposeCorrection } from "./corrections.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
 const program=new Command();
@@ -225,6 +226,9 @@ actCmd.command("list").option("--pending","Only pending").option("--chat <id>","
 actCmd.command("propose").argument("<profile>").argument("<kind>").argument("<title>").argument("<detail>").option("--chat <id>","Stamp the chat this proposal belongs to").action((profile:string,kind:string,title:string,detail:string,o:{chat?:string})=>output(proposeAction(program.opts().workspace,{actor:profile,kind,title,detail,chatId:o.chat??null})));
 actCmd.command("approve").argument("<id>").action(async(id:string)=>output(await decideAction(program.opts().workspace,id,true)));
 actCmd.command("reject").argument("<id>").action(async(id:string)=>output(await decideAction(program.opts().workspace,id,false)));
+const corrCmd=program.command("corrections").description("Corrections (P6): owner corrections in a message, proposed as standing law through the approval gate - never instant law");
+corrCmd.command("detect").argument("<text>").description("Detection only: show the rule statement a message would propose; proposes nothing").action((text:string)=>output({correction:detectCorrection(text)}));
+corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat <id>","Stamp the chat the correction came from").description("Detect a correction in a message and route it into the approval gate as a pending law proposal (deduped)").action((profile:string,text:string,o:{chat?:string})=>{const correction=detectCorrection(text);if(!correction){output({correction:null,proposal:null});return;}const routed=proposeCorrection(program.opts().workspace,{actor:profile,chatId:o.chat??null,text});output({correction,proposal:routed?.proposal??null,created:routed?.created??false});});
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")

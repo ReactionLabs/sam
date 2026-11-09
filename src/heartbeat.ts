@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore, extractPreferences } from "./preferences.js";
+import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
 import { loadBridgeState } from "./telegram.js";
@@ -130,11 +131,11 @@ export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>
  return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
 }
 function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
-export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[]}{
+export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
  const db=new ChatStore(root);const prefs=new PreferenceStore(root);
- let scanned=0,noted=0;
+ let scanned=0,noted=0,corrections=0;
  // Episodic evidence (P4): every new message, both roles, grouped by
  // profile and by the message's own date, on the same watermark scan.
  const evidence=new Map<string,Map<string,Map<string,EpisodeChat>>>();
@@ -155,7 +156,12 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     }
     if(msg.role!=="user")continue;
     scanned++;
-    for(const found of extractPreferences(msg.content)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
+    // Corrections (P6): this scan is the second capture path, so it routes
+    // corrections to the same P1 gate (deduped against the turn path) and
+    // never lets a corrected rule slip in here as instant law.
+    let correction=null as ReturnType<typeof detectCorrection>;
+    try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch{/* the gate never breaks a tick */}
+    for(const found of withoutCorrectedRules(extractPreferences(msg.content),correction)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
   }
@@ -168,8 +174,8 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
    }
   }
   state.lastTick=new Date().toISOString();saveState(root,state);
-  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes});
-  return {scanned,noted,promoted,episodes};
+  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections});
+  return {scanned,noted,promoted,episodes,corrections};
  }finally{db.close();prefs.close();}
 }
 export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
