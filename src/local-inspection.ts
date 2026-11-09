@@ -2,7 +2,7 @@ import { lstatSync, readdirSync, realpathSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
 export type InspectedEntry = { name: string; type: "file" | "directory" | "blocked" };
-const SENSITIVE = /^(\.env(?:\..*)?|\.git|\.sam|node_modules|id_(?:rsa|ed25519)|.*\.(?:pem|key|p12|pfx))$/i;
+const SENSITIVE = /^(\.env(?:\..*)?|\.git|\.sam|node_modules|\.npmrc|\.pypirc|\.netrc|\.aws|\.ssh|\.kube|kubeconfig|credentials?(?:\..*)?|secrets?(?:\..*)?|tokens?(?:\..*)?|service[-_]?account(?:\..*)?|id_(?:rsa|ed25519)|.*\.(?:pem|key|p12|pfx|jks|keystore))$/i;
 const MAX_ENTRIES = 100;
 
 /**
