@@ -12,12 +12,12 @@ import { executeOwnTool } from "./own-tools.js";
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), "sam-actions-")); }
 
-test("actions: an approved note lands in the actor's memory scope and nowhere else", () => {
+test("actions: an approved note lands in the actor's memory scope and nowhere else", async () => {
   const root = fresh();
   try {
     const a = proposeAction(root, { actor: "alex", kind: "note", title: "Save the launch date", detail: "The launch date is March 3" });
     assert.equal(a.status, "pending");
-    const done = decideAction(root, a.id, true);
+    const done = await await decideAction(root, a.id, true);
     assert.equal(done.status, "done");
     const store = new MemoryStore(join(root, ".sam", "missions.db"));
     try {
@@ -30,29 +30,29 @@ test("actions: an approved note lands in the actor's memory scope and nowhere el
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("actions: an approved law becomes standing law; a rejected one never executes", () => {
+test("actions: an approved law becomes standing law; a rejected one never executes", async () => {
   const root = fresh();
   try {
     const good = proposeAction(root, { actor: "alex", kind: "law", title: "Rule", detail: "Always confirm before spending" });
-    decideAction(root, good.id, true);
+    await decideAction(root, good.id, true);
     const prefs = new PreferenceStore(root);
     try { assert.ok(prefs.lawsFor("alex").some(l => l.statement.includes("confirm before spending"))); }
     finally { prefs.close(); }
     const bad = proposeAction(root, { actor: "alex", kind: "note", title: "Nope", detail: "should never be saved" });
-    const rejected = decideAction(root, bad.id, false);
+    const rejected = await decideAction(root, bad.id, false);
     assert.equal(rejected.status, "rejected");
     const store = new MemoryStore(join(root, ".sam", "missions.db"));
     try { assert.equal(store.list(undefined, ["profile:alex"]).length, 0); }
     finally { store.close(); }
-    assert.throws(() => decideAction(root, bad.id, true), /already decided/);
+    await assert.rejects(decideAction(root, bad.id, true), /already decided/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("actions: an approved heartbeat creates the job, and the whole life is in the ledger", () => {
+test("actions: an approved heartbeat creates the job, and the whole life is in the ledger", async () => {
   const root = fresh();
   try {
     const a = proposeAction(root, { actor: "sam", kind: "heartbeat", title: "Morning check", detail: JSON.stringify({ name: "morning check", minutes: 1440, profile: "sam", prompt: "Summarize overnight changes" }) });
-    decideAction(root, a.id, true);
+    await decideAction(root, a.id, true);
     assert.equal(heartbeatJobs(root).length, 1);
     const kinds = readActivity(root, 50).map(x => x.kind);
     assert.ok(kinds.includes("proposal"));
@@ -61,7 +61,7 @@ test("actions: an approved heartbeat creates the job, and the whole life is in t
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("actions: the chat tool proposes but cannot execute - approval is the only door", () => {
+test("actions: the chat tool proposes but cannot execute - approval is the only door", async () => {
   const root = fresh();
   try {
     const out = executeOwnTool(root, "alex", "sam_propose_action", { kind: "note", title: "From chat", detail: "A fact from a chat" }) as { status: string; id: string };
@@ -69,14 +69,14 @@ test("actions: the chat tool proposes but cannot execute - approval is the only 
     const store = new MemoryStore(join(root, ".sam", "missions.db"));
     try { assert.equal(store.list(undefined, ["profile:alex"]).length, 0); }
     finally { store.close(); }
-    decideAction(root, out.id, true);
+    await decideAction(root, out.id, true);
     const store2 = new MemoryStore(join(root, ".sam", "missions.db"));
     try { assert.equal(store2.list(undefined, ["profile:alex"]).length, 1); }
     finally { store2.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("actions: a proposal made in a chat carries that chat's id, and legacy records read as unattached", () => {
+test("actions: a proposal made in a chat carries that chat's id, and legacy records read as unattached", async () => {
   const root = fresh();
   try {
     const out = executeOwnTool(root, "alex", "sam_propose_action", { kind: "note", title: "In chat", detail: "stamped" }, "chat-123") as { id: string };

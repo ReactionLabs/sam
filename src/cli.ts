@@ -29,6 +29,7 @@ import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
+import { searchSkillRegistry, installSkill, installedSkills, removeInstalledSkill } from "./skill-registry.js";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
@@ -214,8 +215,8 @@ linkCmd.command("delete").argument("<id>").action((id:string)=>output({deleted:d
 const actCmd=program.command("actions").description("Proposed actions: SAM proposes, the owner approves, then it executes");
 actCmd.command("list").option("--pending","Only pending").option("--chat <id>","Only this chat").option("--actor <name>","Only this profile").action((o:{pending?:boolean;chat?:string;actor?:string})=>output(actionsView(program.opts().workspace,{pending:!!o.pending,chat:o.chat,actor:o.actor})));
 actCmd.command("propose").argument("<profile>").argument("<kind>").argument("<title>").argument("<detail>").option("--chat <id>","Stamp the chat this proposal belongs to").action((profile:string,kind:string,title:string,detail:string,o:{chat?:string})=>output(proposeAction(program.opts().workspace,{actor:profile,kind,title,detail,chatId:o.chat??null})));
-actCmd.command("approve").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,true)));
-actCmd.command("reject").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,false)));
+actCmd.command("approve").argument("<id>").action(async(id:string)=>output(await decideAction(program.opts().workspace,id,true)));
+actCmd.command("reject").argument("<id>").action(async(id:string)=>output(await decideAction(program.opts().workspace,id,false)));
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
@@ -262,6 +263,10 @@ skills.command("list").description("List validated local skill metadata").action
 skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
 skills.command("show").argument("<name>").description("Show skill metadata (not executable instructions)").action((name:string)=>output(findSkill(program.opts().workspace,name)));
 skills.command("read").argument("<name>").description("Read installed skill instructions as untrusted reference, without execution").action((name:string)=>output(readSkill(program.opts().workspace,name)));
+skills.command("search").argument("<query>").option("--limit <n>","Max results").description("Search the skills.sh directory (live, no key needed)").action(async(query:string,o:{limit?:string})=>output(await searchSkillRegistry(query,o.limit?Number(o.limit):10)));
+skills.command("install").argument("<ref>").description("Install skill(s) from skills.sh: owner/repo or owner/repo@skill-name; fetched from GitHub, validated, never executed").action(async(ref:string)=>output(await installSkill(program.opts().workspace,ref,{actor:"operator"})));
+skills.command("installed").description("Skills installed from the registry, with provenance").action(()=>output(installedSkills(program.opts().workspace)));
+skills.command("remove").argument("<name>").description("Remove a registry-installed skill (hand-placed skills are never touched)").action((name:string)=>output({removed:removeInstalledSkill(program.opts().workspace,name)}));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}

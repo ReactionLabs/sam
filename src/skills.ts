@@ -17,7 +17,7 @@ function inside(root: string, path: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith("../") && !rel.startsWith("..\\") && !isAbsolute(rel));
 }
 
-function metadata(markdown: string): { name: string; description: string } | undefined {
+export function parseSkillMetadata(markdown: string): { name: string; description: string } | undefined {
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!match || match[1].length > 8192) return;
   const values: Record<string, string> = {};
@@ -52,7 +52,7 @@ export function discoverSkills(workspace: string): SkillEntry[] {
       const stat = lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_FILE_BYTES) continue;
       if (!inside(actualBase, realpathSync(file))) continue;
-      const parsed = metadata(readFileSync(file, "utf8"));
+      const parsed = parseSkillMetadata(readFileSync(file, "utf8"));
       if (!parsed || names.has(parsed.name)) continue;
       names.add(parsed.name);
       found.push({ ...parsed, path: relative(base, file), source: folder });

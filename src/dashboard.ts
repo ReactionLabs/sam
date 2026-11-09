@@ -95,7 +95,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     const actionRoute=req.url?.match(new RegExp("^"+route+"/actions/([0-9a-f-]{36})/decide$"));
     if(actionRoute&&req.method==="POST"){
-      try{const body=await post();json(200,decideAction(workspace,actionRoute[1],body.decision==="approve"));}catch{json(400,{error:"Invalid action decision"});}return;
+      try{const body=await post();json(200,await decideAction(workspace,actionRoute[1],body.decision==="approve"));}catch{json(400,{error:"Invalid action decision"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/connectors"){
       try{const b=await post();if(typeof b.name!=="string"||typeof b.url!=="string"||typeof b.tokenEnv!=="string")throw Error("Invalid connector");

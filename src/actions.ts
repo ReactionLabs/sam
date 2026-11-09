@@ -6,6 +6,7 @@ import { PreferenceStore } from "./preferences.js";
 import { addHeartbeatJob } from "./heartbeat.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
+import { installSkill } from "./skill-registry.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -14,14 +15,14 @@ import { recordActivity } from "./activity.js";
 // sends, no service control, no money, no trading - widening this list is an
 // owner decision, never a model decision. Every step lands in the activity
 // ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
   status: ActionStatus; createdAt: string; decidedAt: string | null; result: string | null;
   chatId: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill"];
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
@@ -49,7 +50,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);
   return item;
 }
-function execute(root: string, a: ActionProposal): string {
+async function execute(root: string, a: ActionProposal): Promise<string> {
   if (a.kind === "note") {
     const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
     try {
@@ -68,12 +69,17 @@ function execute(root: string, a: ActionProposal): string {
     const job = addHeartbeatJob(root, spec.name, Number(spec.minutes), spec.profile, spec.prompt, spec.channelId ?? null);
     return "Heartbeat job created (" + job.id + ")";
   }
-  const spec = JSON.parse(a.detail) as { chatId: string; text: string };
-  const db = new ChatStore(root);
-  try { db.add(spec.chatId, "assistant", spec.text); return "Message posted to chat " + spec.chatId; }
-  finally { db.close(); }
+  if (a.kind === "say") {
+    const spec = JSON.parse(a.detail) as { chatId: string; text: string };
+    const db = new ChatStore(root);
+    try { db.add(spec.chatId, "assistant", spec.text); return "Message posted to chat " + spec.chatId; }
+    finally { db.close(); }
+  }
+  const summary = await installSkill(root, a.detail, { actor: a.actor });
+  if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
+  return "Installed skill(s): " + summary.installed.map(i => i.name).join(", ") + (summary.skipped.length ? " (skipped: " + summary.skipped.join("; ") + ")" : "");
 }
-export function decideAction(root: string, id: string, approve: boolean): ActionProposal {
+export async function decideAction(root: string, id: string, approve: boolean): Promise<ActionProposal> {
   const items = listActions(root);
   const a = items.find(x => x.id === id);
   if (!a) throw new Error("Unknown action");
@@ -85,7 +91,7 @@ export function decideAction(root: string, id: string, approve: boolean): Action
     recordActivity(root, "owner", "rejected", a.kind + ": " + a.title);
     return a;
   }
-  try { a.result = execute(root, a); a.status = "done"; }
+  try { a.result = await execute(root, a); a.status = "done"; }
   catch (e) { a.status = "failed"; a.result = e instanceof Error ? e.message : "Execution failed"; }
   saveActions(root, items);
   recordActivity(root, "owner", a.status === "done" ? "approved" : "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
