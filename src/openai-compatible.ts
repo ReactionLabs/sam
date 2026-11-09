@@ -74,6 +74,37 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw error;
     } finally { clearTimeout(timer); }
   }
+  /** Bounded dashboard connector tool turn. Only host-supplied tool definitions are advertised. */
+  async completeConnectorTurn(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
+    if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
+    try{
+      const response=await fetch(this.endpoint,{method:"POST",redirect:"error",signal:controller.signal,
+        headers:{"Content-Type":"application/json",...(this.apiKey?{Authorization:"Bearer "+this.apiKey}:{})},
+        body:JSON.stringify({model,messages,tools,tool_choice:"auto",stream:false})});
+      if(!response.ok)throw Error("Model connector request failed (HTTP "+response.status+")");
+      const reader=response.body?.getReader();if(!reader)throw Error("Empty model response");
+      const chunks:Uint8Array[]=[];let length=0;
+      try{for(;;){const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(value);}}finally{reader.releaseLock();}
+      const data=JSON.parse(Buffer.concat(chunks).toString("utf8")) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
+      const msg=data.choices?.[0]?.message;
+      if(!msg)throw Error("Invalid model response");
+      const content=typeof msg.content==="string"?msg.content.replace(/<think>[\\s\\S]*?<\\/think>/gi,"").trim():null;
+      if(content&&/<\\/?think>|<\\|tool_call\\|>|<tool_call>/i.test(content))throw Error("Unsafe model output");
+      const raw=msg.tool_calls;
+      if(raw!==undefined&&!Array.isArray(raw))throw Error("Invalid tool calls");
+      if(Array.isArray(raw)&&raw.length>4)throw Error("Too many tool calls");
+      const calls:Array<{id:string;name:string;args:Record<string,unknown>}>=[];
+      for(const call of (raw??[]) as Array<{id?:unknown;type?:unknown;function?:{name?:unknown;arguments?:unknown}}>){
+        if(typeof call.id!=="string"||call.id.length>128||call.type!=="function"||typeof call.function?.name!=="string"||typeof call.function.arguments!=="string"||call.function.arguments.length>4000)throw Error("Invalid tool call");
+        const args:unknown=JSON.parse(call.function.arguments);
+        if(!args||typeof args!=="object"||Array.isArray(args))throw Error("Invalid tool arguments");
+        calls.push({id:call.id,name:call.function.name,args:args as Record<string,unknown>});
+      }
+      if(!content&&!calls.length)throw Error("Empty model response");
+      return {content:content||null,calls};
+    }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw Error("Model connector network error");throw e;}finally{clearTimeout(timer);}
+  }
   async complete(request: ConversationRequest): Promise<ConversationResponse> {
     validateConversation(request);
     if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\.0\.0\.1|\[::1\])$/))
