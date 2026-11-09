@@ -49,7 +49,7 @@ The terminal chat keeps a bounded in-memory conversation for the current process
 
 On the integration stack:
 
-- `--memory-tools` enables model-selected read-only SQLite memory search and listing.
+- `--memory-tools` enables model-selected read-only SQLite memory search.
 - `--workspace-tools` additionally enables bounded read-only directory listing, file reads, file search, and reading installed skill instructions as untrusted reference material.
 - The model tool loop is limited to four rounds and eight calls per user turn, with no more than three calls in one model response.
 - Tool activity and outcomes are recorded in the local SQLite agent-loop journal. Restart recovery marks an unfinished loop interrupted; it never replays tool calls automatically.
@@ -57,6 +57,7 @@ On the integration stack:
 
 The current branch adds:
 
+- `memory_list` for bounded, read-only retrieval of recent records.
 - `--memory-write` to advertise `memory_add` to the model.
 - A local confirmation prompt for **every** proposed memory write.
 - Runtime-owned provenance. The model cannot choose the record's source.
