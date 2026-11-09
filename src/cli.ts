@@ -17,6 +17,7 @@ import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
 import { serveWebhookChannel } from "./webhook.js";
+import { postDiscord } from "./discord.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
@@ -125,6 +126,7 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
 channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));
+channelCmd.command("add-discord").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"discord",name,profile,tokenEnv)));
 channelCmd.command("add-webhook").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"webhook",name,profile,tokenEnv)));
 channelCmd.command("list").action(()=>output(channels(program.opts().workspace)));
 channelCmd.command("owners").argument("<id>").argument("<ids>").action((id:string,ids:string)=>output(setChannelOwners(program.opts().workspace,id,ids.split(",").map(x=>Number(x.trim())))));
@@ -146,6 +148,15 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
   console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
+ });
+program.command("discord-post").description("Post a message to a Discord channel via its webhook (channel kind: discord)")
+ .requiredOption("--channel <name>","Discord channel name")
+ .requiredOption("--text <text>","Message text")
+ .action(async(o:{channel:string;text:string})=>{
+  const root=program.opts().workspace as string;
+  const channel=channels(root).find(c=>c.enabled&&c.kind==="discord"&&c.name===o.channel);
+  if(!channel)throw new Error("No enabled discord channel with that name");
+  output({posted:await postDiscord(channel,o.text)});
  });
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
