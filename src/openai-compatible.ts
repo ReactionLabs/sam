@@ -22,7 +22,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   async completeToolTurn(model: string, messages: ToolMessage[], toolsEnabled: boolean, workspaceEnabled = false, memoryWriteEnabled = false): Promise<ToolTurn> {
     if (!model.trim() || messages.length < 1 || messages.length > 100)
       throw new Error("Invalid model tool request");
-    if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/))
+    if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\.0\.0\.1|\[::1\])$/))
       throw new Error("Remote model requires an API key");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
