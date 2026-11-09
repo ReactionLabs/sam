@@ -9,8 +9,22 @@ export type BoxTool = Readonly<{
   connector: string;
   resource: string;
   action: string;
-  run: (args: unknown) => unknown | Promise<unknown>;
+  run: (args: unknown, identity: BoxIdentity) => unknown | Promise<unknown>;
 }>;
+
+/** Reject model-supplied scope selectors, including nested objects and arrays. */
+function containsScopeOverride(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (seen.has(value)) return true; // Cyclic/non-JSON inputs fail closed.
+  seen.add(value);
+  for (const [key, child] of Object.entries(value)) {
+    if (/^(owner|instance|tenant)[_-]?id$/i.test(key) ||
+        key === "__proto__" || key === "prototype" || key === "constructor" ||
+        containsScopeOverride(child, seen)) return true;
+  }
+  seen.delete(value);
+  return false;
+}
 
 /**
  * Binds model-visible tool names to trusted identity and host-controlled
@@ -44,7 +58,8 @@ export function createBoxDispatcher(
     const request: CapabilityRequest = {
       ...trustedIdentity, connector: tool.connector, resource: tool.resource, action: tool.action,
     };
+    if (containsScopeOverride(args)) throw new CapabilityDeniedError();
     const grants = await loadGrants();
-    return executeWithCapability(request, grants, () => tool.run(args), now());
+    return executeWithCapability(request, grants, () => tool.run(args, trustedIdentity), now());
   };
 }
