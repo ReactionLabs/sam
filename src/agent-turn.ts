@@ -12,6 +12,7 @@ import { resolveModelForRoute, tierForRoute } from "./model-routing.js";
 import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
+import { buildChatContext } from "./compaction.js";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -44,7 +45,9 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   const tier=tierForRoute(route);
   provider.onUsage=(usage,usedModel)=>{recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
   const db=new ChatStore(root);let history;
-  try{history=db.messages(chatId);if(history.length>=100)throw Error("Chat history limit reached");db.add(chatId,"user",content);}finally{db.close();}
+  // No history limit anymore (Phase A item 2): a long chat compacts
+  // below instead of dying at 100 messages.
+  try{history=db.messages(chatId);db.add(chatId,"user",content);}finally{db.close();}
   const prefs=new PreferenceStore(root);let lawBlock="";
   try{
     // Visitor chats (P12): the person talking is a customer, not the owner.
@@ -85,7 +88,19 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     volatile:visitorNote,
     law:lawBlock,
   });
-  const messages=[{role:"system" as const,content:systemContent},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content}];
+  // Context compression (Phase A item 2): when the history crossed a
+  // trigger, the folded turns were flushed to memory first and are
+  // replaced here by their summary; the newest exchanges stay
+  // verbatim. Compaction never breaks a turn - on any error the raw
+  // tail rides, exactly the pre-compaction behavior.
+  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string}>=history.slice(-24).map(m=>({role:m.role,content:m.content}));
+  try{
+    const ctx=buildChatContext(root,{chatId,profile:profileName,visitor,history});
+    contextSummary=ctx.summary;keptHistory=ctx.kept;
+  }catch{/* fail open to the raw tail */}
+  const messages=[{role:"system" as const,content:systemContent},
+    ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
+    ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content}];
   let reply:string;
   if(active?.connector_id){
     const pinned=connectors(root).find(c=>c.id===active.connector_id);

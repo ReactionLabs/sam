@@ -7,6 +7,7 @@ export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"mess
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string }
+export interface ChatCompaction { chat_id:string; covered:number; summary:string; updated_at:string }
 export class ChatStore {
   private db:Database.Database;
   constructor(workspace:string){
@@ -18,7 +19,8 @@ export class ChatStore {
       CREATE INDEX IF NOT EXISTS chat_messages_by_chat ON chat_messages(chat_id,created_at);
       CREATE TABLE IF NOT EXISTS team_events (id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES chats(id),agent TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('message','tool','result','assignment')),content TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS team_events_by_chat ON team_events(chat_id,created_at);
-      CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,instructions TEXT NOT NULL,created_at TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS agent_profiles (id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,instructions TEXT NOT NULL,created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS chat_compactions (chat_id TEXT PRIMARY KEY REFERENCES chats(id),covered INTEGER NOT NULL,summary TEXT NOT NULL,updated_at TEXT NOT NULL);`);
     const cols=this.db.pragma("table_info(chats)") as Array<{name:string}>;
     if(!cols.some(c=>c.name==="parent_chat_id"))this.db.exec("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT REFERENCES chats(id)");
     if(!cols.some(c=>c.name==="pinned"))this.db.exec("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0,1))");
@@ -107,6 +109,26 @@ export class ChatStore {
       this.db.prepare("UPDATE chats SET updated_at=? WHERE id=?").run(now,id);
     })();
     return item;
+  }
+  // Context compaction (Plan Phase A item 2): one record per chat - how
+  // many leading messages the stored summary covers, and the summary
+  // itself. The raw messages are never deleted; the summary only
+  // replaces them in the prompt. Lives in chats.db, so the nightly
+  // backup carries it with the chat it belongs to.
+  getCompaction(id:string):ChatCompaction|null{
+    return (this.db.prepare("SELECT * FROM chat_compactions WHERE chat_id=?").get(id) as ChatCompaction|undefined)??null;
+  }
+  setCompaction(id:string,covered:number,summary:string):ChatCompaction{
+    if(!Number.isInteger(covered)||covered<0||!summary.trim()||summary.length>20000)throw new Error("Invalid compaction");
+    const item:ChatCompaction={chat_id:id,covered,summary,updated_at:new Date().toISOString()};
+    this.db.transaction(()=>{
+      if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
+      this.db.prepare("INSERT INTO chat_compactions (chat_id,covered,summary,updated_at) VALUES (@chat_id,@covered,@summary,@updated_at) ON CONFLICT(chat_id) DO UPDATE SET covered=@covered,summary=@summary,updated_at=@updated_at").run(item);
+    })();
+    return item;
+  }
+  listCompactions():ChatCompaction[]{
+    return this.db.prepare("SELECT * FROM chat_compactions ORDER BY updated_at DESC LIMIT 200").all() as ChatCompaction[];
   }
   events(id:string):TeamEvent[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");

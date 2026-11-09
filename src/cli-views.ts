@@ -7,6 +7,8 @@ import { connectors } from "./connectors.js";
 import { modelRoutingTable, type RoutingRow } from "./model-routing.js";
 import { usageSummary, type UsageSummary } from "./usage.js";
 import { standingSummary } from "./standing-files.js";
+import { listCompactions } from "./compaction.js";
+import type { ChatCompaction } from "./chats.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -36,6 +38,7 @@ export function statusSnapshot(root: string): {
   connectors: Array<{ name: string; enabled: boolean; credentialPresent: boolean }>;
   models: RoutingRow[]; usage: UsageSummary;
   standingFiles: Array<{ profile: string; files: string[]; chars: number }>;
+  compactions: ChatCompaction[];
 } {
   return {
     at: new Date().toISOString(),
@@ -47,5 +50,6 @@ export function statusSnapshot(root: string): {
     models: modelRoutingTable(),
     usage: usageSummary(root),
     standingFiles: standingSummary(root),
+    compactions: listCompactions(root),
   };
 }

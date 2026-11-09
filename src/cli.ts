@@ -52,6 +52,7 @@ import { listContacts, getContact, upsertContact, removeContact } from "./contac
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
+import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
 import { detectCorrection, proposeCorrection } from "./corrections.js";
 import { listDoors } from "./mini-door.js";
@@ -185,6 +186,10 @@ const prefCmd=program.command("preferences").description("Preference memory and 
 prefCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.list(o.profile));}finally{store.close();}});
 prefCmd.command("add").argument("<profile>").argument("<statement>").action((profile:string,statement:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.note(profile,statement,"rule","operator"));}finally{store.close();}});
 prefCmd.command("revoke").argument("<id>").action((id:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output({revoked:store.revoke(id)});}finally{store.close();}});
+const compCmd=program.command("compaction").description("Context compression (Plan Phase A item 2): long chats fold their older turns into a stored summary - a memory flush is written first, exchanges are never split, raw turns are never deleted");
+compCmd.command("list").description("Every chat that has compacted, newest first, with how many messages its summary covers").action(()=>output(listCompactions(program.opts().workspace)));
+compCmd.command("show").argument("<chat>").description("One chat's compaction record (covered count + summary), or compacted:false").action((chat:string)=>{const found=getCompaction(program.opts().workspace,chat);output(found??{chat_id:chat,compacted:false});});
+compCmd.command("run").argument("<chat>").description("Fold a chat's older turns now (keeps the newest exchanges verbatim; writes the memory flush first; visitor chats compact without a flush)").action((chat:string)=>{const result=forceCompactChat(program.opts().workspace,chat);output({chat:result.chatId,covered:result.covered,compactedNow:result.compactedNow,foldedCount:result.foldedCount,kept:result.kept.length,summary:result.summary});});
 const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
 epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
