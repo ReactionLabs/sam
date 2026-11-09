@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { createLink } from "./links.js";
-import { executeOwnTool, ownToolsChat, ownToolsFor, skillCatalogForPrompt } from "./own-tools.js";
+import { executeOwnTool, ownToolsChat, ownToolsFor, skillCatalogForPrompt, SKILL_AUTO_SELECT_DIRECTIVE } from "./own-tools.js";
 import { readActivity } from "./activity.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 
@@ -131,6 +131,67 @@ test("own tools: the skill catalog rides the chat system prompt, names and descr
   } as unknown as OpenAICompatibleProvider;
   const reply=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"use the reach skill"}]);
   assert.equal(reply,"Read it.");
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("own tools: the catalog carries the auto-selection directive, and only when a skill is installed",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-own-autoselect-"));
+ try{
+  // No skills installed: no catalog, and no directive either - there is
+  // nothing to select, so the prompt must not talk about selecting.
+  assert.equal(skillCatalogForPrompt(root),"");
+  seedSkill(root,"agent-reach","Reach the public web","SECRET-BODY-TEXT");
+  const line=skillCatalogForPrompt(root);
+  // The directive is the ruling in prompt form: never name a skill, match
+  // the task to a description, read BEFORE acting, announce the skill.
+  assert.ok(line.includes(SKILL_AUTO_SELECT_DIRECTIVE));
+  assert.match(line,/never has to name a skill/);
+  assert.match(line,/matches an installed skill's description/);
+  assert.match(line,/BEFORE you start the task/);
+  assert.match(line,/say in your reply which skill you are using/);
+  // The directive sits ahead of the entries, so the length cap keeps it.
+  assert.ok(line.indexOf("Skill auto-selection")<line.indexOf("agent-reach: Reach the public web"));
+  assert.ok(!line.includes("SECRET-BODY-TEXT"),"the catalog must never inline instructions");
+  // The read tool's own description carries the same unprompted rule.
+  const readDef=ownToolsFor(root).find(t=>(t as {function:{name:string}}).function.name==="sam_read_skill") as {function:{description:string}};
+  assert.match(readDef.function.description,/read it unprompted/);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("own tools: a task matching a skill description triggers the read with no skill named, and the reply announces it",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-own-autoselect-flow-"));
+ try{
+  seedSkill(root,"agent-reach","Reach the public web","Step one: run the reach check.");
+  seedSkill(root,"reporting","Write the weekly report","Use the three-part shape.");
+  // A directive-following model, simulated: it reads the system message,
+  // and when the owner's task matches a catalog description it reads that
+  // skill first - the owner never names any skill in either task below.
+  const fake={
+   async completeConnectorTurn(_model:string,messages:Array<Record<string,unknown>>,tools:Array<{function?:{name?:string}}>){
+    const system=messages.find(m=>m.role==="system");
+    assert.ok(system&&String(system.content).includes("Skill auto-selection"),"the directive must ride the turn's system prompt");
+    const toolMsg=messages.find(m=>m.role==="tool");
+    if(toolMsg){
+     // The read landed: instructions arrived framed as untrusted data.
+     assert.ok(String(toolMsg.content).includes("run the reach check"));
+     assert.ok(String(toolMsg.content).includes('"untrusted":true'));
+     return {content:"Using the agent-reach skill for this. Here is what people are saying.",calls:[]};
+    }
+    const user=[...messages].reverse().find(m=>m.role==="user");
+    const task=String(user?.content??"");
+    if(/public web/.test(task)&&tools.some(t=>t.function?.name==="sam_read_skill")){
+     return {content:null,calls:[{id:"c1",name:"sam_read_skill",args:{name:"agent-reach"}}]};
+    }
+    return {content:"Done, no skill needed.",calls:[]};
+   }
+  } as unknown as OpenAICompatibleProvider;
+  // Matching task, no skill named by the owner: the read fires and the
+  // final reply announces the skill it used.
+  const matched=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"check the public web for what people are saying about the launch"}]);
+  assert.match(matched,/Using the agent-reach skill/);
+  // Non-matching task: no read is forced and no skill is announced.
+  const plain=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"what time is it in Tampa"}]);
+  assert.equal(plain,"Done, no skill needed.");
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
