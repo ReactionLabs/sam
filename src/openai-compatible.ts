@@ -1,7 +1,7 @@
 import type { ConversationRequest, ConversationResponse, ModelProvider } from "./model-conversation.js";
 import { validateConversation } from "./model-conversation.js";
 import { WORKSPACE_TOOLS } from "./workspace-tools.js";
-import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
+import { MEMORY_SEARCH_TOOL, MEMORY_LIST_TOOL, MEMORY_ADD_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 
 /** Opt-in OpenAI-compatible chat completions transport. No tools or automatic calls. */
 export class OpenAICompatibleProvider implements ModelProvider {
@@ -19,10 +19,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw new Error("Invalid model timeout");
     this.endpoint = url.toString();
   }
-  async completeToolTurn(model: string, messages: ToolMessage[], toolsEnabled: boolean, workspaceEnabled = false): Promise<ToolTurn> {
+  async completeToolTurn(model: string, messages: ToolMessage[], toolsEnabled: boolean, workspaceEnabled = false, memoryWriteEnabled = false): Promise<ToolTurn> {
     if (!model.trim() || messages.length < 1 || messages.length > 100)
       throw new Error("Invalid model tool request");
-    if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/))
+    if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\.0\.0\.1|\[::1\])$/))
       throw new Error("Remote model requires an API key");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -32,7 +32,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
         headers: { "Content-Type": "application/json", ...(this.apiKey ? { Authorization: "Bearer " + this.apiKey } : {}) },
         body: JSON.stringify({
           model, messages, stream: false,
-          ...(toolsEnabled ? { tools: workspaceEnabled ? [MEMORY_SEARCH_TOOL,...WORKSPACE_TOOLS] : [MEMORY_SEARCH_TOOL], tool_choice: "auto" } : { tool_choice: "none" })
+          ...(toolsEnabled ? { tools: [MEMORY_SEARCH_TOOL, MEMORY_LIST_TOOL, ...(memoryWriteEnabled ? [MEMORY_ADD_TOOL] : []), ...(workspaceEnabled ? WORKSPACE_TOOLS : [])], tool_choice: "auto" } : { tool_choice: "none" })
         }),
         signal: controller.signal,
         redirect: "error"
@@ -56,7 +56,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       try { payload = JSON.parse(new TextDecoder().decode(bytes)); }
       catch { throw new Error("Invalid model tool JSON response"); }
       const obj = payload as { choices?: Array<{ message?: unknown }> };
-      const turn = validateToolTurn(obj?.choices?.[0]?.message, workspaceEnabled);
+      const turn = validateToolTurn(obj?.choices?.[0]?.message, workspaceEnabled, memoryWriteEnabled);
       if (typeof turn.content === "string") {
         if (/<think>/i.test(turn.content) && !/<\/think>/i.test(turn.content))
           throw new Error("Model returned unterminated reasoning content");

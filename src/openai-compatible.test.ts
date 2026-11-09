@@ -56,3 +56,28 @@ test("provider hides embedded reasoning and rejects reasoning-only replies", asy
     await assert.rejects(converse(provider, request), /unterminated reasoning/);
   } finally { server.close(); await once(server, "close"); }
 });
+
+
+test("memory write tool is advertised only after explicit write opt-in", async () => {
+  const advertised: string[][] = [];
+  const server = createServer(async (req, res) => {
+    let raw = "";
+    for await (const chunk of req) raw += chunk.toString();
+    const body = JSON.parse(raw) as { tools?: Array<{ function?: { name?: string } }> };
+    advertised.push((body.tools ?? []).map(tool => tool.function?.name ?? ""));
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Ready." } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const messages = [{ role: "user" as const, content: "Remember this." }];
+    await provider.completeToolTurn("mock", messages, true, false, false);
+    await provider.completeToolTurn("mock", messages, true, false, true);
+    assert.deepEqual(advertised[0], ["memory_search", "memory_list"]);
+    assert.deepEqual(advertised[1], ["memory_search", "memory_list", "memory_add"]);
+  } finally { server.close(); await once(server, "close"); }
+});
