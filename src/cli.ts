@@ -119,7 +119,10 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .option("--timeout <ms>","Timeout from 1000 to 120000 milliseconds","30000")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
-program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
+program.command("dashboard").description("Start local Mission Control on localhost").option("--port <number>","Loopback port","4317").option("--memory-tools","Enable read-only model-selected SQLite memory tools").option("--workspace-tools","Enable bounded read-only file and skill tools").option("--tool-root <path>","Separate authorized file root; requires --workspace-tools").action(async(o:{port:string;memoryTools?:boolean;workspaceTools?:boolean;toolRoot?:string})=>{
+  if(o.toolRoot&&!o.workspaceTools)throw new Error("--tool-root requires --workspace-tools");
+  await serveDashboard(program.opts().workspace,Number(o.port),{memoryTools:!!o.memoryTools||!!o.workspaceTools,workspaceTools:!!o.workspaceTools,toolRoot:o.toolRoot});
+});
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
 chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
@@ -230,7 +233,10 @@ program.command("talk").description("Interactive terminal conversation with conf
   .option("--memory-tools","Allow model to call read-only SQLite memory search/list tools (may incur an additional API request)")
   .option("--workspace-tools","Allow read-only workspace tools and installed skill reading (includes memory search)")
   .option("--memory-write","Allow model-proposed memory writes; confirm every write locally")
-  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean,memoryWrite?:boolean})=>{
+  .option("--tool-root <path>","Separate authorized file root; requires --workspace-tools")
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean,memoryWrite?:boolean;toolRoot?:string})=>{
+    if(options.toolRoot&&!options.workspaceTools)throw new Error("--tool-root requires --workspace-tools");
+    const toolRoot=resolve(options.toolRoot??program.opts().workspace);
     const selected=process.env.SAM_MODEL_PROVIDER??"";
     const endpoint=process.env.SAM_MODEL_ENDPOINT??
       (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
@@ -248,7 +254,7 @@ program.command("talk").description("Interactive terminal conversation with conf
         if (line.trim()==="/exit" || line.trim()==="/quit") break;
         if (line.trim()==="/dashboard") {
           console.log("SAM > Starting localhost dashboard. Open the URL printed below.");
-          void serveDashboard(program.opts().workspace).catch(e=>console.error("SAM dashboard:",e instanceof Error?e.message:"Unavailable"));
+          void serveDashboard(program.opts().workspace,4317,{memoryTools:!!options.memoryTools||!!options.memoryWrite||!!options.workspaceTools,workspaceTools:!!options.workspaceTools,toolRoot:options.toolRoot}).catch(e=>console.error("SAM dashboard:",e instanceof Error?e.message:"Unavailable"));
           continue;
         }
         if (!line.trim()) continue;
@@ -289,14 +295,15 @@ program.command("talk").description("Interactive terminal conversation with conf
           const answer=options.memoryTools || options.workspaceTools || options.memoryWrite
             ?await runMemoryToolTurn((turn,enabled,writeEnabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools),Boolean(writeEnabled)),context,dbPath(),
               event=>{console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail);journal?.event(loop!.id,"tool_"+event.status,event.tool+" "+event.detail);},
-              options.workspaceTools ? program.opts().workspace : undefined,
+              options.workspaceTools ? toolRoot : undefined,
               (round,calls)=>journal?.progress(loop!.id,round,calls),
               Boolean(options.memoryWrite),
               async proposal=>{
                 console.log("[SAM memory proposal] "+proposal.kind+": "+JSON.stringify(proposal.content));
                 const answer=await rl.question("Store this record in workspace memory? [y/N] ");
                 return /^(?:y|yes)$/i.test(answer.trim());
-              })
+              },
+              program.opts().workspace)
             :(await converse(provider,{model,messages:context})).message.content;
           if (journal && loop) journal.finish(loop.id,"completed",answer.slice(0,8000));
           console.log("SAM > "+answer);
