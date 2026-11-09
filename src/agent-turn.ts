@@ -38,12 +38,12 @@ export async function runChatTurn(root:string,chatId:string,content:string):Prom
   if(active?.connector_id){
     const pinned=connectors(root).find(c=>c.id===active.connector_id);
     if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-    reply=await connectorChat(root,provider,model,messages,active.connector_id);
+    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId});
   }else if(chatAgent){
     reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId);
   }else{
     const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-    if(useConnectors)reply=await connectorChat(root,provider,model,messages);
+    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId});
     else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId);
   }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
