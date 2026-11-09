@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
@@ -64,10 +64,27 @@ export function createBackup(root: string, destDir: string, keep = 7): BackupInf
       if (name.endsWith(".db")) { snapshotDatabase(join(state, name), join(staging, name)); databases.push(name); }
       else copyFileSync(join(state, name), join(staging, name));
     }
-    const files: BackupFileEntry[] = readdirSync(staging).sort().map(name => {
-      const path = join(staging, name);
-      return { name, bytes: statSync(path).size, sha256: sha256File(path) };
-    });
+    // Standing files (Phase A) are the one state kept in a subdirectory:
+    // .sam/standing/<profile>/<file>.md rides along whole, or a restore
+    // would silently strip every profile back to its bare paragraph.
+    const standingSrc = join(state, "standing");
+    if (existsSync(standingSrc) && statSync(standingSrc).isDirectory()) {
+      cpSync(standingSrc, join(staging, "standing"), { recursive: true });
+    }
+    // The manifest walks recursively so subdirectory state (standing
+    // files) is listed by its slash path, e.g. standing/dip/persona.md;
+    // verify and restore resolve those names with join, on any platform.
+    const walk = (dir: string, prefix: string): BackupFileEntry[] => {
+      const out: BackupFileEntry[] = [];
+      for (const name of readdirSync(dir).sort()) {
+        const path = join(dir, name);
+        const rel = prefix ? prefix + "/" + name : name;
+        if (statSync(path).isDirectory()) out.push(...walk(path, rel));
+        else out.push({ name: rel, bytes: statSync(path).size, sha256: sha256File(path) });
+      }
+      return out;
+    };
+    const files: BackupFileEntry[] = walk(staging, "");
     const created = new Date();
     const manifest: BackupManifest = { format: 1, created_at: created.toISOString(), files, databases: databases.sort() };
     writeFileSync(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
@@ -77,7 +94,7 @@ export function createBackup(root: string, destDir: string, keep = 7): BackupInf
     // to visit "." in a temp dir ("Couldn't visit directory: Permission
     // denied", owner-hit on Dip's PC 2026-11-09), and an explicit operand
     // list is deterministic on every platform's tar.
-    execFileSync("tar", ["-czf", archivePath, "-C", staging, ...files.map(f => f.name), "manifest.json"]);
+    execFileSync("tar", ["-czf", archivePath, "-C", staging, ...readdirSync(staging).sort(), "manifest.json"]);
     // Prune to the newest `keep` archives; names sort chronologically.
     const all = listBackups(dest);
     for (const old of all.slice(0, Math.max(0, all.length - keep))) rmSync(old.path, { force: true });

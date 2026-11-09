@@ -6,6 +6,7 @@ import { minis } from "./minis.js";
 import { connectors } from "./connectors.js";
 import { modelRoutingTable, type RoutingRow } from "./model-routing.js";
 import { usageSummary, type UsageSummary } from "./usage.js";
+import { standingSummary } from "./standing-files.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -34,6 +35,7 @@ export function statusSnapshot(root: string): {
   heartbeatJobs: HeartbeatJob[]; people: string[];
   connectors: Array<{ name: string; enabled: boolean; credentialPresent: boolean }>;
   models: RoutingRow[]; usage: UsageSummary;
+  standingFiles: Array<{ profile: string; files: string[]; chars: number }>;
 } {
   return {
     at: new Date().toISOString(),
@@ -44,5 +46,6 @@ export function statusSnapshot(root: string): {
     connectors: connectors(root).map(c => ({ name: c.name, enabled: c.enabled, credentialPresent: !!process.env[c.tokenEnv] })),
     models: modelRoutingTable(),
     usage: usageSummary(root),
+    standingFiles: standingSummary(root),
   };
 }

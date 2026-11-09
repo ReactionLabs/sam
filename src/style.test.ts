@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
+import { composeSystemPrompt } from "./standing-files.js";
 
 // Dip ruling 2026-11-09 09:52 EST: plain style is the base default for every
 // profile and install; standing law stays the override layer.
@@ -19,9 +20,18 @@ test("the instruction itself uses no markdown emphasis", () => {
 
 test("agent-turn bakes the style into the base prompt before profile instructions and law", () => {
   const src = readFileSync(new URL("../src/agent-turn.ts", import.meta.url), "utf8");
-  const styleAt = src.indexOf("PLAIN_STYLE_INSTRUCTION+");
-  assert.ok(styleAt > 0, "base system prompt includes the plain-style default");
-  const roleAt = src.indexOf("Adopt the role of agent", styleAt);
-  const lawAt = src.indexOf("lawBlock}", styleAt);
-  assert.ok(roleAt > styleAt && lawAt > roleAt, "style precedes profile instructions and law, so law can override it");
+  assert.ok(src.includes("style:PLAIN_STYLE_INSTRUCTION"), "agent-turn passes the plain-style default into the tier assembly");
+  assert.ok(src.includes("composeSystemPrompt"), "agent-turn assembles its system prompt through the tier composer");
+  // The composer is the ordering contract now (Phase A tiers): style in
+  // the head, the role line in the context tier, law in the volatile
+  // tail - so law can still override style.
+  const prompt = composeSystemPrompt({
+    base: "BASE", style: PLAIN_STYLE_INSTRUCTION, stable: "",
+    role: "Adopt the role of agent x: do things", context: "",
+    volatile: "", law: "Standing law for this profile: be terse",
+  });
+  const styleAt = prompt.indexOf("asterisk emphasis");
+  const roleAt = prompt.indexOf("Adopt the role of agent");
+  const lawAt = prompt.indexOf("Standing law for this profile");
+  assert.ok(styleAt > 0 && roleAt > styleAt && lawAt > roleAt, "style precedes profile instructions and law");
 });

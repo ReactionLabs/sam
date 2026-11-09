@@ -28,6 +28,7 @@ import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
+import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
 import { searchSkillRegistry, installSkill, installedSkills, removeInstalledSkill } from "./skill-registry.js";
@@ -291,6 +292,11 @@ agentCmd.command("set-connector").argument("<name>").argument("<connector>").des
     output(updated);
   }finally{db.close();}
 });
+const filesCmd=agentCmd.command("files").description("Standing files (Plan Phase A): the per-profile Markdown files - persona (stable tier), owner brief and ops notes (context tier) - assembled into the system prompt in tiers, replacing the single instructions paragraph");
+filesCmd.command("list").argument("<name>").description("List a profile's standing files with tier, size, and updated time").action((name:string)=>output(listStandingFiles(program.opts().workspace,name)));
+filesCmd.command("show").argument("<name>").argument("<file>").description("Print one standing file's content; file is one of: "+STANDING_FILES.map(f=>f.name).join(", ")).action((name:string,file:string)=>{const content=readStandingFile(program.opts().workspace,name,file);if(content===null)throw new Error("No standing file \""+file+"\" for profile \""+name+"\" yet");output({profile:name,file,content});});
+filesCmd.command("set").argument("<name>").argument("<file>").argument("<text...>").description("Write a standing file from the given text (owner words only; takes effect on the profile's next turn)").action((name:string,file:string,text:string[])=>output(writeStandingFile(program.opts().workspace,name,file,text.join(" "))));
+filesCmd.command("clear").argument("<name>").argument("<file>").description("Remove a standing file; the profile falls back to its instructions paragraph alone for that tier").action((name:string,file:string)=>output({cleared:clearStandingFile(program.opts().workspace,name,file)}));
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
