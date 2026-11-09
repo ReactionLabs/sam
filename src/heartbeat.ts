@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
@@ -6,6 +6,7 @@ import { PreferenceStore, extractPreferences } from "./preferences.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
 import { loadBridgeState } from "./telegram.js";
+import { recordActivity } from "./activity.js";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -41,12 +42,39 @@ export function removeHeartbeatJob(root:string,id:string):boolean{
  const items=heartbeatJobs(root),rest=items.filter(j=>j.id!==id);
  if(rest.length===items.length)return false;saveJobs(root,rest);return true;
 }
-interface HeartbeatState { chats:Record<string,string>; lastTick:string|null }
+export interface HeartbeatOutputRecord { hash:string; at:string; preview:string }
+interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; outputs?:Record<string,HeartbeatOutputRecord> }
 function loadState(root:string):HeartbeatState{
- if(!existsSync(statePath(root)))return {chats:{},lastTick:null};
+ if(!existsSync(statePath(root)))return {chats:{},lastTick:null,outputs:{}};
  const value:unknown=JSON.parse(readFileSync(statePath(root),"utf8"));
  if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid heartbeat state");
- return value as HeartbeatState;
+ const state=value as HeartbeatState;
+ if(!state.outputs||typeof state.outputs!=="object"||Array.isArray(state.outputs))state.outputs={};
+ return state;
+}
+// Heartbeat diffing (program P3): a job's reply is compared with its last one
+// before anything is announced. The comparison is over a normalized form, not
+// the raw text, so the model rephrasing the same facts (markdown, casing,
+// punctuation, a fresh snapshot timestamp) still reads as unchanged, while
+// any fact change (a number, a date, a verdict) reads as changed. The bias is
+// fail-open: anything the normalizer cannot prove identical is delivered.
+export function normalizeHeartbeatOutput(text:string):string{
+ const kept:string[]=[];
+ for(const rawLine of text.split(/\r?\n/)){
+  // Volatile metadata lines carry a fresh clock reading every run, never a fact.
+  if(/\b(as_of|snapshot|generated at|checked at|run at|report time)\b/i.test(rawLine))continue;
+  const line=rawLine
+   .replace(/\[([^\]]*)\]\([^)]*\)/g,"$1")
+   .replace(/[*_`#>]/g,"")
+   .toLowerCase()
+   .replace(/[^a-z0-9]+/g," ")
+   .trim();
+  if(line)kept.push(line);
+ }
+ return kept.join("\n");
+}
+export function heartbeatOutputHash(text:string):string{
+ return createHash("sha256").update(normalizeHeartbeatOutput(text)).digest("hex");
 }
 function saveState(root:string,state:HeartbeatState){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(statePath(root),JSON.stringify(state,null,2),{mode:0o600});}
 export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
@@ -79,10 +107,13 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
  }finally{db.close();prefs.close();}
 }
 export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[]}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[]}>{
  const consolidation=consolidatePreferences(root);
- const jobs=heartbeatJobs(root);const now=Date.now();const ran:string[]=[];
- let dirty=false;
+ const jobs=heartbeatJobs(root);const now=Date.now();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];
+ // Loaded after consolidation, which saves this same state file for its
+ // watermarks; the outputs map below is this tick's addition to it.
+ const state=loadState(root);
+ let dirty=false;let stateDirty=false;
  for(const job of jobs){
   if(!job.enabled)continue;
   const last=job.lastRun?Date.parse(job.lastRun):0;
@@ -90,13 +121,27 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
   const reply=await deps.runTurn(chatId,job.prompt);
   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
-  appendLog(root,{type:"job",name:job.name,profile:job.profile,replyPreview:reply.slice(0,300)});
+  const hash=heartbeatOutputHash(reply);
+  const prior=(state.outputs??{})[job.id];
+  const isChanged=!prior||prior.hash!==hash;
+  state.outputs={...(state.outputs??{}),[job.id]:{hash,at:new Date().toISOString(),preview:reply.slice(0,300)}};stateDirty=true;
+  if(!isChanged){
+   // Unchanged: a silent ledger line only. No channel delivery, no activity
+   // entry, no preview spam - a frozen stack stops announcing itself.
+   unchanged.push(job.name);
+   appendLog(root,{type:"job-unchanged",name:job.name,profile:job.profile});
+   continue;
+  }
+  changed.push(job.name);
+  appendLog(root,{type:"job",name:job.name,profile:job.profile,changed:true,replyPreview:reply.slice(0,300)});
+  recordActivity(root,job.profile,"heartbeat","Heartbeat '"+job.name+"' changed: "+reply.replace(/\s+/g," ").trim().slice(0,180));
   if(job.channelId&&deps.deliver){
    try{await deps.deliver(job.channelId,"🫀 SAM heartbeat · "+job.name+"\n\n"+reply);}catch{appendLog(root,{type:"delivery-failed",name:job.name});}
   }
  }
  if(dirty)saveJobs(root,jobs);
- return {consolidation,ran};
+ if(stateDirty)saveState(root,state);
+ return {consolidation,ran,changed,unchanged};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.
