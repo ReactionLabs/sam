@@ -26,7 +26,7 @@ PRs #13 and #17 are merged, and PR #18 is merged as the integration of #10-#17. 
 - **Dashboard exists:** local Mission Control on `127.0.0.1`, randomized URL token, persistent chats, chat branching, named agent profiles, model chat, status panels, and connector management.
 - **Dashboard connector chat:** model-selected read-only MCP calls are available when a profile is pinned to an authorized connector. Dashboard chat does not yet call local SQLite memory or workspace file tools.
 - **Live terminal chat:** OpenAI-compatible/MiniMax model transport with bounded in-process conversation context.
-- **Memory:** SQLite persistence, provenance, source/content hash, CLI add/list/search/archive, opt-in model-selected read-only search/list.
+- **Memory:** SQLite persistence, provenance, source/content hash, CLI add/list/search/archive, and opt-in model-selected read-only `memory_search` on PR #64. This branch adds `memory_list` and approval-gated `memory_add`.
 - **Workspace:** opt-in, bounded read-only list/read/search and skill inspection; protected-path, traversal, symlink, and size checks are covered by tests in the integration stack.
 - **Skills:** project-local `SKILL.md` list/find/show/read; instructions are returned as untrusted text, never executed.
 - **Research team:** bounded Research/QA/SAM model workflow; optional workspace evidence, Brave Search snippets, and read-only agent tools.
@@ -62,7 +62,8 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 | Local dashboard and durable chat | Implemented on PR #64 stack; CI green | Not yet on main; no persistent background worker |
 | Agent profiles and chat branches | Implemented on PR #64 stack; CI green | Profiles are not independent Agent Boxes |
 | Live MiniMax chat | Owner previously verified on an earlier Windows branch | Re-test against the exact current integration head |
-| Model memory search/list | Implemented on PR #64 stack; CI green | Read-only; model cannot silently save |
+| Model memory search | Implemented on PR #64 stack; CI green | Read-only search only |
+| Model memory list/add | Added on current branch; CI pending | `memory_list` is read-only; every `memory_add` requires local owner confirmation |
 | Model memory add | Implemented on this branch, CI pending | Explicit per-write local owner confirmation |
 | Model memory update/delete | Planned | Requires action-bound approval and audit |
 | Local workspace list/read/search | Implemented on PR #64 stack; CI green | Explicit opt-in, read-only, bounded |
