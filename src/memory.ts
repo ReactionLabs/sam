@@ -49,10 +49,11 @@ export class MemoryStore {
       VALUES (@id,@mission_id,@kind,@content,@source,@source_hash,@created_at,@archived_at)`).run(record);
     return record;
   }
-  list(missionId?:string):MemoryRecord[] {
+  list(missionId?:string,limit=100):MemoryRecord[] {
+    if(!Number.isSafeInteger(limit)||limit<1||limit>1000)throw new Error("Invalid memory list limit");
     return (missionId
-      ?this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL AND mission_id=? ORDER BY created_at DESC").all(missionId)
-      :this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL ORDER BY created_at DESC").all()) as MemoryRecord[];
+      ?this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL AND mission_id=? ORDER BY created_at DESC LIMIT ?").all(missionId,limit)
+      :this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT ?").all(limit)) as MemoryRecord[];
   }
   search(query:string,limit=20):MemoryRecord[] {
     if(!query.trim())return [];
