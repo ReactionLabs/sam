@@ -81,7 +81,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     try{
       const response=await fetch(this.endpoint,{method:"POST",redirect:"error",signal:controller.signal,
         headers:{"Content-Type":"application/json",...(this.apiKey?{Authorization:"Bearer "+this.apiKey}:{})},
-        body:JSON.stringify({model,messages,tools,tool_choice:"auto",stream:false})});
+        body:JSON.stringify({model,messages,...(tools.length?{tools,tool_choice:"auto"}:{tool_choice:"none"}),stream:false})});
       if(!response.ok)throw Error("Model connector request failed (HTTP "+response.status+")");
       const reader=response.body?.getReader();if(!reader)throw Error("Empty model response");
       const chunks:Uint8Array[]=[];let length=0;
