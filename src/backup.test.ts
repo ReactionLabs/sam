@@ -93,7 +93,9 @@ test("verify catches a tampered file and a corrupt database", () => {
     execFileSync("tar", ["-xzf", info.path, "-C", scratch]);
     writeFileSync(join(scratch, "minis.json"), JSON.stringify([{ name: "intruder" }]));
     const tampered = join(dest, "sam-state-20990101T000000Z.tar.gz");
-    execFileSync("tar", ["-czf", tampered, "-C", scratch, "."]);
+    // Named operands, never ".": Windows bsdtar refuses to visit "." in a
+    // temp dir (same owner-hit failure as production backup creation).
+    execFileSync("tar", ["-czf", tampered, "-C", scratch, ...readdirSync(scratch)]);
     const report = verifyBackup(tampered);
     assert.equal(report.ok, false);
     assert.ok(report.errors.some(e => e.includes("minis.json")), report.errors.join("; "));
