@@ -157,7 +157,7 @@ export async function runMemoryToolTurn(
   approveMemoryWrite?: (proposal: MemoryWriteProposal) => Promise<boolean> | boolean
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
-  // Permit bounded sequential read-only exploration, never unlimited agent loops.
+  // Permit bounded sequential tool use; every memory write still requires a local owner decision.
   const MAX_ROUNDS = 4;
   const MAX_CALLS = 8;
   let usedCalls = 0;
