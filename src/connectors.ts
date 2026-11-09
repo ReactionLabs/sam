@@ -37,30 +37,44 @@ export function getConnector(root:string,id:string):Connector{
  if(!c||!c.enabled)throw Error("Connector not found or disabled");
  allowedUrl(c.url);return c;
 }
-function parseResponse(raw:string,contentType:string):unknown{
+type RpcEnvelope={jsonrpc?:string;id?:string|number;result?:unknown;error?:unknown};
+type Session={id?:string;version:string};
+function parseResponse(raw:string,contentType:string):RpcEnvelope{
+ let parsed:unknown;
  if(contentType.includes("text/event-stream")){
-  const data=raw.split(/\r?\n/).filter(line=>line.startsWith("data:")).map(line=>line.slice(5).trim()).find(x=>x.startsWith("{"));
-  if(!data)throw Error("MCP server returned no JSON-RPC event");return JSON.parse(data);
- }
- return JSON.parse(raw);
+  const events=raw.split(/\\r?\\n\\r?\\n/);
+  const data=events.flatMap(e=>e.split(/\\r?\\n/).filter(l=>l.startsWith("data:")).map(l=>l.slice(5).trim())).find(v=>v.startsWith("{"));
+  if(!data)throw Error("MCP server returned no JSON-RPC event");
+  parsed=JSON.parse(data);
+ }else parsed=JSON.parse(raw);
+ if(!parsed||typeof parsed!=="object"||Array.isArray(parsed))throw Error("Invalid MCP response");
+ return parsed as RpcEnvelope;
 }
-export async function mcpCall(c:Connector,method:string,params:Record<string,unknown>={},tool?:string):Promise<unknown>{
- allowedUrl(c.url);
- if(!c.enabled)throw Error("Connector disabled");
- if(method==="tools/call"&&(!tool||!readOnlyTools.has(tool)||!c.allowedTools.includes(tool)))throw Error("MCP tool not authorized");
- if(!["initialize","tools/list","tools/call"].includes(method))throw Error("MCP method not authorized");
+async function exchange(c:Connector,session:Session,method:string,params:Record<string,unknown>,notification=false):Promise<unknown>{
  const key=process.env[c.tokenEnv];
  if(!key)throw Error("Connector credential missing from environment");
  const ctrl=new AbortController(),timer=setTimeout(()=>ctrl.abort(),12000);
+ const id=randomUUID();
  try{
-  const payload={jsonrpc:"2.0",id:randomUUID(),method,params:method==="tools/call"?{name:tool,arguments:params}:params};
-  const response=await fetch(c.url,{method:"POST",redirect:"error",signal:ctrl.signal,headers:{"Authorization":"Bearer "+key,"Content-Type":"application/json","Accept":"application/json, text/event-stream","MCP-Protocol-Version":"2025-06-18"},body:JSON.stringify(payload)});
+  const payload=notification?{jsonrpc:"2.0",method,params}:{jsonrpc:"2.0",id,method,params};
+  const headers:Record<string,string>={"Authorization":"Bearer "+key,"Content-Type":"application/json","Accept":"application/json, text/event-stream","MCP-Protocol-Version":session.version};
+  if(session.id)headers["Mcp-Session-Id"]=session.id;
+  const response=await fetch(c.url,{method:"POST",redirect:"error",signal:ctrl.signal,headers,body:JSON.stringify(payload)});
   if(!response.ok)throw Error(response.status===401||response.status===403?"MCP authorization failed":"MCP request failed (HTTP "+response.status+")");
-  const raw=await response.text();
-  if(raw.length>131072)throw Error("MCP response too large");
-  const result=parseResponse(raw,response.headers.get("content-type")??"");
-  if(!result||typeof result!=="object")throw Error("Invalid MCP response");
-  const rpc=result as {error?:unknown;result?:unknown};
+  const sessionId=response.headers.get("mcp-session-id");
+  if(sessionId){
+   if(sessionId.length>256||/[\\r\\n]/.test(sessionId))throw Error("Invalid MCP session ID");
+   session.id=sessionId;
+  }
+  if(notification&&response.status===202)return undefined;
+  const reader=response.body?.getReader();
+  if(!reader)throw Error("Empty MCP response");
+  const chunks:Uint8Array[]=[];let length=0;
+  try{for(;;){const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>131072)throw Error("MCP response too large");chunks.push(value);}}finally{reader.releaseLock();}
+  const raw=Buffer.concat(chunks).toString("utf8");
+  if(notification&&!raw.trim())return undefined;
+  const rpc=parseResponse(raw,response.headers.get("content-type")??"");
+  if(rpc.jsonrpc!=="2.0"||(!notification&&rpc.id!==id))throw Error("MCP response ID mismatch");
   if(rpc.error)throw Error("MCP server reported an error");
   return rpc.result;
  }catch(error){
@@ -68,15 +82,33 @@ export async function mcpCall(c:Connector,method:string,params:Record<string,unk
   throw error;
  }finally{clearTimeout(timer);}
 }
+async function openSession(c:Connector):Promise<Session>{
+ const session:Session={version:"2025-06-18"};
+ const init=await exchange(c,session,"initialize",{protocolVersion:session.version,capabilities:{},clientInfo:{name:"sam",version:"0.1.0"}});
+ const result=init as {protocolVersion?:unknown}|undefined;
+ if(!result||typeof result.protocolVersion!=="string")throw Error("Invalid MCP initialization");
+ session.version=result.protocolVersion;
+ await exchange(c,session,"notifications/initialized",{},true);
+ return session;
+}
+export async function mcpCall(c:Connector,method:string,params:Record<string,unknown>={},tool?:string):Promise<unknown>{
+ allowedUrl(c.url);
+ if(!c.enabled)throw Error("Connector disabled");
+ if(method==="tools/call"&&(!tool||!readOnlyTools.has(tool)||!c.allowedTools.includes(tool)))throw Error("MCP tool not authorized");
+ if(!["initialize","tools/list","tools/call"].includes(method))throw Error("MCP method not authorized");
+ const session=await openSession(c);
+ if(method==="initialize")return {protocolVersion:session.version};
+ return exchange(c,session,method,method==="tools/call"?{name:tool,arguments:params}:params);
+}
 export async function testConnector(c:Connector){
- const init=await mcpCall(c,"initialize",{protocolVersion:"2025-06-18",capabilities:{},clientInfo:{name:"sam",version:"0.1.0"}});
- const listing=await mcpCall(c,"tools/list");
+ allowedUrl(c.url);
+ const session=await openSession(c);
+ const listing=await exchange(c,session,"tools/list",{});
  const obj=listing as {tools?:Array<{name?:string}>};
  const tools=Array.isArray(obj?.tools)?obj.tools.map(x=>x.name).filter((x):x is string=>typeof x==="string"):[];
- return {initialized:!!init,tools,approved:tools.filter(x=>readOnlyTools.has(x)&&c.allowedTools.includes(x))};
+ return {initialized:true,protocolVersion:session.version,tools,approved:tools.filter(x=>readOnlyTools.has(x)&&c.allowedTools.includes(x))};
 }
 export async function readConnectorTool(c:Connector,tool:string,args:Record<string,unknown>={}){
  if(!["whoami","pipeline_summary","list_leads"].includes(tool))throw Error("Tool not available in first connector slice");
- const result=await mcpCall(c,"tools/call",args,tool);
- return result;
+ return mcpCall(c,"tools/call",args,tool);
 }
