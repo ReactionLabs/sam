@@ -5,6 +5,7 @@ import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { discoverSkills } from "./skills.js";
+import { connectorChat } from "./connector-chat.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -129,8 +130,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const db=new ChatStore(workspace);let history;
         try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");db.add(id,"user",body.content);}finally{db.close();}
         const config=readDashboardConfig(workspace);const profiles=chatStoreAgents(workspace);const active=profiles.find(a=>a.name===config.defaultAgent);
-        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning and renaming chats using the three-dot menu, creating named agent profiles, and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls, execute tools, or spawn agents from this chat. Do not invent folders, archive, search, or other unsupported UI features. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
-        const result=await provider.complete({model,messages});
+        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning and renaming chats using the three-dot menu, creating named agent profiles, and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Approved read-only MCP connector tools may be available if configured. Do not invent folders, archive, search, or other unsupported UI features. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
+        const useConnectors=connectors(workspace).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+        const result=useConnectors?{message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}}:await provider.complete({model,messages});
         const saved=new ChatStore(workspace);try{saved.add(id,"assistant",result.message.content); }finally{saved.close();}
         json(200,{reply:result.message});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
