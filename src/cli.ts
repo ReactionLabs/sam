@@ -51,6 +51,8 @@ import { activityView, actionsView, chatView, turnActions, statusSnapshot } from
 import { listEpisodes } from "./episodes.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
 import { detectCorrection, proposeCorrection } from "./corrections.js";
+import { listDoors } from "./mini-door.js";
+import { runRedTeamPack, screenDoorMessage } from "./door-guard.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
 const program=new Command();
@@ -220,6 +222,9 @@ miniCmd.command("spawn").argument("<name>").requiredOption("--person <who>","The
 miniCmd.command("list").action(()=>output(minis(program.opts().workspace)));
 miniCmd.command("door").argument("<name>").description("Issue (or rotate) the web door key for a mini (or sam, the core); the key is shown once").option("--home-link","Show a Main SAM link in the door header (operator doors only)").action((name:string,o:{homeLink?:boolean})=>{const key=issueDoorKey(program.opts().workspace,name,{homeLink:!!o.homeLink});output({mini:name,path:"/mini/"+key});});
 miniCmd.command("door-off").argument("<name>").action((name:string)=>output({disabled:disableDoor(program.opts().workspace,name)}));
+miniCmd.command("doors").description("Door audit (P10): every door with its expiry, key version, and session count - a door is a bearer credential, so its age must be visible").action(()=>output(listDoors(program.opts().workspace)));
+miniCmd.command("screen").argument("<text>").description("Screening only (P10): show whether a message would be refused at a web door, and why; sends nothing").action((text:string)=>output(screenDoorMessage(text)));
+miniCmd.command("redteam").description("Run the prompt-injection red-team pack against the door screen (P10): every attack must be refused under its category, every benign near-miss must pass").action(()=>output(runRedTeamPack()));
 miniCmd.command("remove").argument("<name>").action((name:string)=>output({removed:removeMini(program.opts().workspace,name)}));
 const linkCmd=program.command("links").description("Link groups: the only bridge between profiles. Linked profiles share one memory level");
 linkCmd.command("create").argument("<name>").argument("<members...>","Profile names, at least two (sam is the core)").action((name:string,members:string[])=>output(createLink(program.opts().workspace,name,members)));

@@ -4,7 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnMini } from "./minis.js";
-import { issueDoorKey, disableDoor, doorForKey, doorHomeLink, peekSessionChat, sessionChat, RateLimiter, miniDoorPage } from "./mini-door.js";
+import { issueDoorKey, disableDoor, doorForKey, doorHomeLink, listDoors, peekSessionChat, sessionChat, RateLimiter, miniDoorPage } from "./mini-door.js";
+import { createHash } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 test("mini door: keys resolve to exactly one mini, rotation kills the old key",()=>{
  const root=mkdtempSync(join(tmpdir(),"sam-door-"));
@@ -39,6 +41,45 @@ test("mini door: a session keeps one chat, and the limiter trips on floods",()=>
   assert.equal(limiter.allow("s",1001),true);
   assert.equal(limiter.allow("s",1002),true);
   assert.equal(limiter.allow("s",1003),false);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("mini door: new keys are 256-bit with a 30-day expiry, and the audit shows both",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-door4-"));
+ try{
+  spawnMini(root,{name:"alex",person:"Alex",instructions:"Help Alex."});
+  const key=issueDoorKey(root,"alex");
+  assert.match(key,/^[0-9a-f]{64}$/);
+  assert.equal(doorForKey(root,key),"alex");
+  const audit=listDoors(root);
+  assert.equal(audit.length,1);
+  assert.equal(audit[0].keyVersion,2);
+  assert.equal(audit[0].expired,false);
+  assert.equal(Date.parse(audit[0].expires_at)-Date.parse(audit[0].created_at),30*86400000);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("mini door: legacy 128-bit keys still resolve inside their TTL and die at it",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-door5-"));
+ try{
+  spawnMini(root,{name:"alex",person:"Alex",instructions:"Help Alex."});
+  const legacy="a".repeat(32);
+  const hash=createHash("sha256").update(legacy).digest("hex");
+  const write=(createdAt:string,expiresAt?:string)=>{
+    mkdirSync(join(root,".sam"),{recursive:true});
+    writeFileSync(join(root,".sam","mini-doors.json"),JSON.stringify({doors:[{mini:"alex",keyHash:hash,enabled:true,created_at:createdAt,...(expiresAt?{expires_at:expiresAt}:{})}],sessions:[]}));
+  };
+  // A pre-expiry-era record (no expires_at) resolves while it is young...
+  write(new Date().toISOString());
+  assert.equal(doorForKey(root,legacy),"alex");
+  assert.equal(listDoors(root)[0].keyVersion,1);
+  // ...and is dead 31 days after issue even though it was never disabled.
+  write(new Date(Date.now()-31*86400000).toISOString());
+  assert.equal(doorForKey(root,legacy),null);
+  assert.equal(listDoors(root)[0].expired,true);
+  // An explicit expires_at in the past kills a young record too.
+  write(new Date().toISOString(),new Date(Date.now()-1000).toISOString());
+  assert.equal(doorForKey(root,legacy),null);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 

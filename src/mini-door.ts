@@ -12,7 +12,14 @@ import { minis } from "./minis.js";
 // Doors are rate-limited per session and per mini. Preference capture applies
 // to door turns: a mini exists to learn its person, and the door is the person
 // talking. (Client chatbots, where visitors are customers, get their own kit.)
-interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string; homeLink?:boolean }
+// Stranger hardening (P10): keys are 256-bit and EXPIRE 30 days after issue -
+// a leaked link is a bounded credential, not a forever one, and rotation is
+// the renewal. Records written before expiry existed carry no expires_at;
+// their expiry is created_at + the same TTL, so no live door dies early and
+// none lives forever either. Door text is screened and abuse is counted by
+// door-guard.ts; probing and aggregate rate caps live there.
+export const DOOR_KEY_TTL_DAYS=30;
+interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string; expires_at?:string; keyVersion?:number; homeLink?:boolean }
 interface DoorSession { mini:string; session:string; chatId:string; updated_at:string }
 interface DoorFile { doors:Door[]; sessions:DoorSession[] }
 function doorPath(root:string){return join(resolve(root),".sam","mini-doors.json");}
@@ -24,13 +31,27 @@ function load(root:string):DoorFile{
 }
 function save(root:string,file:DoorFile){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(doorPath(root),JSON.stringify(file,null,2),{mode:0o600});}
 function hashKey(key:string):string{return createHash("sha256").update(key).digest("hex");}
+export function doorExpiry(door:Door):string{
+  if(door.expires_at)return door.expires_at;
+  const created=Date.parse(door.created_at);
+  return new Date((Number.isFinite(created)?created:0)+DOOR_KEY_TTL_DAYS*86400000).toISOString();
+}
+function doorLive(door:Door,now=Date.now()):boolean{
+  return door.enabled&&now<Date.parse(doorExpiry(door));
+}
+export interface DoorAudit { mini:string; enabled:boolean; expired:boolean; created_at:string; expires_at:string; keyVersion:number; homeLink:boolean; sessions:number }
+export function listDoors(root:string,now=Date.now()):DoorAudit[]{
+  const file=load(root);
+  return file.doors.map(door=>({mini:door.mini,enabled:door.enabled,expired:now>=Date.parse(doorExpiry(door)),created_at:door.created_at,expires_at:doorExpiry(door),keyVersion:door.keyVersion??1,homeLink:!!door.homeLink,sessions:file.sessions.filter(s=>s.mini===door.mini).length}));
+}
 export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolean}):string{
   // "sam" is the core itself: the main SAM gets a door too, not just the minis.
   if(miniName!=="sam"&&!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
-  const key=randomBytes(16).toString("hex");
+  const key=randomBytes(32).toString("hex");
   const file=load(root);
   const rest=file.doors.filter(d=>d.mini!==miniName);
-  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,created_at:new Date().toISOString()}]});
+  const now=new Date();
+  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,created_at:now.toISOString(),expires_at:new Date(now.getTime()+DOOR_KEY_TTL_DAYS*86400000).toISOString(),keyVersion:2}]});
   return key;
 }
 export function disableDoor(root:string,miniName:string):boolean{
@@ -38,22 +59,23 @@ export function disableDoor(root:string,miniName:string):boolean{
   for(const door of file.doors)if(door.mini===miniName&&door.enabled){door.enabled=false;changed=true;}
   if(changed)save(root,file);return changed;
 }
-export function doorEnabled(root:string,miniName:string):boolean{return load(root).doors.some(d=>d.mini===miniName&&d.enabled);}
+export function doorEnabled(root:string,miniName:string):boolean{return load(root).doors.some(d=>d.mini===miniName&&doorLive(d));}
+function keyShapeOk(key:string):boolean{return /^[0-9a-f]{32}$/.test(key)||/^[0-9a-f]{64}$/.test(key);}
 export function doorForKey(root:string,key:string):string|null{
-  if(!/^[0-9a-f]{32}$/.test(key))return null;
+  if(!keyShapeOk(key))return null;
   const wanted=Buffer.from(hashKey(key),"hex");
   for(const door of load(root).doors){
-    if(!door.enabled)continue;
+    if(!doorLive(door))continue;
     const stored=Buffer.from(door.keyHash,"hex");
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return door.mini;
   }
   return null;
 }
 export function doorHomeLink(root:string,key:string):boolean{
-  if(!/^[0-9a-f]{32}$/.test(key))return false;
+  if(!keyShapeOk(key))return false;
   const wanted=Buffer.from(hashKey(key),"hex");
   for(const door of load(root).doors){
-    if(!door.enabled)continue;
+    if(!doorLive(door))continue;
     const stored=Buffer.from(door.keyHash,"hex");
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return !!door.homeLink;
   }
