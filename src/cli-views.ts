@@ -4,6 +4,8 @@ import { readActivity, type ActivityLine } from "./activity.js";
 import { heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
 import { minis } from "./minis.js";
 import { connectors } from "./connectors.js";
+import { modelRoutingTable, type RoutingRow } from "./model-routing.js";
+import { usageSummary, type UsageSummary } from "./usage.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -31,6 +33,7 @@ export function statusSnapshot(root: string): {
   at: string; pendingActions: ActionProposal[]; activity: ActivityLine[];
   heartbeatJobs: HeartbeatJob[]; people: string[];
   connectors: Array<{ name: string; enabled: boolean; credentialPresent: boolean }>;
+  models: RoutingRow[]; usage: UsageSummary;
 } {
   return {
     at: new Date().toISOString(),
@@ -39,5 +42,7 @@ export function statusSnapshot(root: string): {
     heartbeatJobs: heartbeatJobs(root),
     people: minis(root).map(m => m.name),
     connectors: connectors(root).map(c => ({ name: c.name, enabled: c.enabled, credentialPresent: !!process.env[c.tokenEnv] })),
+    models: modelRoutingTable(),
+    usage: usageSummary(root),
   };
 }

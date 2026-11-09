@@ -36,6 +36,32 @@ test("model transport rejects insecure remote endpoints and missing credentials"
   await assert.rejects(converse(provider, { model: "x", messages: [{ role: "user", content: "hi" }] }), /requires an API key/);
 });
 
+test("provider reports token usage from complete and connector turns (P11)", async () => {
+  const server = createServer((_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({
+      choices: [{ message: { role: "assistant", content: " counted " } }],
+      usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
+    }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const seen: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; model: string }> = [];
+    provider.onUsage = (usage, model) => { seen.push({ ...usage, model }); };
+    await converse(provider, { model: "mock", messages: [{ role: "user", content: "hi" }] });
+    const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []);
+    assert.equal(turn.content, "counted");
+    assert.deepEqual(seen, [
+      { promptTokens: 11, completionTokens: 7, totalTokens: 18, model: "mock" },
+      { promptTokens: 11, completionTokens: 7, totalTokens: 18, model: "mock" },
+    ]);
+  } finally { server.close(); await once(server, "close"); }
+});
+
 test("provider hides embedded reasoning and rejects reasoning-only replies", async () => {
   let body = "<think>private planning</think>Visible answer";
   const server = createServer((_req, res) => {

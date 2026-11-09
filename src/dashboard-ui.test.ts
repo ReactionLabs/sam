@@ -15,6 +15,12 @@ test("dashboard page: the inline script parses as valid JavaScript",()=>{
   assert.match(dashboardHtml,/id="toBottom"/);
 });
 
+test("dashboard page: model routing + spend surface (P11)",()=>{
+  assert.match(dashboardHtml,/id="usage"/);
+  assert.match(dashboardHtml,/function renderUsage\(/);
+  assert.match(dashboardHtml,/Model &amp; spend/);
+});
+
 test("dashboard page: owner console surfaces (P8) - law revoke, approvals history, activity filter",()=>{
   // Law is a control surface now, not a flat <pre>: a container the script
   // fills with per-law Revoke buttons wired to the dashboard revoke route.

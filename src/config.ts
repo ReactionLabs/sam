@@ -2,6 +2,8 @@
 export interface SamConfig {
   modelProvider:"minimax"|"none";
   model:string|null;
+  cheapModel:string|null;
+  deepModel:string|null;
   minimaxApiKey:string|null;
   minimaxBaseUrl:string;
   secondShiftMcpUrl:string|null;
@@ -32,6 +34,8 @@ export function parseSamConfig(env:NodeJS.ProcessEnv):SamConfig {
   return {
     modelProvider:provider,
     model:optional(env.SAM_MODEL),
+    cheapModel:optional(env.SAM_MODEL_CHEAP),
+    deepModel:optional(env.SAM_MODEL_DEEP),
     minimaxApiKey:optional(env.MINIMAX_API_KEY),
     minimaxBaseUrl:secureUrl(base,"MINIMAX_BASE_URL"),
     secondShiftMcpUrl:endpoint?secureUrl(endpoint,"SECOND_SHIFT_MCP_URL",true):null,

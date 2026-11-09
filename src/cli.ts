@@ -54,6 +54,8 @@ import { detectCorrection, proposeCorrection } from "./corrections.js";
 import { listDoors } from "./mini-door.js";
 import { runRedTeamPack, screenDoorMessage } from "./door-guard.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
+import { modelRoutingTable } from "./model-routing.js";
+import { usageSummary, readUsage } from "./usage.js";
 
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
@@ -241,6 +243,10 @@ actCmd.command("reject").argument("<id>").action(async(id:string)=>output(await 
 const corrCmd=program.command("corrections").description("Corrections (P6): owner corrections in a message, proposed as standing law through the approval gate - never instant law");
 corrCmd.command("detect").argument("<text>").description("Detection only: show the rule statement a message would propose; proposes nothing").action((text:string)=>output({correction:detectCorrection(text)}));
 corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat <id>","Stamp the chat the correction came from").description("Detect a correction in a message and route it into the approval gate as a pending law proposal (deduped)").action((profile:string,text:string,o:{chat?:string})=>{const correction=detectCorrection(text);if(!correction){output({correction:null,proposal:null});return;}const routed=proposeCorrection(program.opts().workspace,{actor:profile,chatId:o.chat??null,text});output({correction,proposal:routed?.proposal??null,created:routed?.created??false});});
+program.command("models").description("Model routing (P11): which model each route tier runs - heartbeat polls on the cheap tier, chat on main, background on deep; a profile pin always wins").action(()=>output(modelRoutingTable()));
+const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
+usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
+usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
@@ -524,7 +530,7 @@ const config=program.command("config").description("Environment configuration an
 config.command("show").description("Show the parsed configuration with secrets reduced to present/absent").action(()=>{
   const cfg=parseSamConfig(process.env); const ready=configReadiness(cfg);
   output({
-    modelProvider:cfg.modelProvider, model:cfg.model, minimaxBaseUrl:cfg.minimaxBaseUrl,
+    modelProvider:cfg.modelProvider, model:cfg.model, cheapModel:cfg.cheapModel, deepModel:cfg.deepModel, models:modelRoutingTable(), minimaxBaseUrl:cfg.minimaxBaseUrl,
     minimaxApiKey:cfg.minimaxApiKey?"present":"absent",
     secondShiftMcpUrl:cfg.secondShiftMcpUrl, secondShiftMcpToken:cfg.secondShiftMcpToken?"present":"absent",
     logLevel:cfg.logLevel, modelReady:ready.modelReady, mcpReady:ready.mcpReady

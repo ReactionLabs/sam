@@ -15,6 +15,14 @@ test("model and MCP readiness require explicit local credentials",()=>{
  assert.deepEqual(configReadiness(config),{modelReady:true,mcpReady:true});
  assert.equal(config.secondShiftMcpUrl,"https://mcp.secondshift.site/");
 });
+test("tier models parse from SAM_MODEL_CHEAP / SAM_MODEL_DEEP (P11)",()=>{
+ const config=parseSamConfig({SAM_MODEL:"main-1",SAM_MODEL_CHEAP:"cheap-1",SAM_MODEL_DEEP:"deep-1"});
+ assert.equal(config.model,"main-1");
+ assert.equal(config.cheapModel,"cheap-1");
+ assert.equal(config.deepModel,"deep-1");
+ assert.equal(parseSamConfig({}).cheapModel,null);
+ assert.equal(parseSamConfig({}).deepModel,null);
+});
 test("rejects insecure remote endpoints, URL credentials, and unsupported providers",()=>{
  for(const url of ["http://example.com/mcp","https://user:pass@example.com","file:///tmp/mcp",
   "https://example.com/#secret"]) {

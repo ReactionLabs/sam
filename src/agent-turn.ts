@@ -8,6 +8,8 @@ import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./co
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
+import { resolveModelForRoute, tierForRoute } from "./model-routing.js";
+import { recordUsage } from "./usage.js";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -18,7 +20,8 @@ import { toolBudget, type TurnRoute } from "./budgets.js";
 // law, routes to the profile's pinned connector or the plain model, and
 // persists both sides of the exchange.
 export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
-  const budget=toolBudget(opts?.route??"chat");
+  const route=opts?.route??"chat";
+  const budget=toolBudget(route);
   const providerName=process.env.SAM_MODEL_PROVIDER??"";
   const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
   if(!endpoint)throw Error("Model not configured");
@@ -29,8 +32,13 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
-  const model=active?.model??process.env.SAM_MODEL;
+  // Model routing (P11): the route picks the tier's model; a profile pin
+  // wins. Spend is recorded against the model that actually ran.
+  const resolved=resolveModelForRoute({route,profileModel:active?.model});
+  const model=resolved.model;
   if(!model)throw Error("Model not configured");
+  const tier=tierForRoute(route);
+  provider.onUsage=(usage,usedModel)=>{recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
   const db=new ChatStore(root);let history;
   try{history=db.messages(chatId);if(history.length>=100)throw Error("Chat history limit reached");db.add(chatId,"user",content);}finally{db.close();}
   const prefs=new PreferenceStore(root);let lawBlock="";

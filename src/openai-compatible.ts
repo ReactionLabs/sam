@@ -3,9 +3,40 @@ import { validateConversation } from "./model-conversation.js";
 import { WORKSPACE_TOOLS } from "./workspace-tools.js";
 import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 
+export interface TokenUsage { promptTokens: number; completionTokens: number; totalTokens: number }
+/** Extract a provider usage object (OpenAI-shaped) from a response payload. */
+export function parseTokenUsage(payload: unknown): TokenUsage | null {
+  if (!payload || typeof payload !== "object") return null;
+  const usage = (payload as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const u = usage as Record<string, unknown>;
+  const pick = (...keys: string[]): number | null => {
+    for (const key of keys) {
+      const value = u[key];
+      if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+    }
+    return null;
+  };
+  const promptTokens = pick("prompt_tokens", "promptTokens", "input_tokens", "inputTokens");
+  const completionTokens = pick("completion_tokens", "completionTokens", "output_tokens", "outputTokens");
+  if (promptTokens === null && completionTokens === null) return null;
+  const totalTokens = pick("total_tokens", "totalTokens") ?? (promptTokens ?? 0) + (completionTokens ?? 0);
+  return { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0, totalTokens };
+}
+
 /** Opt-in OpenAI-compatible chat completions transport. No tools or automatic calls. */
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly id = "openai-compatible";
+  // Token spend accounting (P11): when set, every response that carries a
+  // provider usage object is reported here. Best-effort - a failing sink
+  // never breaks a model call.
+  onUsage?: (usage: TokenUsage, model: string) => void;
+  private reportUsage(payload: unknown, model: string): void {
+    try {
+      const usage = parseTokenUsage(payload);
+      if (usage) this.onUsage?.(usage, model);
+    } catch { /* accounting never breaks a turn */ }
+  }
   private readonly endpoint: string;
   constructor(endpoint: string, private readonly apiKey: string, private readonly timeoutMs = 30_000) {
     const url = new URL(endpoint);
@@ -56,6 +87,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       try { payload = JSON.parse(new TextDecoder().decode(bytes)); }
       catch { throw new Error("Invalid model tool JSON response"); }
       const obj = payload as { choices?: Array<{ message?: unknown }> };
+      this.reportUsage(payload, model);
       const turn = validateToolTurn(obj?.choices?.[0]?.message, workspaceEnabled);
       if (typeof turn.content === "string") {
         if (/<think>/i.test(turn.content) && !/<\/think>/i.test(turn.content))
@@ -87,6 +119,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const chunks:Uint8Array[]=[];let length=0;
       try{for(;;){const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(value);}}finally{reader.releaseLock();}
       const data=JSON.parse(Buffer.concat(chunks).toString("utf8")) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
+      this.reportUsage(data, model);
       const msg=data.choices?.[0]?.message;
       if(!msg)throw Error("Invalid model response");
       const content=typeof msg.content==="string"?msg.content.replace(new RegExp("<think>[\\s\\S]*?</think>","gi"),"").trim():null;
@@ -140,6 +173,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       try { payload = JSON.parse(new TextDecoder().decode(bytes)); }
       catch { throw new Error("Invalid model JSON response"); }
       const obj = payload as { choices?: Array<{ message?: { role?: string; content?: unknown } }> };
+      this.reportUsage(payload, request.model);
       const content = obj?.choices?.[0]?.message?.content;
       if (typeof content !== "string" || !content.trim()) throw new Error("Invalid model response content");
       // Some compatible providers embed private reasoning in text instead of a separate field.
