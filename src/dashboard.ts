@@ -164,14 +164,14 @@ export async function serveDashboard(root:string,port=4317,options:DashboardTool
           result=await provider.complete({model,messages});
         }else{
           const useConnectors=connectors(workspace).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-          if(useConnectors){
-            result={message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}};
-          }else if(localToolsAllowed&&memoryToolsEnabled){
+          if(localToolsAllowed&&memoryToolsEnabled){
             const answer=await runDashboardLocalToolTurn({
               stateRoot:workspace,toolRoot,chatId:id,messages,workspaceTools:workspaceToolsEnabled,
               request:(turn,enabled,writeEnabled)=>provider.completeToolTurn(model,turn,enabled,workspaceToolsEnabled,Boolean(writeEnabled))
             });
             result={message:{role:"assistant" as const,content:answer}};
+          }else if(useConnectors){
+            result={message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}};
           }else{
             result=await provider.complete({model,messages});
           }
