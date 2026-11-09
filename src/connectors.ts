@@ -42,8 +42,8 @@ type Session={id?:string;version:string};
 function parseResponse(raw:string,contentType:string):RpcEnvelope{
  let parsed:unknown;
  if(contentType.includes("text/event-stream")){
-  const events=raw.split(/\\r?\\n\\r?\\n/);
-  const data=events.flatMap(e=>e.split(/\\r?\\n/).filter(l=>l.startsWith("data:")).map(l=>l.slice(5).trim())).find(v=>v.startsWith("{"));
+  const events=raw.split(/\r?\n\r?\n/);
+  const data=events.flatMap(e=>e.split(/\r?\n/).filter(l=>l.startsWith("data:")).map(l=>l.slice(5).trim())).find(v=>v.startsWith("{"));
   if(!data)throw Error("MCP server returned no JSON-RPC event");
   parsed=JSON.parse(data);
  }else parsed=JSON.parse(raw);
@@ -63,7 +63,7 @@ async function exchange(c:Connector,session:Session,method:string,params:Record<
   if(!response.ok)throw Error(response.status===401||response.status===403?"MCP authorization failed":"MCP request failed (HTTP "+response.status+")");
   const sessionId=response.headers.get("mcp-session-id");
   if(sessionId){
-   if(sessionId.length>256||/[\\r\\n]/.test(sessionId))throw Error("Invalid MCP session ID");
+   if(sessionId.length>256||/[\r\n]/.test(sessionId))throw Error("Invalid MCP session ID");
    session.id=sessionId;
   }
   if(notification&&response.status===202)return undefined;
