@@ -16,7 +16,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
 | PR #66 | Open draft, stacked on #65; owner-approved terminal memory writes and bounded memory list | [PR #66](https://github.com/ReactionLabs/sam/pull/66), latest tested source head `fd474ed0373df9e7aa81c41646050cc2b6e585bf`, [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), 115/115 on Node 22 and Node 24 |
-| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), head `f2426c82abc88b106cb4f9277e36fd49575902cd`, [run #42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520), 117/117 on Node 22 and Node 24 |
+| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), current head `c03d357294c4177a2a11cdb27fafe783d3861b4c`; tested code head `f2426c82abc88b106cb4f9277e36fd49575902cd`, [run #42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520), 117/117 on Node 22 and Node 24 |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
 
@@ -84,7 +84,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 
 Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://github.com/ReactionLabs/sam/pull/68), stacked on PR #66.
 
-### Implemented in code, verification pending
+### Implemented and Node 22/24 CI verified
 
 - `dashboard --memory-tools` enables the existing bounded `memory_search` and `memory_list` model tools.
 - `dashboard --workspace-tools` additionally enables bounded read-only `list_directory`, `read_file`, `search_files`, `list_skills`, and `read_skill`.
@@ -95,7 +95,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 - Dashboard local tools are read-only. No model memory writes, shell, arbitrary file writes, installs, or desktop actions are exposed.
 - Added mock-provider tests for SQLite memory evidence, a separate file root, skill discovery from the state root, durable audit, and disabled-workspace-tool denial.
 
-### Not yet verified
+### Remaining owner acceptance
 
 - PR #68 GitHub Actions run [#42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520) passed build and **117/117 tests on Node 22 and Node 24**.
 - Windows build and full test suite: pending.
