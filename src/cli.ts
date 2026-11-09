@@ -16,6 +16,7 @@ import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.j
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
+import { serveWebhookChannel } from "./webhook.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
@@ -123,7 +124,8 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
-channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,name,profile,tokenEnv)));
+channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));
+channelCmd.command("add-webhook").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"webhook",name,profile,tokenEnv)));
 channelCmd.command("list").action(()=>output(channels(program.opts().workspace)));
 channelCmd.command("owners").argument("<id>").argument("<ids>").action((id:string,ids:string)=>output(setChannelOwners(program.opts().workspace,id,ids.split(",").map(x=>Number(x.trim())))));
 channelCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeChannel(program.opts().workspace,id)}));
@@ -144,6 +146,24 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
   console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
+ });
+program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
+ .requiredOption("--channel <name>","Webhook channel name")
+ .option("--port <number>","Loopback port","4391")
+ .option("--dashboard-url <url>","SAM dashboard base URL",process.env.SAM_DASHBOARD_URL??"http://127.0.0.1:4317")
+ .option("--dashboard-log <path>","Dashboard log file to discover the current dashboard token from",process.env.SAM_DASHBOARD_LOG??"")
+ .option("--dashboard-token <token>","Dashboard token (overrides log discovery)",process.env.SAM_DASHBOARD_TOKEN??"")
+ .action(async(o:{channel:string;port:string;dashboardUrl:string;dashboardLog:string;dashboardToken:string})=>{
+  const root=program.opts().workspace as string;
+  const channel=channels(root).find(c=>c.enabled&&c.kind==="webhook"&&c.name===o.channel);
+  if(!channel)throw new Error("No enabled webhook channel with that name");
+  const secret=process.env[channel.tokenEnv];
+  if(!secret||secret.length<24)throw new Error("Channel secret missing or too short in environment: "+channel.tokenEnv);
+  const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
+  const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  console.log("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port);
+  await serveWebhookChannel({channel,sam,secret,port:Number(o.port)});
  });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
 chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});

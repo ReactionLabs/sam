@@ -9,8 +9,8 @@ import { handleTelegramUpdate, chunkText, loadBridgeState, type SamClient } from
 test("channel registry stores env reference only and validates owners",()=>{
  const root=mkdtempSync(join(tmpdir(),"sam-channels-"));
  try{
-  assert.throws(()=>addChannel(root,"bad","Trading","SAM_CHANNEL_TG"),/Invalid/);
-  const c=addChannel(root,"Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[123]);
+  assert.throws(()=>addChannel(root,"telegram","bad","Trading","SAM_CHANNEL_TG"),/Invalid/);
+  const c=addChannel(root,"telegram","Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[123]);
   assert.equal(channels(root).length,1);
   assert.equal(JSON.stringify(channels(root)).includes("bot-token"),false);
   assert.deepEqual(channels(root)[0].ownerIds,[123]);
@@ -22,7 +22,7 @@ test("channel registry stores env reference only and validates owners",()=>{
 test("telegram bridge relays owner messages through the channel profile and ignores strangers",async()=>{
  const root=mkdtempSync(join(tmpdir(),"sam-tg-"));
  try{
-  const channel=addChannel(root,"Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[111]);
+  const channel=addChannel(root,"telegram","Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[111]);
   const sent:Array<{chat:number;text:string}>=[];
   const seenChats:string[]=[];
   const sam:SamClient={ensureChat:async(title,profile)=>{seenChats.push(title+"|"+profile);return "sam-chat-1";},postMessage:async(id,content)=>{assert.equal(id,"sam-chat-1");return "Reply to: "+content;}};
