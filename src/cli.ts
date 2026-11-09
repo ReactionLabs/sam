@@ -47,6 +47,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
 import { listActions, proposeAction, decideAction } from "./actions.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
+import { listEpisodes } from "./episodes.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
 const program=new Command();
@@ -172,6 +173,8 @@ const prefCmd=program.command("preferences").description("Preference memory and 
 prefCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.list(o.profile));}finally{store.close();}});
 prefCmd.command("add").argument("<profile>").argument("<statement>").action((profile:string,statement:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.note(profile,statement,"rule","operator"));}finally{store.close();}});
 prefCmd.command("revoke").argument("<id>").action((id:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output({revoked:store.revoke(id)});}finally{store.close();}});
+const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
+epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
 hbCmd.command("add").argument("<name>").argument("<minutes>").argument("<profile>").argument("<prompt>").option("--channel <id>","Deliver replies to this channel id").action((name:string,minutes:string,profile:string,prompt:string,o:{channel?:string})=>output(addHeartbeatJob(program.opts().workspace,name,Number(minutes),profile,prompt,o.channel??null)));
 hbCmd.command("list").action(()=>output(heartbeatJobs(program.opts().workspace)));

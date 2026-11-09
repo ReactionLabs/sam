@@ -7,6 +7,7 @@ import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
 import { loadBridgeState } from "./telegram.js";
 import { recordActivity } from "./activity.js";
+import { writeEpisode, type EpisodeChat } from "./episodes.js";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -82,11 +83,14 @@ export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>
  return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
 }
 function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
-export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[]}{
+export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[]}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
  const db=new ChatStore(root);const prefs=new PreferenceStore(root);
  let scanned=0,noted=0;
+ // Episodic evidence (P4): every new message, both roles, grouped by
+ // profile and by the message's own date, on the same watermark scan.
+ const evidence=new Map<string,Map<string,Map<string,EpisodeChat>>>();
  try{
   for(const chat of db.list()){
    const profile=chat.agent_name??config.defaultAgent;
@@ -94,16 +98,31 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
    let newest=watermark;
    for(const msg of db.messages(chat.id)){
     if(msg.created_at>newest)newest=msg.created_at;
-    if(msg.role!=="user"||msg.created_at<=watermark)continue;
+    if(msg.created_at<=watermark)continue;
+    const date=msg.created_at.slice(0,10);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(date)){
+     let byDate=evidence.get(profile);if(!byDate){byDate=new Map();evidence.set(profile,byDate);}
+     let byChat=byDate.get(date);if(!byChat){byChat=new Map();byDate.set(date,byChat);}
+     let entry=byChat.get(chat.id);if(!entry){entry={chatId:chat.id,title:chat.title,messages:[]};byChat.set(chat.id,entry);}
+     entry.messages.push({role:msg.role,content:msg.content,created_at:msg.created_at});
+    }
+    if(msg.role!=="user")continue;
     scanned++;
     for(const found of extractPreferences(msg.content)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
   }
   const promoted=prefs.promote().map(p=>p.profile+": "+p.statement);
+  const episodes:string[]=[];
+  for(const profile of [...evidence.keys()].sort()){
+   const byDate=evidence.get(profile) as Map<string,Map<string,EpisodeChat>>;
+   for(const date of [...byDate.keys()].sort()){
+    if(writeEpisode(root,profile,date,[...(byDate.get(date) as Map<string,EpisodeChat>).values()]))episodes.push(profile+":"+date);
+   }
+  }
   state.lastTick=new Date().toISOString();saveState(root,state);
-  appendLog(root,{type:"consolidate",scanned,noted,promoted});
-  return {scanned,noted,promoted};
+  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes});
+  return {scanned,noted,promoted,episodes};
  }finally{db.close();prefs.close();}
 }
 export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
