@@ -193,7 +193,8 @@ export async function runMemoryToolTurn(
             result = JSON.stringify({ ok: false, reason: "owner_denied" });
           } else {
             result = executeMemoryAdd(dbPath, proposal);
-            onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
+            const saved = JSON.parse(result) as { record?: { id?: string } };
+            onAudit?.({ tool: call.function.name, status: "completed", detail: call.id + (saved.record?.id ? " record_id=" + saved.record.id : "") });
           }
         } else {
           result = call.function.name === "memory_search" ? executeMemorySearch(dbPath, call.function.arguments)
