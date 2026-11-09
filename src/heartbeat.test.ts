@@ -89,6 +89,46 @@ test("heartbeat fact signature: any single fact change breaks equivalence",()=>{
  }
 });
 
+test("heartbeat fact signature: ISO timestamps canonicalize to second precision",()=>{
+ // The live 12:56 UTC break: the stored signature carried milliseconds
+ // (d:2026-11-04t22:45:59.894z) while a thinner reply rendered the same
+ // instant truncated to the second. Same second = same fact.
+ const withMs="- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z**\n- Alert verdict count: **9**\n- Paper setups in state `entered`: **20** (tool count, `state_filter: entered`)";
+ const truncated=withMs.replace("2026-11-04T22:45:59.894Z","2026-11-04T22:45:59Z");
+ const zeroMs=withMs.replace("2026-11-04T22:45:59.894Z","2026-11-04T22:45:59.000Z");
+ assert.equal(heartbeatFactSignatureString(withMs),heartbeatFactSignatureString(truncated));
+ assert.equal(heartbeatFactSignatureString(withMs),heartbeatFactSignatureString(zeroMs));
+ assert.ok(heartbeatFactSignature(withMs).includes("d:2026-11-04t22:45:59z"));
+ // A legacy stored signature that still carries milliseconds heals on
+ // comparison: it must match a newly extracted truncated signature.
+ const legacySig="d:2026-11-04t22:45:59.894z|n:1139|n:20|n:281818|n:282966|n:9|n:9";
+ const priorLegacy={hash:"legacy-hash-that-will-not-match",sig:legacySig};
+ assert.equal(heartbeatOutputsEquivalent(priorLegacy,heartbeatOutputHash(truncated),heartbeatFactSignatureString(truncated)),true);
+ // A different second is still a different fact.
+ const otherSecond=withMs.replace("2026-11-04T22:45:59.894Z","2026-11-04T22:46:00.894Z");
+ assert.notEqual(heartbeatFactSignatureString(withMs),heartbeatFactSignatureString(otherSecond));
+ assert.equal(heartbeatOutputsEquivalent({hash:heartbeatOutputHash(withMs),sig:heartbeatFactSignatureString(withMs)},heartbeatOutputHash(otherSecond),heartbeatFactSignatureString(otherSecond)),false);
+});
+
+test("heartbeat diffing: a timestamp rendering wobble (ms dropped) stays silent",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-hb-ms-"));
+ try{
+  addHeartbeatJob(root,"stack watch",30,"trading","Check the stack","chan-1");
+  const deliveries:string[]=[];
+  let reply="- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z** - the stack is still frozen.\n- Alert verdict count: **9** (PASS 1,139 / PENDING 281,818)\n- Paper setups in state `entered`: **20**";
+  const deps={ensureChat:async()=>"hb-chat",runTurn:async()=>reply,deliver:async(_id:string,text:string)=>{deliveries.push(text);}};
+  const first=await runHeartbeat(root,deps);
+  assert.deepEqual(first.changed,["stack watch"]);
+  assert.equal(deliveries.length,1);
+  reply=reply.replace("2026-11-04T22:45:59.894Z","2026-11-04T22:45:59Z");
+  makeJobDue(root);
+  const second=await runHeartbeat(root,deps);
+  assert.deepEqual(second.changed,[]);
+  assert.deepEqual(second.unchanged,["stack watch"]);
+  assert.equal(deliveries.length,1);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
 test("heartbeat equivalence: thin outputs fall back to the text comparison (fail-open)",()=>{
  const quiet={hash:heartbeatOutputHash("All quiet."),sig:heartbeatFactSignatureString("All quiet.")};
  assert.equal(heartbeatOutputsEquivalent(quiet,heartbeatOutputHash("All quiet!"),heartbeatFactSignatureString("All quiet!")),true);

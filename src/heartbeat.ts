@@ -91,6 +91,22 @@ export function heartbeatOutputHash(text:string):string{
 // fact difference delivers: the fail-open bias is unchanged, silence now
 // requires proof from the facts as well as from the wording.
 const MONTH_DATE=/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/gi;
+// Second-precision canonicalization (P3 follow-up, found live 2026-11-09
+// 12:56 UTC): the model sometimes renders the same candidate timestamp
+// WITH milliseconds (2026-11-04T22:45:59.894Z) and sometimes truncated to
+// the second (2026-11-04T22:45:59Z). Those are the same fact; a rendering
+// wobble must not break fact-bag inclusion and re-announce a frozen
+// stack. Canonicalize every ISO date fact to second precision - drop
+// fractional seconds - both when a signature is extracted and when bags
+// are compared, so a legacy stored signature that still carries
+// milliseconds heals on the first comparison instead of delivering once
+// more.
+export function canonicalHeartbeatDateFact(fact:string):string{
+ return fact.replace(/(\d{2}:\d{2}:\d{2})\.\d+/, "$1");
+}
+function canonicalDateMatch(m:string):string{
+ return canonicalHeartbeatDateFact("d:"+m.toLowerCase().replace(" ","t"));
+}
 export function heartbeatFactSignature(text:string):string[]{
  const kept:string[]=[];
  for(const rawLine of text.split(/\r?\n/)){
@@ -101,7 +117,7 @@ export function heartbeatFactSignature(text:string):string[]{
  // observed reply; left in, their day number would poison the bag.
  let body=kept.join("\n").replace(MONTH_DATE," ");
  const facts:string[]=[];
- body=body.replace(/\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?/gi,m=>{facts.push("d:"+m.toLowerCase().replace(" ","t"));return " ";});
+ body=body.replace(/\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?/gi,m=>{facts.push(canonicalDateMatch(m));return " ";});
  body.replace(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g,m=>{const n=Number(m.replace(/,/g,""));facts.push("n:"+(Number.isSafeInteger(n)?String(n):String(n)));return " ";});
  return facts.sort();
 }
@@ -112,7 +128,7 @@ export function heartbeatFactSignatureString(text:string):string{return heartbea
 // of the other. A changed value breaks inclusion in both directions, and
 // both bags must carry at least two facts before they prove anything.
 export function heartbeatFactBagsCompatible(a:string,b:string):boolean{
- const bagA=a.split("|").filter(Boolean),bagB=b.split("|").filter(Boolean);
+ const bagA=a.split("|").filter(Boolean).map(f=>f.startsWith("d:")?canonicalHeartbeatDateFact(f):f),bagB=b.split("|").filter(Boolean).map(f=>f.startsWith("d:")?canonicalHeartbeatDateFact(f):f);
  if(bagA.length<2||bagB.length<2)return false;
  const counts=(bag:string[])=>{const m=new Map<string,number>();for(const f of bag)m.set(f,(m.get(f)??0)+1);return m;};
  const within=(inner:Map<string,number>,outer:Map<string,number>)=>[...inner].every(([f,n])=>n<=(outer.get(f)??0));
