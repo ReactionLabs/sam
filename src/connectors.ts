@@ -28,11 +28,39 @@ function allowedUrl(raw:string):string{
  if(!allowed.includes(host))throw Error("MCP host not allowlisted. Set SAM_MCP_ALLOWED_HOSTS locally.");
  return u.toString();
 }
+const connectorFields=["id","name","url","tokenEnv","enabled","allowedTools"] as const;
+const idPattern=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function validateConnector(value:unknown):Connector{
+ if(!value||typeof value!=="object"||Array.isArray(value)||Object.getPrototypeOf(value)!==Object.prototype)
+  throw Error("Invalid connector registry entry");
+ const item=value as Record<string,unknown>;
+ if(Object.keys(item).length!==connectorFields.length||connectorFields.some(key=>!Object.hasOwn(item,key)))
+  throw Error("Invalid connector registry entry");
+ const {id,name,url,tokenEnv,enabled,allowedTools}=item;
+ if(typeof id!=="string"||!idPattern.test(id)||typeof name!=="string"||!namePattern.test(name))
+  throw Error("Invalid connector identity");
+ if(typeof tokenEnv!=="string"||!envPattern.test(tokenEnv))
+  throw Error("Invalid connector credential reference");
+ if(typeof enabled!=="boolean")throw Error("Invalid connector enabled state");
+ if(typeof url!=="string")throw Error("Invalid connector endpoint");
+ try{allowedUrl(url);}catch{throw Error("Invalid connector endpoint");}
+ if(!Array.isArray(allowedTools)||allowedTools.length>readOnlyTools.size||
+    !allowedTools.every((tool):tool is string=>typeof tool==="string"&&readOnlyTools.has(tool))||
+    new Set(allowedTools).size!==allowedTools.length)
+  throw Error("Invalid connector tool allowlist");
+ return {id,name,url,tokenEnv,enabled,allowedTools:[...allowedTools]};
+}
 export function connectors(root:string):Connector[]{
  if(!existsSync(path(root)))return [];
  const value:unknown=JSON.parse(readFileSync(path(root),"utf8"));
  if(!Array.isArray(value)||value.length>32)throw Error("Invalid connector registry");
- return value as Connector[];
+ const items=value.map(validateConnector);
+ const ids=new Set<string>(),names=new Set<string>();
+ for(const item of items){
+  if(ids.has(item.id)||names.has(item.name))throw Error("Duplicate connector identity");
+  ids.add(item.id);names.add(item.name);
+ }
+ return items;
 }
 function save(root:string,items:Connector[]){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(path(root),JSON.stringify(items,null,2),{mode:0o600});}
 export function addConnector(root:string,name:string,url:string,tokenEnv:string):Connector{

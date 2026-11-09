@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addConnector, connectors, getConnector, mcpCall, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
@@ -75,6 +75,30 @@ test("loopback MCP needs an allowlisted host, and trading tools are authorized r
   await assert.rejects(mcpCall(c,"tools/call",{},"drop_table"),/not authorized/);
   process.env.SAM_MCP_ALLOWED_HOSTS="mcp.secondshiftos.com";
   assert.throws(()=>addConnector(root,"bad","http://127.0.0.1:4390/mcp/v1","SAM_MCP_TOKEN_NINES"),/HTTPS/);
+ }finally{
+  if(before===undefined)delete process.env.SAM_MCP_ALLOWED_HOSTS;else process.env.SAM_MCP_ALLOWED_HOSTS=before;
+  rmSync(root,{recursive:true,force:true});
+ }
+});
+
+test("MCP connector registry validates persisted credential references and exact read-only grants",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-mcp-registry-"));
+ const before=process.env.SAM_MCP_ALLOWED_HOSTS;
+ try{
+  process.env.SAM_MCP_ALLOWED_HOSTS="mcp.secondshiftos.com";
+  mkdirSync(join(root,".sam"),{recursive:true});
+  const file=join(root,".sam","connectors.json");
+  const valid={id:"123e4567-e89b-12d3-a456-426614174000",name:"Test",url:"https://mcp.secondshiftos.com/mcp/v1",tokenEnv:"SAM_MCP_TOKEN_TEST",enabled:true,allowedTools:["whoami"]};
+  writeFileSync(file,JSON.stringify([{...valid,tokenEnv:"PATH"}]));
+  assert.throws(()=>connectors(root),/Invalid connector credential reference/);
+  writeFileSync(file,JSON.stringify([{...valid,allowedTools:["update_lead_stage"]}]));
+  assert.throws(()=>connectors(root),/Invalid connector tool allowlist/);
+  writeFileSync(file,JSON.stringify([{...valid,credential:"must-not-be-stored"}]));
+  assert.throws(()=>connectors(root),/Invalid connector registry entry/);
+  writeFileSync(file,JSON.stringify([valid,{...valid,name:"Test 2"}]));
+  assert.throws(()=>connectors(root),/Duplicate connector identity/);
+  writeFileSync(file,JSON.stringify([valid]));
+  assert.deepEqual(connectors(root),[valid]);
  }finally{
   if(before===undefined)delete process.env.SAM_MCP_ALLOWED_HOSTS;else process.env.SAM_MCP_ALLOWED_HOSTS=before;
   rmSync(root,{recursive:true,force:true});
