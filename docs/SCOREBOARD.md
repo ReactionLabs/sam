@@ -1,85 +1,107 @@
 # SAM build scoreboard
 
-Updated: 2026-11-08 UTC. This scoreboard describes the unmerged `feat/sam-model-output-hygiene-20261108` branch, not `main`.
+Updated: 2026-11-08 owner-local date (the latest GitHub Actions runs are timestamped 2026-11-09 UTC).
 
-## Verified by owner on Windows
+## Current milestone
 
-- `npm run build`: passed on earlier `feat/model-conversation-contract` at `c6f47f8`.
-- `npm test`: 55/55 passed on that earlier commit.
-- `memory add observation ... --source owner-test`, `memory list`, and `memory search`: succeeded across separate CLI invocations.
-- `talk --live` with MiniMax: worked but could not access SQLite memory and displayed `<think>` content.
+Connect the existing local Mission Control dashboard, live model runtime, persistent SQLite memory, and permissioned tools without claiming unmerged work is on main.
 
-## This sprint: code committed, tests pending
+## Repository and integration state
 
-- `src/openai-compatible.ts`: redact complete embedded `<think>` blocks; reject incomplete or reasoning-only content.
-- `src/openai-compatible.test.ts`: mock-provider regression tests for above.
-- `src/memory.ts`: enumerate valid memory kinds in error messages.
-- Test status: **NOT RUN** in the connected GitHub editing environment. No claim of passing CI or live MiniMax verification.
+| Item | State | Evidence |
+|---|---|---|
+| `main` | Earlier CLI/mission foundation; does not yet contain the integrated dashboard stack | Default branch at PR #64 base `42c82e9e441fe51362abcf7bbb9b832005120f6f` |
+| PR #64 | Open, not merged; integration of post-#18 stack plus PR #19 clock fence and multi-profile work | [PR #64](https://github.com/ReactionLabs/sam/pull/64), head `129c71f35e0859457540546cd16d574f88cfd9d9`, 58 files |
+| PR #64 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42550646841](https://github.com/ReactionLabs/sam/actions/runs/42550646841); PR author reports 107/107 tests |
+| PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
+| PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
+| Current branch | `feat/approved-model-memory-write-20261109`, based on PR #65 head; code and tests added, CI pending | No PR or CI result yet |
+
+PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
+
+PRs #13 and #17 are merged, and PR #18 is merged as the integration of #10-#17. PRs #14-#16 remain open as stacked historical branches; PR #18 is the integration record for that scheduler stack. PR #19 is folded into PR #64 and should not be merged separately.
+
+## Verified capabilities on the integration stack
+
+- **Dashboard exists:** local Mission Control on `127.0.0.1`, randomized URL token, persistent chats, chat branching, named agent profiles, model chat, status panels, and connector management.
+- **Dashboard connector chat:** model-selected read-only MCP calls are available when a profile is pinned to an authorized connector. Dashboard chat does not yet call local SQLite memory or workspace file tools.
+- **Live terminal chat:** OpenAI-compatible/MiniMax model transport with bounded in-process conversation context.
+- **Memory:** SQLite persistence, provenance, source/content hash, CLI add/list/search/archive, opt-in model-selected read-only search/list.
+- **Workspace:** opt-in, bounded read-only list/read/search and skill inspection; protected-path, traversal, symlink, and size checks are covered by tests in the integration stack.
+- **Skills:** project-local `SKILL.md` list/find/show/read; instructions are returned as untrusted text, never executed.
+- **Research team:** bounded Research/QA/SAM model workflow; optional workspace evidence, Brave Search snippets, and read-only agent tools.
+- **MCP:** local connector registry, environment-backed credentials, exact endpoint host allowlist, and read-only tool allowlist.
+- **Mission foundations:** durable mission/task state, leases, local daemon IPC, and deterministic offline echo execution. No general autonomous mission worker.
+
+## This build cycle: owner-approved model memory writes
+
+Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
+
+### Implemented in code, awaiting CI
+
+- Added `memory_list` to the bounded model tool registry.
+- Added opt-in `memory_add`, advertised only when the owner starts `talk --live --memory-write`.
+- Every write proposal is shown in the local terminal and requires a separate owner confirmation. Missing approval callback or a declined prompt fails closed.
+- The model can choose only `kind` and `content`. The runtime validates the four allowed kinds, rejects extra fields, bounds content to 2,000 characters, and assigns provenance itself.
+- Common credential patterns are rejected before owner confirmation. This is defense in depth, not a guarantee that all sensitive information can be detected.
+- Successful writes return the actual persisted record ID and include that ID in the durable agent-loop audit event.
+- Added tests for explicit opt-in, approval, denial, credential rejection, provenance, and SQLite reopen persistence. Added a provider test proving `memory_add` is not advertised unless write mode is enabled.
+
+### Not yet verified
+
+- This branch has not yet run GitHub Actions.
+- Windows Node 22/24 build and tests are pending.
+- Real MiniMax tool-call compatibility is pending.
+- Owner acceptance is pending: approve one memory write in a live session, exit, start a fresh process, read the exact record, then verify a denied proposal creates no record.
+- Model memory update and delete/archive tools are not implemented. The CLI's existing archive command remains a separate manual operation.
+
+## Capability boundaries
+
+| Capability | Current status | Boundary |
+|---|---|---|
+| Local dashboard and durable chat | Implemented on PR #64 stack; CI green | Not yet on main; no persistent background worker |
+| Agent profiles and chat branches | Implemented on PR #64 stack; CI green | Profiles are not independent Agent Boxes |
+| Live MiniMax chat | Owner previously verified on an earlier Windows branch | Re-test against the exact current integration head |
+| Model memory search/list | Implemented on PR #64 stack; CI green | Read-only; model cannot silently save |
+| Model memory add | Implemented on this branch, CI pending | Explicit per-write local owner confirmation |
+| Model memory update/delete | Planned | Requires action-bound approval and audit |
+| Local workspace list/read/search | Implemented on PR #64 stack; CI green | Explicit opt-in, read-only, bounded |
+| Model shell/computer control | Not implemented | No unrestricted shell or remote PC control |
+| MCP connector read calls | Implemented on PR #64 stack; PR #65 hardening CI green | Read-only allowlist; not a universal MCP manager |
+| Agent Box isolation | In progress in separate PR chain | PRs #40/#42/#48/#57/#59/#62/#63 are not included in #64; no live two-box verification |
+| Skill discovery/read | Implemented on PR #64 stack; CI green | No install/update/remove/activation or arbitrary skill execution |
+| Durable autonomous mission loop | Planned/in progress foundations | Scheduler/leases and journal exist; no verified browser-independent worker loop |
+| Obsidian, Agent Reach, Blender, channels, webhooks, Tailscale | Planned | No connection or adapter should be described as active |
+
+## Current blockers
+
+1. The integrated dashboard stack is still an open PR, not main.
+2. The new memory-write branch has no CI result or Windows/live MiniMax verification yet.
+3. Dashboard chat still lacks the local memory/workspace tool loop.
+4. Multi-profile configuration is not equivalent to independent Agent Boxes. Current profiles share workspace-level stores, connectors, and process environment.
+5. Do not install untrusted skills or Agent Reach dependencies, add credentials, expose the dashboard, merge, or deploy without owner approval.
 
 ## Next single assignment
 
-Implement a bounded and auditable model-to-memory bridge in `talk --live` using the existing `MemoryStore`, with explicit tool schemas and provenance, verified write/search in different processes, no tool authority from memory content, no false success reporting, and no unrestricted shell. Add Windows integration tests and documentation. Then add read-only discovery of standard `SKILL.md` from `.agents/skills` and `skills` with path and symlink controls.
+**Verify and harden the owner-approved memory write vertical slice.**
 
-## Longer roadmap (not implemented)
+- **Targets:** `src/memory-tool.ts`, `src/openai-compatible.ts`, `src/cli.ts`, `src/memory-tool.test.ts`, `src/openai-compatible.test.ts`.
+- **Acceptance:** Node 22/24 CI green; Windows build and full tests green; MiniMax actually requests `memory_add`; owner approval writes a record with runtime provenance; a fresh `talk --live` process can retrieve it; declining approval writes nothing; credential-like input is rejected; audit contains the persisted record ID.
+- **Dependencies:** PR #64 integration stack and PR #65 connector hardening.
+- **Ready:** code and offline tests are staged on the current branch.
+- **Not ready:** merge, live MiniMax verification, Windows owner acceptance.
 
-- Skills discovery/install/use/create/update and Agent Reach adapter.
-- Authorized filesystem reading, approved shell actions, durable missions, dashboard, and Obsidian/Blender integrations.
+After this passes, connect the **existing** dashboard chat to the same memory/workspace tool router with explicit owner-controlled read grants and approval-gated memory writes. Do not build a second dashboard.
 
-## Skill discovery slice (2026-11-08, unmerged, tests pending)
+## Longer roadmap
 
-- Implemented read-only `skills list` and `skills show <name>` CLI commands.
-- Scans `.agents/skills/<name>/SKILL.md` and `skills/<name>/SKILL.md` within the chosen workspace.
-- Validates bounded frontmatter, rejects symlinked paths, limits files to 64 KiB and registry to 200 entries, and does not execute instructions or installation scripts.
-- Added Node tests for valid metadata, invalid/oversized files and symlink escape.
-- **Not yet run in the connected GitHub-only editing environment.** No model skill invocation, installation, creation, or Agent Reach integration yet.
-- Verify on Windows: `npm run build`, `npm test`, `node dist/cli.js skills list`.
+- Complete independent Agent Box identity, storage, connector credentials, grants, and cross-instance denial tests.
+- Add approved memory update/archive operations and verified episodic outcome capture.
+- Add the durable asynchronous mission loop with lease recovery, bounded budgets, approvals, and persistent activity/outbox.
+- Complete the standards-based Skill Engine: inspect, approve, stage, test, version, activate, update, disable, rollback, and remove Agent Skills. Research the exact Agent Reach upstream and its Windows, license, dependency, and security requirements before adapter work.
+- Add optional Obsidian vault access with explicit folder authorization, conflict-safe writes, backups, and vault-specific grants.
+- Add signed webhook inbox/wakeups and optional Tailscale Serve for private access. Funnel, if ever used, is restricted to a separate webhook ingress and never the dashboard or command API.
+- Add application adapters beginning with Blender's documented background Python API after supervised file/command tools and the mission loop are verified.
+- Later: channels, voice, coding-agent CLI adapters, and optional desktop packaging.
 
-## Follow-up sprint: installed skill search
-
-- Added `skills find <query>` for case-insensitive matching of all query terms against name and description, without executing skill instructions.
-- Added tests for matching, no matches, and invalid blank queries.
-- GitHub CI for prior commit `723c364` passed (SAM CI run 42507066587). **The new search commit is awaiting its own CI result.**
-
-## Read-only live memory recall slice (2026-11-08, unmerged)
-
-- Added `talk --live --with-memory` to include bounded, provenance-labeled, untrusted SQLite memory records in model context with explicit user opt-in.
-- Added tests for cross-instance persistence, provenance, and empty memory.
-- No model memory write/search tool calls yet, and no automatic memory retrieval without owner opt-in.
-- **Validation pending on new commit.** Prior owner Windows build passed 58/58 tests on the skill discovery branch, before this feature.
-- Next: typed model-to-memory tool bridge, permission checks, bounded tool loops, and durable audit.
-
-## Local memory search in terminal (2026-11-08)
-
-- Added `/memory <query>` to `talk --live` for read-only SQLite search, up to ten results, bounded displayed content. No model call or memory write for the slash command.
-- This is NOT model-selected tool calling. Validation on new branch pending; owner verified prior 60/60 tests and live opt-in recall.
-
-## Native model-selected memory search (2026-11-08)
-
-- Added opt-in `talk --live --memory-tools`, OpenAI-compatible `memory_search` tool declaration, bounded one-call router, strict JSON arguments, read-only SQLite results, and terminal audit events.
-- Added offline mock tests for actual SQLite evidence, invalid tools/arguments and bounded call loop.
-- **Not yet validated on Windows or MiniMax live.** No writes, shell, filesystem access, persistent tool audit, or retries.
-
-## Workspace read tool sprint (2026-11-08)
-
-- Added opt-in model tools `list_directory`, `read_file`, and `search_files` with bounded shallow reads and path checks. Existing `memory_search` retained.
-- Tests added for valid operations and protected paths, traversal, symlinks and unauthorized tool names.
-- **New branch not yet Windows/live verified**. Owner verified 64/64 tests and two successful live model-selected memory searches on parent branch.
-- Next: verify on Windows, audit provider compatibility, improve path hardening, then Git read-only tools.
-
-## Coding agent and delegated CLI roadmap (owner direction, 2026-11-08)
-
-- **Goal:** SAM is a strong coding agent that can inspect, plan, patch, test and review work directly, or delegate scoped tasks to installed Codex CLI / Claude Code CLI.
-- **Phase 1:** finish read-only workspace tools and add Git status/diff; verify on Windows.
-- **Phase 2:** approval-gated local command adapter with executable allowlist, workspace confinement, timeouts, output caps, persisted stdout/stderr and explicit tool audit; no shell-string execution by default.
-- **Phase 3:** Codex and Claude Code adapters with installation/version detection, per-task workspace, explicit permissions, cost/time limits, structured result and independent diff/test verification. Do not pass credentials to the model.
-- **Phase 4:** skill/tool lifecycle: discover, inspect, propose, approve, install into workspace-local registry, pin versions/hashes, test, rollback and uninstall. Treat downloaded skill instructions and installation scripts as untrusted.
-- **Phase 5:** SAM-authored skills via staged proposals and automated evaluation, never silent self-installation or unrestricted privilege escalation.
-- **Acceptance:** SAM can fix a seeded bug with direct tools or delegated CLI, produce a reviewable patch, run verification, and report what was observed versus assumed.
-- Windows test feedback: 65/66 passed on first workspace-tool branch; symlink test failed due to Windows EPERM during fixture setup. Test updated to tolerate permission denial; re-verification pending.
-
-## Durable agent loop checkpoint sprint
-
-- Added SQLite journal for goals, read-only tool events, progress, outcomes and explicit interrupted-orphan fencing.
-- Integrated with live model tool loop and added CLI inspect/recover operations.
-- No auto-replay or automatic resume. No coding writes or delegated CLI execution.
-- Tests added for persistence, restart, monotonic progress and terminal-state fencing. Windows verification pending.
+No roadmap item is shipped until its tests and actual end-to-end acceptance are verified.
