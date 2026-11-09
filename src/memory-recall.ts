@@ -10,7 +10,7 @@ export function recallMemory(dbPath: string, maxRecords = 10): Message | undefin
     throw new Error("Invalid memory recall limit");
   const store = new MemoryStore(dbPath);
   try {
-    const records = store.list().slice(0, maxRecords);
+    const records = store.list(undefined, maxRecords);
     if (records.length === 0) return undefined;
     const lines = records.map(r => JSON.stringify({
       id: r.id, kind: r.kind, source: r.source,
