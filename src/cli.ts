@@ -22,6 +22,7 @@ import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromL
 import { serveWebhookChannel } from "./webhook.js";
 import { postDiscord } from "./discord.js";
 import { minis, spawnMini, removeMini } from "./minis.js";
+import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
@@ -196,6 +197,8 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
 const miniCmd=program.command("minis").description("Minis: a scoped SAM spawned for one person, their data only");
 miniCmd.command("spawn").argument("<name>").requiredOption("--person <who>","The person this mini serves").requiredOption("--instructions <text>","What this mini is for").option("--model <id>","Pin a model").option("--connector <id>","Pin one MCP connector by id").option("--heartbeat","Give it a starter daily-digest heartbeat").action((name:string,o:{person:string;instructions:string;model?:string;connector?:string;heartbeat?:boolean})=>output(spawnMini(program.opts().workspace,{name,person:o.person,instructions:o.instructions,model:o.model??null,connectorId:o.connector??null,starterHeartbeat:!!o.heartbeat})));
 miniCmd.command("list").action(()=>output(minis(program.opts().workspace)));
+miniCmd.command("door").argument("<name>").description("Issue (or rotate) the web door key for a mini; the key is shown once").action((name:string)=>{const key=issueDoorKey(program.opts().workspace,name);output({mini:name,path:"/mini/"+key});});
+miniCmd.command("door-off").argument("<name>").action((name:string)=>output({disabled:disableDoor(program.opts().workspace,name)}));
 miniCmd.command("remove").argument("<name>").action((name:string)=>output({removed:removeMini(program.opts().workspace,name)}));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")

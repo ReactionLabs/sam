@@ -9,6 +9,7 @@ import { runChatTurn } from "./agent-turn.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
+import { doorForKey, doorEnabled, miniDoorPage, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -59,6 +60,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
   const pending=new Set<string>();
+  const doorLimiter=new RateLimiter(30,3600000,2000);
   const server:Server=createServer(async(req,res)=>{
     res.setHeader("Cache-Control","no-store");
     res.setHeader("X-Content-Type-Options","nosniff");
@@ -137,6 +139,34 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         json(200,{reply:result.message});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
+    const doorMatch=/^\/mini\/([0-9a-f]{32})(\/message)?$/.exec(req.url??"");
+    if(doorMatch){
+      const miniName=doorForKey(workspace,doorMatch[1]);
+      if(!miniName){res.writeHead(404);res.end();return;}
+      const miniRecord=minis(workspace).find(m=>m.name===miniName);
+      if(req.method==="GET"&&!doorMatch[2]){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(miniDoorPage(miniRecord?.person??miniName,miniName));return;}
+      if(req.method==="POST"&&doorMatch[2]){
+        try{
+          let raw="";for await(const chunk of req){raw+=chunk.toString("utf8");if(raw.length>8000)throw Error("Request too large");}
+          const body:unknown=JSON.parse(raw);
+          if(!body||typeof body!=="object"||Array.isArray(body))throw Error("Invalid JSON body");
+          const session=(body as Record<string,unknown>).session, content=(body as Record<string,unknown>).content;
+          if(typeof session!=="string"||typeof content!=="string"||!content.trim()||content.length>2000)throw Error("Invalid door message");
+          if(!doorLimiter.allow(miniName+":"+session)) {json(429,{error:"Slow down a little. Try again in a moment."});return;}
+          const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName).id;}finally{store.close();}};
+          const chatId=sessionChat(workspace,miniName,session,makeChat);
+          try{const reply=await runChatTurn(workspace,chatId,content.trim());json(200,{reply:{role:"assistant",content:reply}});}
+          catch(error){
+            if(error instanceof Error&&error.message==="Chat history limit reached"){
+              const fresh=rotateSessionChat(workspace,miniName,session,makeChat);
+              const reply=await runChatTurn(workspace,fresh,content.trim());json(200,{reply:{role:"assistant",content:reply}});
+            }else throw error;
+          }
+        }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";json(400,{error:safe});}
+        return;
+      }
+      res.writeHead(405);res.end();return;
+    }
     if(req.method!=="GET"){res.writeHead(405);res.end();return;}
     if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
     if(req.url===`/api/status/${token}`){
@@ -153,7 +183,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }
