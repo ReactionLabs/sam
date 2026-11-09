@@ -37,6 +37,47 @@ function saveActions(root: string, items: ActionProposal[]): void {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   writeFileSync(actionsFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
 }
+// Profile-reference validation (found live 2026-11-09 on Dip's PC): a
+// heartbeat proposal named profile "Second Shift" - the connector's DISPLAY
+// name, not a profile - was shown as an approval card, and only on approval
+// did execution die with "Invalid profile", leaving a dead card and no job.
+// A proposal must never be shown in a form that cannot execute, so the
+// profile a heartbeat detail names is checked against the registry at
+// PROPOSAL time. "sam" is the implicit core profile (same rule as links.ts
+// validMember and the dashboard's default-agent check); every other name
+// must be a registered agent profile.
+export function knownProfileNames(root: string): string[] {
+  const db = new ChatStore(root);
+  try { return ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; }
+  finally { db.close(); }
+}
+function normalizeProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+// The one unambiguous correction for a bad profile name: exactly one known
+// profile matches it once case and separators are folded ("Second Shift"
+// -> "second-shift"). Anything else is a guess and is never applied.
+export function correctedProfileName(root: string, bad: string): string | null {
+  const target = normalizeProfileName(bad ?? "");
+  if (!target) return null;
+  const matches = knownProfileNames(root).filter(n => normalizeProfileName(n) === target);
+  return matches.length === 1 ? matches[0] : null;
+}
+function validateHeartbeatDetail(root: string, detail: string): void {
+  let spec: unknown;
+  try { spec = JSON.parse(detail); } catch { throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}"); }
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}");
+  const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown };
+  const profile = typeof s.profile === "string" ? s.profile : "";
+  const names = knownProfileNames(root);
+  if (!names.includes(profile)) {
+    const fix = correctedProfileName(root, profile);
+    throw new Error("Unknown profile \"" + profile + "\" in heartbeat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : ""));
+  }
+  if (typeof s.name !== "string" || !/^[a-zA-Z0-9 _-]{1,80}$/.test(s.name)) throw new Error("Invalid heartbeat name in detail");
+  if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
+  if (typeof s.prompt !== "string" || !s.prompt.trim() || s.prompt.length > 2000) throw new Error("Invalid heartbeat prompt in detail");
+}
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
@@ -44,6 +85,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (!title || title.length > 200) throw new Error("Invalid action title");
   if (!detail || detail.length > 4000) throw new Error("Invalid action detail");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
+  if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
   const item: ActionProposal = {
     id: randomUUID(), actor: input.actor, kind: input.kind as ActionKind, title, detail,
     status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null,
@@ -104,7 +146,41 @@ export async function decideAction(root: string, id: string, approve: boolean): 
     return a;
   }
   try { a.result = await execute(root, a); a.status = "done"; }
-  catch (e) { a.status = "failed"; a.result = e instanceof Error ? e.message : "Execution failed"; }
+  catch (e) {
+    a.status = "failed"; a.result = e instanceof Error ? e.message : "Execution failed";
+    // A failed card must not be a dead end. A heartbeat that died on an
+    // unknown profile (a legacy proposal written before proposal-time
+    // validation, or a profile removed after proposing) gets a corrected
+    // re-proposal when the correction is unambiguous; otherwise the result
+    // names the valid profiles so the owner can re-propose with full
+    // information instead of guessing from "Invalid profile".
+    let reproposal: { detail: string; fix: string } | null = null;
+    if (a.kind === "heartbeat") {
+      try {
+        const spec = JSON.parse(a.detail) as { profile?: unknown };
+        const bad = typeof spec?.profile === "string" ? spec.profile : "";
+        const names = knownProfileNames(root);
+        if (bad && !names.includes(bad)) {
+          const fix = correctedProfileName(root, bad);
+          if (fix) reproposal = { detail: JSON.stringify({ ...(spec as object), profile: fix }), fix };
+          else a.result += ". Valid profiles: " + names.join(", ");
+        }
+      } catch { /* detail was not JSON; the failure result stands as-is */ }
+    }
+    saveActions(root, items);
+    recordActivity(root, "owner", "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
+    if (reproposal) {
+      const existing = listActions(root).find(x => x.status === "pending" && x.kind === "heartbeat" && x.actor === a.actor && x.detail === reproposal!.detail);
+      const np = existing ?? proposeAction(root, { actor: a.actor, kind: a.kind, title: a.title, detail: reproposal.detail, chatId: a.chatId });
+      const fresh = listActions(root); const self = fresh.find(x => x.id === a.id);
+      if (self) {
+        self.result = (self.result ?? "") + " Corrected re-proposal pending approval: " + np.id + " (profile " + reproposal.fix + ")";
+        saveActions(root, fresh); a.result = self.result;
+      }
+      if (!existing) recordActivity(root, "owner", "reproposal", "Corrected re-proposal for failed " + a.kind + ": " + a.title + " -> profile " + reproposal.fix);
+    }
+    return a;
+  }
   saveActions(root, items);
   recordActivity(root, "owner", a.status === "done" ? "approved" : "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
   return a;
