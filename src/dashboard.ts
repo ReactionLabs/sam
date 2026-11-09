@@ -133,16 +133,17 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1]),events:db.events(match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
     }
     if(match && req.method==="POST" && match[2]){
       const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
       pending.add(id);
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
+        const turnStart=new Date().toISOString();
         const reply=await runChatTurn(workspace,id,body.content);
         const result={message:{role:"assistant" as const,content:reply}};
-        json(200,{reply:result.message});
+        json(200,{reply:result.message,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
     const doorMatch=/^\/mini\/([0-9a-f]{32})(\/(message|history))?(\?.*)?$/.exec(req.url??"");

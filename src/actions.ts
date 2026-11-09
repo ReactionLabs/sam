@@ -19,20 +19,21 @@ export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
   status: ActionStatus; createdAt: string; decidedAt: string | null; result: string | null;
+  chatId: string | null;
 }
 const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say"];
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
   if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? data as ActionProposal[] : []; }
+  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null })) : []; }
   catch { return []; }
 }
 function saveActions(root: string, items: ActionProposal[]): void {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   writeFileSync(actionsFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
 }
-export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string }): ActionProposal {
+export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
   const detail = (input.detail ?? "").trim();
@@ -42,6 +43,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   const item: ActionProposal = {
     id: randomUUID(), actor: input.actor, kind: input.kind as ActionKind, title, detail,
     status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null,
+    chatId: input.chatId ?? null,
   };
   const items = listActions(root); items.push(item); saveActions(root, items);
   recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);

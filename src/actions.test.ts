@@ -75,3 +75,14 @@ test("actions: the chat tool proposes but cannot execute - approval is the only 
     finally { store2.close(); }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("actions: a proposal made in a chat carries that chat's id, and legacy records read as unattached", () => {
+  const root = fresh();
+  try {
+    const out = executeOwnTool(root, "alex", "sam_propose_action", { kind: "note", title: "In chat", detail: "stamped" }, "chat-123") as { id: string };
+    const listed = listActions(root).find(x => x.id === out.id);
+    assert.equal(listed?.chatId, "chat-123");
+    assert.equal(listActions(root).filter(x => x.chatId === "chat-123").length, 1);
+    assert.equal(listActions(root).filter(x => x.chatId === "other-chat").length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
