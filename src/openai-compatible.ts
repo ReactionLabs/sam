@@ -89,8 +89,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const data=JSON.parse(Buffer.concat(chunks).toString("utf8")) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
       const msg=data.choices?.[0]?.message;
       if(!msg)throw Error("Invalid model response");
-      const content=typeof msg.content==="string"?msg.content.replace(/<think>[\\s\\S]*?<\\/think>/gi,"").trim():null;
-      if(content&&/<\\/?think>|<\\|tool_call\\|>|<tool_call>/i.test(content))throw Error("Unsafe model output");
+      const content=typeof msg.content==="string"?msg.content.replace(new RegExp("<think>[\\s\\S]*?</think>","gi"),"").trim():null;
+      if(content&&new RegExp("<\\/?think>|<\\|tool_call\\|>|<tool_call>","i").test(content))throw Error("Unsafe model output");
       const raw=msg.tool_calls;
       if(raw!==undefined&&!Array.isArray(raw))throw Error("Invalid tool calls");
       if(Array.isArray(raw)&&raw.length>4)throw Error("Too many tool calls");
