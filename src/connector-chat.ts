@@ -1,7 +1,8 @@
 import { connectors, testConnector, readConnectorTool, type Connector } from "./connectors.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { OWN_TOOLS, executeOwnToolAsync } from "./own-tools.js";
-import { toolBudget, type ToolBudget } from "./budgets.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, type ToolBudget } from "./budgets.js";
+import { recordActivity } from "./activity.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
 // purpose: short strings and a small limit, nothing structured, nothing writable.
@@ -38,13 +39,17 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
   ...history
  ];
  let callsUsed=0;
- for(let round=0;round<budget.rounds;round++){
+ const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
+ for(let round=0;round<budget.rounds&&!exhausted;round++){
   const turn=await provider.completeConnectorTurn(model,messages,tools);
   if(!turn.calls.length)return turn.content??"No response.";
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   for(const call of turn.calls){
-   callsUsed++;
-   if(callsUsed>budget.maxCalls)throw Error("MCP chat tool budget exceeded");
+   // Budget exhaustion is graceful, never fatal: the call is stubbed (so the
+   // transcript stays valid), the loop stops, and the tool-free synthesis
+   // below answers from the results already gathered.
+   if(callsUsed>=budget.maxCalls){exhausted=true;skipped.push(call.name);messages.push({role:"tool",tool_call_id:call.id,content:budgetStubContent(executed,budget.maxCalls)});continue;}
+   callsUsed++;executed.push(call.name);
    let output:unknown;
    if(own&&call.name.startsWith("sam_")){
     output=await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId);
@@ -62,7 +67,14 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
   }
  }
  // Never send a tool request in the final synthesis step.
+ if(exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
- if(final.calls.length)throw Error("Model requested tools after budget exhausted");
- return final.content??"MCP results received but no summary was produced.";
+ if(final.content)return final.content;
+ // The synthesis step is tool-free; a model that still asks for tools gets a
+ // plain partial answer, not a dead turn.
+ if(final.calls.length||exhausted){
+  if(!exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
+  return budgetFallbackAnswer(executed,skipped,budget.maxCalls);
+ }
+ return "MCP results received but no summary was produced.";
 }

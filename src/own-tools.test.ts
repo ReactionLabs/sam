@@ -7,6 +7,7 @@ import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { createLink } from "./links.js";
 import { executeOwnTool, ownToolsChat } from "./own-tools.js";
+import { readActivity } from "./activity.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 
 test("own tools: memory search is fenced to the acting profile's levels",()=>{
@@ -68,5 +69,33 @@ test("own tools: the loop executes a memory search and answers from it",async()=
   } as unknown as OpenAICompatibleProvider;
   const reply=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"what is the vault code word?"}]);
   assert.match(reply,/otter/);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("own tools: budget exhaustion stubs extra calls, answers from partial results, and logs the spend",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-own-budget-"));
+ try{
+  let step=0;
+  const fake={
+   async completeConnectorTurn(_model:string,messages:Array<Record<string,unknown>>,tools:unknown[]){
+    step++;
+    if(step===1)return {content:null,calls:[{id:"c1",name:"sam_memory_list",args:{}},{id:"c2",name:"sam_memory_list",args:{}},{id:"c3",name:"sam_memory_list",args:{}}]};
+    // Synthesis step (tool-free): the transcript must be valid - every
+    // tool_call answered - and the stub must say the budget ran out.
+    const calledIds=messages.flatMap(m=>Array.isArray(m.tool_calls)?(m.tool_calls as Array<{id:string}>).map(c=>c.id):[]);
+    const answeredIds=new Set(messages.filter(m=>m.role==="tool").map(m=>String(m.tool_call_id)));
+    assert.deepEqual(calledIds.sort(),[...answeredIds].sort());
+    const stub=messages.find(m=>m.role==="tool"&&String(m.content).includes("Tool budget exhausted"));
+    assert.ok(stub,"the unexecuted call must be stubbed with the budget note");
+    return {content:"Partial answer from the two lists I did read.",calls:[]};
+   }
+  } as unknown as OpenAICompatibleProvider;
+  const reply=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"list everything"}],undefined,undefined,{rounds:3,maxCalls:2});
+  assert.equal(reply,"Partial answer from the two lists I did read.");
+  const logged=readActivity(root,10,{kind:"tool-budget"});
+  assert.equal(logged.length,1);
+  assert.match(logged[0].summary,/2\/2 calls used/);
+  assert.match(logged[0].summary,/sam_memory_list/);
+  assert.match(logged[0].summary,/not executed: sam_memory_list/);
  }finally{rmSync(root,{recursive:true,force:true});}
 });

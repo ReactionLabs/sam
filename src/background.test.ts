@@ -131,16 +131,15 @@ test("the heartbeat budget stops a tool-hungry loop sooner than the background b
         return { content: null, calls: [0, 1, 2].map(() => ({ id: "c" + (++seq), name: "sam_memory_list", args: {} })) };
       },
     } as unknown as OpenAICompatibleProvider;
-    await assert.rejects(
-      ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("heartbeat")),
-      /budget exceeded/,
-    );
+    // Exhaustion is graceful since the budget fix: the turn RESOLVES with a
+    // partial answer instead of rejecting, but the heartbeat tier still runs
+    // out sooner (fewer model rounds) than the background tier.
+    const heartbeatAnswer = await ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("heartbeat"));
+    assert.match(heartbeatAnswer, /tool budget/i);
     const heartbeatCalls = calls;
     calls = 0;
-    await assert.rejects(
-      ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("background")),
-      /budget exceeded/,
-    );
+    const backgroundAnswer = await ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("background"));
+    assert.match(backgroundAnswer, /tool budget/i);
     assert.ok(calls > heartbeatCalls, "background tier must allow more tool rounds than a heartbeat poll");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

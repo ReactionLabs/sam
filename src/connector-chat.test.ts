@@ -6,6 +6,7 @@ import {join} from "node:path";
 import {addConnector} from "./connectors.js";
 import {connectorChat} from "./connector-chat.js";
 import {listActions} from "./actions.js";
+import {readActivity} from "./activity.js";
 import {OpenAICompatibleProvider} from "./openai-compatible.js";
 
 test("connector chat executes approved read-only MCP tool and summarizes response",async()=>{
@@ -105,6 +106,79 @@ test("connector chat also carries SAM's own tools: a proposal lands pending, sta
     assert.equal(pending.length, 1);
     assert.equal(pending[0].chatId, "chat-xyz");
     assert.equal(pending[0].title, "From connector chat");
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;
+    if (oldHosts === undefined) delete process.env.SAM_MCP_ALLOWED_HOSTS; else process.env.SAM_MCP_ALLOWED_HOSTS = oldHosts;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("connector chat budget exhaustion answers from partial results instead of dying", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-chat-budget-"));
+  const oldFetch = globalThis.fetch, oldKey = process.env.SAM_MCP_TOKEN_TEST, oldHosts = process.env.SAM_MCP_ALLOWED_HOSTS;
+  try {
+    process.env.SAM_MCP_ALLOWED_HOSTS = "mcp.secondshiftos.com";
+    process.env.SAM_MCP_TOKEN_TEST = "fake-key";
+    addConnector(root, "Second Shift", "https://mcp.secondshiftos.com/mcp/v1", "SAM_MCP_TOKEN_TEST");
+    let modelCalls = 0; let toolCalls = 0; let synthesisMessages: Array<Record<string, unknown>> = [];
+    globalThis.fetch = async (input, init) => {
+      const url = String(input), body = JSON.parse(String(init?.body));
+      if (url.includes("model.example")) {
+        modelCalls++;
+        if (body.tool_choice === "none") {
+          synthesisMessages = body.messages as Array<Record<string, unknown>>;
+          return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Partial answer from the first two checks." } }] }), { headers: { "Content-Type": "application/json" } });
+        }
+        const calls = [1, 2, 3].map(n => ({ id: "call-" + n, type: "function", function: { name: "mcp_whoami", arguments: "{}" } }));
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: calls } }] }), { headers: { "Content-Type": "application/json" } });
+      }
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      if (body.method === "tools/call") toolCalls++;
+      const result = body.method === "initialize" ? { protocolVersion: "2025-06-18" } : body.method === "tools/list" ? { tools: [{ name: "whoami" }] } : { content: [{ type: "text", text: "tenant-scoped identity" }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "Content-Type": "application/json" } });
+    };
+    const provider = new OpenAICompatibleProvider("https://model.example/v1/chat/completions", "model-test-key");
+    const result = await connectorChat(root, provider, "test-model", [{ role: "user", content: "Check everything" }], undefined, { actor: "sam", chatId: "chat-budget" }, { rounds: 3, maxCalls: 2 });
+    assert.equal(result, "Partial answer from the first two checks.");
+    assert.equal(toolCalls, 2, "only the calls inside the budget may execute");
+    assert.equal(modelCalls, 2, "one tool round plus the synthesis step");
+    const calledIds = synthesisMessages.flatMap(m => Array.isArray(m.tool_calls) ? (m.tool_calls as Array<{ id: string }>).map(c => c.id) : []);
+    const toolReplies = synthesisMessages.filter(m => m.role === "tool");
+    assert.deepEqual(calledIds.sort(), toolReplies.map(m => String(m.tool_call_id)).sort(), "every tool_call must have a tool reply, executed or stubbed");
+    assert.ok(toolReplies.some(m => String(m.content).includes("Tool budget exhausted")), "the unexecuted call must be stubbed with the budget note");
+    const logged = readActivity(root, 10, { kind: "tool-budget" });
+    assert.equal(logged.length, 1);
+    assert.match(logged[0].summary, /2\/2 calls used/);
+    assert.match(logged[0].summary, /not executed: mcp_whoami/);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;
+    if (oldHosts === undefined) delete process.env.SAM_MCP_ALLOWED_HOSTS; else process.env.SAM_MCP_ALLOWED_HOSTS = oldHosts;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("connector chat survives a synthesis step that still requests tools", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-chat-budget2-"));
+  const oldFetch = globalThis.fetch, oldKey = process.env.SAM_MCP_TOKEN_TEST, oldHosts = process.env.SAM_MCP_ALLOWED_HOSTS;
+  try {
+    process.env.SAM_MCP_ALLOWED_HOSTS = "mcp.secondshiftos.com";
+    process.env.SAM_MCP_TOKEN_TEST = "fake-key";
+    addConnector(root, "Second Shift", "https://mcp.secondshiftos.com/mcp/v1", "SAM_MCP_TOKEN_TEST");
+    globalThis.fetch = async (input, init) => {
+      const url = String(input), body = JSON.parse(String(init?.body));
+      if (url.includes("model.example")) {
+        const msg = { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "mcp_whoami", arguments: "{}" } }] };
+        return new Response(JSON.stringify({ choices: [{ message: msg }] }), { headers: { "Content-Type": "application/json" } });
+      }
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      const result = body.method === "initialize" ? { protocolVersion: "2025-06-18" } : body.method === "tools/list" ? { tools: [{ name: "whoami" }] } : { content: [{ type: "text", text: "tenant-scoped identity" }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "Content-Type": "application/json" } });
+    };
+    const provider = new OpenAICompatibleProvider("https://model.example/v1/chat/completions", "model-test-key");
+    const result = await connectorChat(root, provider, "test-model", [{ role: "user", content: "Who am I?" }], undefined, { actor: "sam" }, { rounds: 1, maxCalls: 6 });
+    assert.match(result, /tool budget/i, "a tool-hungry synthesis must resolve to a partial answer, not throw");
   } finally {
     globalThis.fetch = oldFetch;
     if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;
