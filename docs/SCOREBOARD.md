@@ -46,6 +46,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 - Common credential patterns are rejected before owner confirmation. This is defense in depth, not a guarantee that all sensitive information can be detected.
 - Successful writes return the actual persisted record ID and include that ID in the durable agent-loop audit event.
 - Added tests for explicit opt-in, approval, denial, credential rejection, provenance, and SQLite reopen persistence. Added a provider test proving `memory_add` is not advertised unless write mode is enabled.
+- Corrected SAM's default identity so it describes capabilities as session-scoped instead of claiming all file/memory tools are unavailable; `talk --live` now injects an accurate tool-capability contract before user messages. Updated identity tests.
 
 ### Not yet verified
 
