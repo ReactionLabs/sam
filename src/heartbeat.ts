@@ -8,6 +8,7 @@ import { channels } from "./channels.js";
 import { loadBridgeState } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
+import { drainBackgroundTasks } from "./background.js";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -125,8 +126,8 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   return {scanned,noted,promoted,episodes};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[]}>{
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];background:{ran:string[];failed:string[];recovered:string[]}}>{
  const consolidation=consolidatePreferences(root);
  const jobs=heartbeatJobs(root);const now=Date.now();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];
  // Loaded after consolidation, which saves this same state file for its
@@ -160,7 +161,13 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  }
  if(dirty)saveJobs(root,jobs);
  if(stateDirty)saveState(root,state);
- return {consolidation,ran,changed,unchanged};
+ // Legs (P5): every tick also drains the background queue, so a task a chat
+ // handed off runs within one tick on the deep background budget tier and
+ // posts its result back into its chat. Drained after due jobs so a poll's
+ // cheap tier never competes with the deep work.
+ const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
+ if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
+ return {consolidation,ran,changed,unchanged,background};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.

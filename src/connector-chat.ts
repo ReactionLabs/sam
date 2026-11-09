@@ -1,6 +1,7 @@
 import { connectors, testConnector, readConnectorTool, type Connector } from "./connectors.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { OWN_TOOLS, executeOwnToolAsync } from "./own-tools.js";
+import { toolBudget, type ToolBudget } from "./budgets.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
 // purpose: short strings and a small limit, nothing structured, nothing writable.
@@ -15,7 +16,7 @@ function safeArgs(raw:Record<string,unknown>):Record<string,unknown>|null{
  return out;
 }
 export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string }
-export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext):Promise<string>{
+export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat")):Promise<string>{
  const connected=connectors(root).filter(c=>c.enabled&&!!process.env[c.tokenEnv]&&(!connectorId||c.id===connectorId));
  if(!connected.length)throw Error(connectorId?"Profile connector unavailable":"No configured MCP connector credentials");
  // Without a profile pin, only one connector may be live for chat; never silently route across tenants.
@@ -37,13 +38,13 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
   ...history
  ];
  let callsUsed=0;
- for(let round=0;round<3;round++){
+ for(let round=0;round<budget.rounds;round++){
   const turn=await provider.completeConnectorTurn(model,messages,tools);
   if(!turn.calls.length)return turn.content??"No response.";
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   for(const call of turn.calls){
    callsUsed++;
-   if(callsUsed>6)throw Error("MCP chat tool budget exceeded");
+   if(callsUsed>budget.maxCalls)throw Error("MCP chat tool budget exceeded");
    let output:unknown;
    if(own&&call.name.startsWith("sam_")){
     output=await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId);

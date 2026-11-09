@@ -6,6 +6,7 @@ import { connectors } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
+import { toolBudget, type TurnRoute } from "./budgets.js";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -13,7 +14,8 @@ import { recordActivity } from "./activity.js";
 // applies to this turn), resolves the chat's profile, injects that profile's
 // standing law, routes to the profile's pinned connector or the plain model,
 // and persists both sides of the exchange.
-export async function runChatTurn(root:string,chatId:string,content:string):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
+  const budget=toolBudget(opts?.route??"chat");
   const providerName=process.env.SAM_MODEL_PROVIDER??"";
   const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
   if(!endpoint)throw Error("Model not configured");
@@ -38,13 +40,13 @@ export async function runChatTurn(root:string,chatId:string,content:string):Prom
   if(active?.connector_id){
     const pinned=connectors(root).find(c=>c.id===active.connector_id);
     if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId});
+    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId},budget);
   }else if(chatAgent){
-    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId);
+    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget);
   }else{
     const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId});
-    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId);
+    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId},budget);
+    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget);
   }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
   recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8));

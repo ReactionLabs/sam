@@ -16,6 +16,7 @@ import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.j
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, addHeartbeatJob, removeHeartbeatJob, runHeartbeat, deliverToChannel } from "./heartbeat.js";
+import { listBackgroundTasks, queueBackgroundTask, drainBackgroundTasks } from "./background.js";
 import { runChatTurn } from "./agent-turn.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
@@ -200,8 +201,12 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
     },
     async(ch,body)=>postDiscord(ch,body));
   };
-  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content),ensureChat,deliver}));
+  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver}));
  });
+const bgCmd=program.command("background").description("Background work (legs): tasks a chat handed off to run async and post back into the chat");
+bgCmd.command("list").option("--chat <id>","Only this chat").action((o:{chat?:string})=>output(listBackgroundTasks(program.opts().workspace).filter(t=>!o.chat||t.chatId===o.chat)));
+bgCmd.command("handoff").requiredOption("--chat <id>","Chat the task reports back into").requiredOption("--prompt <text>","The self-contained task").option("--actor <name>","Acting profile","sam").option("--title <text>","Short label").action((o:{chat:string;prompt:string;actor:string;title?:string})=>output(queueBackgroundTask(program.opts().workspace,{actor:o.actor,chatId:o.chat,prompt:o.prompt,title:o.title})));
+bgCmd.command("drain").description("Run queued background tasks now, on the deep background budget tier").action(async()=>{const root=program.opts().workspace as string;output(await drainBackgroundTasks(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"})}));});
 const miniCmd=program.command("minis").description("Minis: a scoped SAM spawned for one person, their data only");
 miniCmd.command("spawn").argument("<name>").requiredOption("--person <who>","The person this mini serves").requiredOption("--instructions <text>","What this mini is for").option("--model <id>","Pin a model").option("--connector <id>","Pin one MCP connector by id").option("--heartbeat","Give it a starter daily-digest heartbeat").action((name:string,o:{person:string;instructions:string;model?:string;connector?:string;heartbeat?:boolean})=>output(spawnMini(program.opts().workspace,{name,person:o.person,instructions:o.instructions,model:o.model??null,connectorId:o.connector??null,starterHeartbeat:!!o.heartbeat})));
 miniCmd.command("list").action(()=>output(minis(program.opts().workspace)));
