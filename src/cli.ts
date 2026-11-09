@@ -44,6 +44,7 @@ import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
+import { listActions, proposeAction, decideAction } from "./actions.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
 const program=new Command();
@@ -209,6 +210,11 @@ linkCmd.command("add").argument("<id>").argument("<member>").action((id:string,m
 linkCmd.command("remove").argument("<id>").argument("<member>").action((id:string,member:string)=>output(removeLinkMember(program.opts().workspace,id,member)));
 linkCmd.command("talk").argument("<id>").argument("<from>").argument("<to>").argument("<message>").description("Run one linked exchange: from speaks, to answers as itself").action(async(id:string,from:string,to:string,message:string)=>{const root=program.opts().workspace as string;output({reply:await linkExchange(root,id,from,to,message,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content)})});});
 linkCmd.command("delete").argument("<id>").action((id:string)=>output({deleted:deleteLink(program.opts().workspace,id)}));
+const actCmd=program.command("actions").description("Proposed actions: SAM proposes, the owner approves, then it executes");
+actCmd.command("list").action(()=>output(listActions(program.opts().workspace)));
+actCmd.command("propose").argument("<profile>").argument("<kind>").argument("<title>").argument("<detail>").action((profile:string,kind:string,title:string,detail:string)=>output(proposeAction(program.opts().workspace,{actor:profile,kind,title,detail})));
+actCmd.command("approve").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,true)));
+actCmd.command("reject").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,false)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")

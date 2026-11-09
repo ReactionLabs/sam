@@ -11,6 +11,8 @@ import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
 import { doorForKey, doorEnabled, doorHomeLink, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
+import { listActions, decideAction } from "./actions.js";
+import { readActivity } from "./activity.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -90,6 +92,10 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     if(req.method==="POST"&&req.url===route+"/config"){
       try{json(200,saveDashboardConfig(workspace,await post()));}catch{json(400,{error:"Invalid configuration"});}return;
+    }
+    const actionRoute=req.url?.match(new RegExp("^"+route+"/actions/([0-9a-f-]{36})/decide$"));
+    if(actionRoute&&req.method==="POST"){
+      try{const body=await post();json(200,decideAction(workspace,actionRoute[1],body.decision==="approve"));}catch{json(400,{error:"Invalid action decision"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/connectors"){
       try{const b=await post();if(typeof b.name!=="string"||typeof b.url!=="string"||typeof b.tokenEnv!=="string")throw Error("Invalid connector");
@@ -190,7 +196,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),activity:readActivity(workspace,30),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

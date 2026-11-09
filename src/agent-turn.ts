@@ -5,6 +5,7 @@ import { ownToolsChat } from "./own-tools.js";
 import { connectors } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
 import { readDashboardConfig } from "./dashboard.js";
+import { recordActivity } from "./activity.js";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -46,5 +47,6 @@ export async function runChatTurn(root:string,chatId:string,content:string):Prom
     else reply=await ownToolsChat(root,profileName,provider,model,messages,(chatId,content)=>runChatTurn(root,chatId,content));
   }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
+  recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8));
   return reply;
 }
