@@ -17,7 +17,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
 | PR #66 | Open draft, stacked on #65; owner-approved terminal memory writes and bounded memory list | [PR #66](https://github.com/ReactionLabs/sam/pull/66), latest tested source head `fd474ed0373df9e7aa81c41646050cc2b6e585bf`, [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), 115/115 on Node 22 and Node 24 |
 | PR #67 | Open draft, based on #64; per-box mission/memory/chat/profile storage namespaces; not in the #66/#68 stack | [PR #67](https://github.com/ReactionLabs/sam/pull/67), head `b723f90313ebfaee5d6feafb4978916a81268c50`, [run #42556313860](https://github.com/ReactionLabs/sam/actions/runs/42556313860), 113/113 on Node 22 and Node 24 |
-| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), latest tested code head `f2426c82abc88b106cb4f9277e36fd49575902cd`, [run #42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520), 117/117 on Node 22 and Node 24; later commits are documentation-only |
+| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), latest tested code head `44651649925d9e76b071d277da2eed797aeec38e`, [run #42558439222](https://github.com/ReactionLabs/sam/actions/runs/42558439222), 117/117 on Node 22 and Node 24; later commits are documentation-only |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
 
@@ -94,12 +94,13 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 - The Agent Skills registry remains rooted in the SAM state workspace even when the file tool root is broader.
 - Local tools are available only to the built-in SAM chat. Named profiles do not inherit these grants. Profile-pinned MCP connector chat remains a separate route.
 - Tool request/completion/failure events are recorded in the existing chat activity feed and durable SQLite loop journal. The UI reloads the selected chat after a reply so the events appear immediately.
+- Common credential-bearing filenames are blocked; common private-key, API-key, bearer-token, password, and token-like content patterns are withheld from file reads/searches. This is defense in depth, not a complete secret scanner.
 - Dashboard local tools are read-only. No model memory writes, shell, arbitrary file writes, installs, or desktop actions are exposed.
 - Added mock-provider tests for SQLite memory evidence, a separate file root, skill discovery from the state root, durable audit, and disabled-workspace-tool denial.
 
 ### Remaining owner acceptance
 
-- PR #68 GitHub Actions run [#42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520) passed build and **117/117 tests on Node 22 and Node 24**.
+- PR #68 GitHub Actions run [#42558439222](https://github.com/ReactionLabs/sam/actions/runs/42558439222) passed build and **117/117 tests on Node 22 and Node 24**, including protected credential-path and content-withholding checks.
 - Windows build and full test suite: pending.
 - Live MiniMax dashboard tool-call acceptance: pending. No paid model call was made during this build cycle.
 - The dashboard memory-write approval UI is not implemented. Terminal `--memory-write` remains the only model-proposed write path, and every terminal write requires local confirmation.
