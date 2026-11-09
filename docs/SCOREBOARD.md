@@ -63,8 +63,8 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 | Agent profiles and chat branches | Implemented on PR #64 stack; CI green | Profiles are not independent Agent Boxes |
 | Live MiniMax chat | Owner previously verified on an earlier Windows branch | Re-test against the exact current integration head |
 | Model memory search | Implemented on PR #64 stack; CI green | Read-only search only |
-| Model memory list/add | Added on current branch; CI pending | `memory_list` is read-only; every `memory_add` requires local owner confirmation |
-| Model memory add | Implemented on this branch, CI pending | Explicit per-write local owner confirmation |
+| Model memory list | Added on current branch; CI pending | Read-only, bounded to ten recent records |
+| Model memory add | Added on current branch; CI pending | Explicit per-write local owner confirmation |
 | Model memory update/delete | Planned | Requires action-bound approval and audit |
 | Local workspace list/read/search | Implemented on PR #64 stack; CI green | Explicit opt-in, read-only, bounded |
 | Model shell/computer control | Not implemented | No unrestricted shell or remote PC control |
