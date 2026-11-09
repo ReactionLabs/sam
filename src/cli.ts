@@ -45,6 +45,7 @@ import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
 import { listActions, proposeAction, decideAction } from "./actions.js";
+import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
 const program=new Command();
@@ -211,10 +212,12 @@ linkCmd.command("remove").argument("<id>").argument("<member>").action((id:strin
 linkCmd.command("talk").argument("<id>").argument("<from>").argument("<to>").argument("<message>").description("Run one linked exchange: from speaks, to answers as itself").action(async(id:string,from:string,to:string,message:string)=>{const root=program.opts().workspace as string;output({reply:await linkExchange(root,id,from,to,message,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content)})});});
 linkCmd.command("delete").argument("<id>").action((id:string)=>output({deleted:deleteLink(program.opts().workspace,id)}));
 const actCmd=program.command("actions").description("Proposed actions: SAM proposes, the owner approves, then it executes");
-actCmd.command("list").action(()=>output(listActions(program.opts().workspace)));
+actCmd.command("list").option("--pending","Only pending").option("--chat <id>","Only this chat").option("--actor <name>","Only this profile").action((o:{pending?:boolean;chat?:string;actor?:string})=>output(actionsView(program.opts().workspace,{pending:!!o.pending,chat:o.chat,actor:o.actor})));
 actCmd.command("propose").argument("<profile>").argument("<kind>").argument("<title>").argument("<detail>").option("--chat <id>","Stamp the chat this proposal belongs to").action((profile:string,kind:string,title:string,detail:string,o:{chat?:string})=>output(proposeAction(program.opts().workspace,{actor:profile,kind,title,detail,chatId:o.chat??null})));
 actCmd.command("approve").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,true)));
 actCmd.command("reject").argument("<id>").action((id:string)=>output(decideAction(program.opts().workspace,id,false)));
+program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
+program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")
@@ -234,9 +237,11 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   await serveWebhookChannel({channel,sam,secret,port:Number(o.port)});
  });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
-chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
+chats.command("new").argument("<title>").option("--profile <name>","Bind the chat to a profile").action((title:string,o:{profile?:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title,o.profile&&o.profile!=="sam"?o.profile:null));}finally{db.close();}});
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
+chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
+chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
 const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
 teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").action(async(o:{chat:string;objective:string;live:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean})=>{
