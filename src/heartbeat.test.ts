@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
-import { addHeartbeatJob, consolidatePreferences, heartbeatLog, heartbeatOutputHash, normalizeHeartbeatOutput, runHeartbeat } from "./heartbeat.js";
+import { addHeartbeatJob, consolidatePreferences, heartbeatFactSignature, heartbeatFactSignatureString, heartbeatLog, heartbeatOutputHash, heartbeatOutputsEquivalent, normalizeHeartbeatOutput, runHeartbeat } from "./heartbeat.js";
 import { PreferenceStore } from "./preferences.js";
 import { readActivity } from "./activity.js";
 
@@ -54,6 +54,79 @@ test("heartbeat output normalization ignores rephrasing chrome but not fact chan
  assert.equal(normalizeHeartbeatOutput("**All** `quiet.`"),"all quiet");
  const changed="- Candidates total: **282,967**\n- Newest candidate: **2026-11-04T22:45:59.894Z** - the stack is still frozen.\n- ALERT verdict count: **9**";
  assert.notEqual(heartbeatOutputHash(a),heartbeatOutputHash(changed));
+});
+
+// The live stack-watch replies that defeated text normalization: same facts,
+// wholly reworded clauses between runs (box heartbeats.jsonl, 2026-11-09).
+const LIVE_A="- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z** - **the stack is still frozen** (identical to the last two checks).\n- Candidate verdicts: **ALERT = 9** (PASS 1,139 / PENDING 281,818)\n- Paper setups in state `entered`: **20** (tool returned 20 rows, all `entered`)";
+const LIVE_B="- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z** - **the stack is still frozen** (unchanged since the Nov 4 crash).\n- Candidate verdicts: **ALERT = 9** (PASS 1,139 / PENDING 281,818)\n- Paper setups in state `entered`: **20**\n- Snapshot `as_of` 2026-11-09T06:25:36Z; last healed never";
+const LIVE_C="- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z** - **the stack is still frozen.**\n- Alert verdict count: **9**\n- Paper setups in `entered` state: **20**";
+
+test("heartbeat fact signature: live paraphrases of the same facts are equivalent",()=>{
+ assert.notEqual(heartbeatOutputHash(LIVE_A),heartbeatOutputHash(LIVE_B));
+ const priorA={hash:heartbeatOutputHash(LIVE_A),sig:heartbeatFactSignatureString(LIVE_A)};
+ // B rewords a clause and adds a snapshot line; C omits the PASS/PENDING
+ // counts entirely. Neither contradicts a single fact in A.
+ assert.equal(heartbeatOutputsEquivalent(priorA,heartbeatOutputHash(LIVE_B),heartbeatFactSignatureString(LIVE_B)),true);
+ assert.equal(heartbeatOutputsEquivalent(priorA,heartbeatOutputHash(LIVE_C),heartbeatFactSignatureString(LIVE_C)),true);
+ assert.ok(heartbeatFactSignature(LIVE_A).length>=4);
+ // Reordering the same facts changes nothing either.
+ const reordered="- Paper setups in `entered` state: **20**\n- Alert verdict count: **9**\n- Candidates total: **282,966**\n- Newest candidate: **2026-11-04T22:45:59.894Z**";
+ assert.equal(heartbeatFactSignatureString(LIVE_C),heartbeatFactSignatureString(reordered));
+});
+
+test("heartbeat fact signature: any single fact change breaks equivalence",()=>{
+ const priorA={hash:heartbeatOutputHash(LIVE_A),sig:heartbeatFactSignatureString(LIVE_A)};
+ for(const changed of [
+  LIVE_C.replace("282,966","283,001"),
+  LIVE_C.replace("**9**","**10**"),
+  LIVE_C.replace("**20**","**21**"),
+  LIVE_C.replace("2026-11-04T22:45:59.894Z","2026-11-09T01:02:03.000Z"),
+  LIVE_A.replace("1,139","1,140"),
+ ]){
+  assert.notEqual(heartbeatFactSignatureString(LIVE_C),heartbeatFactSignatureString(changed),changed);
+  assert.equal(heartbeatOutputsEquivalent(priorA,heartbeatOutputHash(changed),heartbeatFactSignatureString(changed)),false,changed);
+ }
+});
+
+test("heartbeat equivalence: thin outputs fall back to the text comparison (fail-open)",()=>{
+ const quiet={hash:heartbeatOutputHash("All quiet."),sig:heartbeatFactSignatureString("All quiet.")};
+ assert.equal(heartbeatOutputsEquivalent(quiet,heartbeatOutputHash("All quiet!"),heartbeatFactSignatureString("All quiet!")),true);
+ assert.equal(heartbeatOutputsEquivalent(quiet,heartbeatOutputHash("Something happened."),heartbeatFactSignatureString("Something happened.")),false);
+ // One lone fact is not proof enough to silence a differently worded reply.
+ const oneFact={hash:heartbeatOutputHash("Count is 5, all good"),sig:heartbeatFactSignatureString("Count is 5, all good")};
+ assert.equal(heartbeatOutputsEquivalent(oneFact,heartbeatOutputHash("Still 5 and holding"),heartbeatFactSignatureString("Still 5 and holding")),false);
+ // A legacy record with no stored signature can only match on text.
+ const legacy={hash:heartbeatOutputHash(LIVE_A)};
+ assert.equal(heartbeatOutputsEquivalent(legacy,heartbeatOutputHash(LIVE_B),heartbeatFactSignatureString(LIVE_B)),false);
+ assert.equal(heartbeatOutputsEquivalent(undefined,heartbeatOutputHash(LIVE_A),heartbeatFactSignatureString(LIVE_A)),false);
+});
+
+test("heartbeat diffing: a paraphrased repeat stays silent, a fact change delivers",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-hb4-"));
+ try{
+  addHeartbeatJob(root,"stack watch",30,"trading","Check the stack","chan-1");
+  const deliveries:string[]=[];
+  let reply=LIVE_A;
+  const deps={ensureChat:async()=>"hb-chat",runTurn:async()=>reply,deliver:async(_id:string,text:string)=>{deliveries.push(text);}};
+  const first=await runHeartbeat(root,deps);
+  assert.deepEqual(first.changed,["stack watch"]);
+  assert.equal(deliveries.length,1);
+  reply=LIVE_B;
+  makeJobDue(root);
+  const second=await runHeartbeat(root,deps);
+  assert.deepEqual(second.changed,[]);
+  assert.deepEqual(second.unchanged,["stack watch"]);
+  assert.equal(deliveries.length,1);
+  assert.equal(readActivity(root,50).filter(a=>a.kind==="heartbeat").length,1);
+  reply=LIVE_C.replace("**20**","**21**");
+  makeJobDue(root);
+  const third=await runHeartbeat(root,deps);
+  assert.deepEqual(third.changed,["stack watch"]);
+  assert.equal(deliveries.length,2);
+  const state=JSON.parse(readFileSync(join(root,".sam","heartbeat-state.json"),"utf8")) as {outputs:Record<string,{hash:string;sig:string}>};
+  assert.equal(Object.values(state.outputs)[0].sig,heartbeatFactSignatureString(reply));
+ }finally{rmSync(root,{recursive:true,force:true});}
 });
 
 function makeJobDue(root:string){

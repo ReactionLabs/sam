@@ -44,7 +44,7 @@ export function removeHeartbeatJob(root:string,id:string):boolean{
  const items=heartbeatJobs(root),rest=items.filter(j=>j.id!==id);
  if(rest.length===items.length)return false;saveJobs(root,rest);return true;
 }
-export interface HeartbeatOutputRecord { hash:string; at:string; preview:string }
+export interface HeartbeatOutputRecord { hash:string; at:string; preview:string; sig?:string }
 interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; outputs?:Record<string,HeartbeatOutputRecord> }
 function loadState(root:string):HeartbeatState{
  if(!existsSync(statePath(root)))return {chats:{},lastTick:null,outputs:{}};
@@ -77,6 +77,52 @@ export function normalizeHeartbeatOutput(text:string):string{
 }
 export function heartbeatOutputHash(text:string):string{
  return createHash("sha256").update(normalizeHeartbeatOutput(text)).digest("hex");
+}
+// Fact signatures (P3 follow-up, found live 2026-11-09): normalized text
+// cannot absorb the model paraphrasing whole clauses between runs - stack
+// watch announced a frozen stack as "changed" five due runs in a row while
+// every fact (282,966 candidates, newest 2026-11-04, ALERT 9, 20 entered)
+// stayed identical. So a second comparison rides alongside the text hash:
+// the extracted facts - ISO dates and canonical numbers, as an
+// order-insensitive bag. Two outputs whose fact bags are both rich (at
+// least two facts) and identical are the same news however they are
+// worded. Anything thinner falls back to the text comparison, and any
+// fact difference delivers: the fail-open bias is unchanged, silence now
+// requires proof from the facts as well as from the wording.
+const MONTH_DATE=/\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/gi;
+export function heartbeatFactSignature(text:string):string[]{
+ const kept:string[]=[];
+ for(const rawLine of text.split(/\r?\n/)){
+  if(/\b(as_of|snapshot|generated at|checked at|run at|report time)\b/i.test(rawLine))continue;
+  kept.push(rawLine);
+ }
+ // Textual dates ("Nov 4") duplicate the ISO date beside them in every
+ // observed reply; left in, their day number would poison the bag.
+ let body=kept.join("\n").replace(MONTH_DATE," ");
+ const facts:string[]=[];
+ body=body.replace(/\d{4}-\d{2}-\d{2}(?:[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?)?/gi,m=>{facts.push("d:"+m.toLowerCase().replace(" ","t"));return " ";});
+ body.replace(/\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?/g,m=>{const n=Number(m.replace(/,/g,""));facts.push("n:"+(Number.isSafeInteger(n)?String(n):String(n)));return " ";});
+ return facts.sort();
+}
+export function heartbeatFactSignatureString(text:string):string{return heartbeatFactSignature(text).join("|");}
+// Paraphrases also drop or repeat facts (one run spells out PASS/PENDING
+// counts, the next omits them; one says "20 rows" twice), so the bags are
+// compatible when neither contradicts the other: one is a multiset subset
+// of the other. A changed value breaks inclusion in both directions, and
+// both bags must carry at least two facts before they prove anything.
+export function heartbeatFactBagsCompatible(a:string,b:string):boolean{
+ const bagA=a.split("|").filter(Boolean),bagB=b.split("|").filter(Boolean);
+ if(bagA.length<2||bagB.length<2)return false;
+ const counts=(bag:string[])=>{const m=new Map<string,number>();for(const f of bag)m.set(f,(m.get(f)??0)+1);return m;};
+ const within=(inner:Map<string,number>,outer:Map<string,number>)=>[...inner].every(([f,n])=>n<=(outer.get(f)??0));
+ const mapA=counts(bagA),mapB=counts(bagB);
+ return within(mapA,mapB)||within(mapB,mapA);
+}
+export function heartbeatOutputsEquivalent(prior:{hash:string;sig?:string}|undefined,hash:string,sig:string):boolean{
+ if(!prior)return false;
+ if(prior.hash===hash)return true;
+ if(!prior.sig)return false;
+ return heartbeatFactBagsCompatible(prior.sig,sig);
 }
 function saveState(root:string,state:HeartbeatState){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(statePath(root),JSON.stringify(state,null,2),{mode:0o600});}
 export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
@@ -142,9 +188,10 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   const reply=await deps.runTurn(chatId,job.prompt);
   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
   const hash=heartbeatOutputHash(reply);
+  const sig=heartbeatFactSignatureString(reply);
   const prior=(state.outputs??{})[job.id];
-  const isChanged=!prior||prior.hash!==hash;
-  state.outputs={...(state.outputs??{}),[job.id]:{hash,at:new Date().toISOString(),preview:reply.slice(0,300)}};stateDirty=true;
+  const isChanged=!heartbeatOutputsEquivalent(prior,hash,sig);
+  state.outputs={...(state.outputs??{}),[job.id]:{hash,sig,at:new Date().toISOString(),preview:reply.slice(0,300)}};stateDirty=true;
   if(!isChanged){
    // Unchanged: a silent ledger line only. No channel delivery, no activity
    // entry, no preview spam - a frozen stack stops announcing itself.
