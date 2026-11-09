@@ -4,15 +4,34 @@ import Database from "better-sqlite3";
 import { TaskScheduler } from "./tasks.js";
 import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
+import { converse, FakeModelProvider } from "./model-conversation.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { withIdentity } from "./identity.js";
+import { inspectDirectory } from "./local-inspection.js";
+import { inspectGitWorkspace } from "./git-inspection.js";
+import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
+import { reviewEdit } from "./edit-review.js";
+import { reviewEditWithAi } from "./ai-edit-review.js";
+import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
+import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
+import { ChatStore } from "./chats.js";
+import { runResearchTeam } from "./team-runtime.js";
+import { proposeModelEdit } from "./model-edit.js";
+import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
+import { createInterface } from "node:readline/promises";
+import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
+import { recallMemory } from "./memory-recall.js";
+import { runMemoryToolTurn } from "./memory-tool.js";
+import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 
@@ -43,6 +62,88 @@ program.command("init").description("Initialize local mission workspace").action
   const dir=join(resolve(program.opts().workspace),".sam");mkdirSync(dir,{recursive:true});
   const db=store();db.close();output("SAM initialized at "+dir);
 });
+program.command("inspect-local").description("List one explicitly selected directory; no model access, file contents, or commands")
+  .requiredOption("--root <path>","Authorized root folder")
+  .option("--dir <relative>","Relative subdirectory",".")
+  .action((options:{root:string;dir:string})=>output(inspectDirectory(options.root,options.dir)));
+const gitCommands=program.command("git").description("Bounded read-only Git inspection in the authorized workspace");
+gitCommands.command("status").description("Show branch and working-tree changes").action(()=>output(inspectGitWorkspace(program.opts().workspace,"status")));
+gitCommands.command("diff").description("Show unstaged workspace changes (bounded)").action(()=>output(inspectGitWorkspace(program.opts().workspace,"diff")));
+const edits=program.command("edit").description("Explicit human-reviewed file replacement; no model write access");
+edits.command("propose").requiredOption("--path <relative>","Existing workspace file")
+  .requiredOption("--from <file>","Local UTF-8 replacement content file")
+  .action((options:{path:string;from:string})=>output(proposeEdit(program.opts().workspace,options.path,readFileSync(options.from,"utf8"))));
+edits.command("suggest").requiredOption("--path <relative>","Existing workspace source file")
+  .requiredOption("--instruction <text>","Requested edit (max 2000 characters)")
+  .option("--model <id>","Model ID")
+  .option("--timeout <seconds>","Model request timeout, 5 to 120 seconds","90")
+  .requiredOption("--live","Explicitly permit a model API request (may incur charges)")
+  .action(async(options:{path:string;instruction:string;model?:string;live:boolean;timeout:string})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_MODEL;
+    if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const seconds=Number(options.timeout);
+    if(!Number.isInteger(seconds) || seconds<5 || seconds>120) throw new Error("Timeout must be 5 to 120 seconds");
+    const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
+    output(await proposeModelEdit(program.opts().workspace,options.path,options.instruction,model,provider));
+  });
+edits.command("review").argument("<id>").description("Review bounded diff and deterministic findings; never writes target")
+  .action((id:string)=>output(reviewEdit(program.opts().workspace,id)));
+edits.command("review-ai").argument("<id>").description("Independent advisory AI review; never applies edits")
+  .requiredOption("--live","Explicitly allow one model API request (may incur charges)")
+  .option("--model <id>","Reviewer model ID")
+  .option("--timeout <seconds>","Model request timeout, 5 to 120 seconds","90")
+  .action(async(id:string,options:{live:boolean;model?:string;timeout:string})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_REVIEW_MODEL??process.env.SAM_MODEL;
+    if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const seconds=Number(options.timeout);
+    if(!Number.isInteger(seconds) || seconds<5 || seconds>120) throw new Error("Timeout must be 5 to 120 seconds");
+    const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
+    output(await reviewEditWithAi(program.opts().workspace,id,model,provider));
+  });
+edits.command("reject").argument("<id>").description("Discard proposal without modifying target")
+  .action((id:string)=>output(rejectEdit(program.opts().workspace,id)));
+edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
+  .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
+  .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
+const testRuns=program.command("run").description("Explicitly approved local build/test only; executes trusted project code without OS sandbox");
+testRuns.command("request").requiredOption("--kind <build-or-test>","build or test")
+  .action((options:{kind:string})=>output(requestTestRun(program.opts().workspace,options.kind)));
+testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
+  .requiredOption("--confirm <sha256>","Exact digest from run request")
+  .option("--timeout <ms>","Timeout from 1000 to 120000 milliseconds","30000")
+  .action(async(options:{id:string;confirm:string;timeout:string})=>
+    output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
+program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
+const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
+chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
+chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
+chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
+chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
+const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
+teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").action(async(o:{chat:string;objective:string;live:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean})=>{
+ const selected=process.env.SAM_MODEL_PROVIDER??"";
+ const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+ const model=process.env.SAM_MODEL;
+ if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
+ const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+ if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
+ const provider=new OpenAICompatibleProvider(endpoint,key,60000);
+ output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined,agentTools:!!o.agentTools}));
+});
+const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
+schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
+schedules.command("add").argument("<name>").requiredOption("--every <minutes>","Interval in minutes").action((name:string,o:{every:string})=>output(addSchedule(program.opts().workspace,name,Number(o.every))));
+const skills=program.command("skills").description("Read-only discovery of project-local SKILL.md files; never executes skill content");
+skills.command("list").description("List validated local skill metadata").action(()=>output(discoverSkills(program.opts().workspace)));
+skills.command("find").argument("<query>").description("Search installed skill metadata").action((query:string)=>output(searchSkills(program.opts().workspace,query)));
+skills.command("show").argument("<name>").description("Show skill metadata (not executable instructions)").action((name:string)=>output(findSkill(program.opts().workspace,name)));
+skills.command("read").argument("<name>").description("Read installed skill instructions as untrusted reference, without execution").action((name:string)=>output(readSkill(program.opts().workspace,name)));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}
@@ -88,6 +189,105 @@ task.command("run-offline").argument("<mission>").description("Execute one task 
 task.command("result").argument("<task-id>").description("Inspect persisted verified offline evidence").action((id:string)=>{
   output(withDb((db)=>new OfflineMissionRunner(db).result(id)??{status:"NO_RESULT"}));
 });
+program.command("chat").description("Offline smoke test by default; --live explicitly enables one model API request")
+  .argument("<message>").option("--model <id>","Model identifier")
+  .option("--live","Explicitly allow one network model request (may incur provider charges)")
+  .action(async (message:string, options:{model?:string,live?:boolean})=>{
+    if (options.live) {
+      const selected=process.env.SAM_MODEL_PROVIDER??"";
+      const endpoint=process.env.SAM_MODEL_ENDPOINT??
+        (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+      if (!endpoint) throw new Error("Set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT to an OpenAI-compatible /chat/completions URL");
+      const model=options.model??process.env.SAM_MODEL;
+      if (!model) throw new Error("Specify --model or SAM_MODEL");
+      const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+      const provider=new OpenAICompatibleProvider(endpoint,key);
+      output(await converse(provider,{model,messages:withIdentity(program.opts().workspace,[{role:"user",content:message}])}));
+    } else {
+      output(await converse(new FakeModelProvider(),{model:options.model??"offline-test",messages:[{role:"user",content:message}]}));
+    }
+  });
+const loops=program.command("loop").description("Inspect durable read-only agent loop journal");
+loops.command("list").option("--limit <n>","Number of recent loops","20").action((options:{limit:string})=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output(journal.list(Number(options.limit))); }
+  finally { journal.close(); }
+});
+loops.command("inspect").argument("<id>").action((id:string)=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output({loop:journal.get(id)??null,events:journal.events(id)}); }
+  finally { journal.close(); }
+});
+loops.command("recover").description("Fence orphaned running loops after a crash; never replay tool calls").action(()=>{
+  const journal=new AgentLoopJournal(dbPath());
+  try { output({interrupted:journal.interruptOrphans()}); }
+  finally { journal.close(); }
+});
+program.command("talk").description("Interactive terminal conversation with configured model; explicit network opt-in required")
+  .requiredOption("--live","Allow model API requests (may incur provider charges)")
+  .option("--model <id>","Model ID")
+  .option("--with-memory","Explicitly include recent workspace memory records in model context")
+  .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
+  .option("--workspace-tools","Allow read-only workspace tools and installed skill reading (includes memory search)")
+  .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??
+      (selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_MODEL;
+    if (!endpoint || !model) throw new Error("Configure SAM_MODEL_PROVIDER=minimax and SAM_MODEL, or SAM_MODEL_ENDPOINT and SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+    const provider=new OpenAICompatibleProvider(endpoint,key);
+    const messages:Array<{role:"user"|"assistant";content:string}>=[];
+    const rl=createInterface({input:stdin,output:stdout,terminal:stdin.isTTY});
+    console.log("SAM terminal chat. Type /exit to quit. Each reply may incur provider charges.");
+    try {
+      while (true) {
+        let line:string;
+        try { line=await rl.question("You > "); } catch { break; }
+        if (line.trim()==="/exit" || line.trim()==="/quit") break;
+        if (line.trim()==="/dashboard") {
+          console.log("SAM > Starting localhost dashboard. Open the URL printed below.");
+          void serveDashboard(program.opts().workspace).catch(e=>console.error("SAM dashboard:",e instanceof Error?e.message:"Unavailable"));
+          continue;
+        }
+        if (!line.trim()) continue;
+        if (line.trim().startsWith("/memory ")) {
+          const query=line.trim().slice("/memory ".length).trim();
+          if (!query || query.length>200) { console.log("SAM > Usage: /memory <search terms> (max 200 characters)"); continue; }
+          try {
+            const mem=new MemoryStore(dbPath());
+            try {
+              const records=mem.search(query).slice(0,10).map(r=>({id:r.id,kind:r.kind,source:r.source,created_at:r.created_at,content:r.content.slice(0,500)}));
+              console.log("SAM memory > "+JSON.stringify(records,null,2));
+            } finally { mem.close(); }
+          } catch(error) { console.error("SAM memory search failed:",error instanceof Error?error.message:"Unknown error"); }
+          continue;
+        }
+        const proposed=[...messages,{role:"user" as const,content:line}];
+        const journal = options.memoryTools || options.workspaceTools ? new AgentLoopJournal(dbPath()) : undefined;
+        const loop = journal?.create(line);
+        try {
+          const context=withIdentity(program.opts().workspace,proposed);
+          const recalled=options.withMemory?recallMemory(dbPath()):undefined;
+          if(recalled)context.splice(1,0,recalled);
+          const answer=options.memoryTools || options.workspaceTools
+            ?await runMemoryToolTurn((turn,enabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools)),context,dbPath(),
+              event=>{console.log("[SAM tool] "+event.tool+" "+event.status+" "+event.detail);journal?.event(loop!.id,"tool_"+event.status,event.tool+" "+event.detail);},
+              options.workspaceTools ? program.opts().workspace : undefined,
+              (round,calls)=>journal?.progress(loop!.id,round,calls))
+            :(await converse(provider,{model,messages:context})).message.content;
+          if (journal && loop) journal.finish(loop.id,"completed",answer.slice(0,8000));
+          console.log("SAM > "+answer);
+          messages.splice(0,messages.length,...proposed,{role:"assistant",content:answer});
+          // Keep bounded in-memory context; no transcript is written to disk.
+          if (messages.length>40) messages.splice(0,messages.length-40);
+        } catch(error) {
+          if (journal && loop) journal.finish(loop.id,"failed",error instanceof Error?error.message:"Unknown error");
+          console.error("SAM request failed:",error instanceof Error?error.message:"Unknown error");
+        } finally { journal?.close(); }
+      }
+    } finally { rl.close(); }
+  });
 const daemon=program.command("daemon").description("Local-only SAM control daemon");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
   output("SAM daemon listening in workspace "+resolve(program.opts().workspace));

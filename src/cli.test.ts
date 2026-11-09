@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -7,7 +8,7 @@ import { spawnSync } from "node:child_process";
 
 test("CLI creates mission and dependency-aware tasks across processes",()=>{
   const workspace=mkdtempSync(join(tmpdir(),"sam-cli-"));
-  const cli=new URL("./cli.js",import.meta.url).pathname;
+  const cli=fileURLToPath(new URL("./cli.js",import.meta.url));
   const run=(...args:string[])=>{
     const result=spawnSync(process.execPath,[cli,"--workspace",workspace,"--json",...args],{encoding:"utf8"});
     assert.equal(result.status,0,result.stderr);
@@ -29,7 +30,7 @@ test("CLI creates mission and dependency-aware tasks across processes",()=>{
 
 test("CLI runs one offline task and retrieves durable verified evidence",()=>{
   const workspace=mkdtempSync(join(tmpdir(),"sam-cli-offline-"));
-  const cli=new URL("./cli.js",import.meta.url).pathname;
+  const cli=fileURLToPath(new URL("./cli.js",import.meta.url));
   const run=(...args:string[])=>{
     const r=spawnSync(process.execPath,[cli,"--workspace",workspace,"--json",...args],{encoding:"utf8"});
     assert.equal(r.status,0,r.stderr);

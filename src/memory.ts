@@ -35,7 +35,7 @@ export class MemoryStore {
     `);
   }
   add(input:{missionId?:string;kind:MemoryKind;content:string;source:string}):MemoryRecord {
-    if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind");
+    if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind. Choose observation, decision, failure, or procedure.");
     if(!input.content.trim() || !input.source.trim())throw new Error("Memory requires content and provenance");
     if(input.content.length>100_000)throw new Error("Memory exceeds size limit");
     const record:MemoryRecord={

@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -12,7 +13,7 @@ import { spawnSync } from "node:child_process";
  */
 test("integrated CLI: mission, tasks, memory, operative, assignment and approval share one workspace", () => {
   const workspace = mkdtempSync(join(tmpdir(), "sam-integration-"));
-  const cli = new URL("./cli.js", import.meta.url).pathname;
+  const cli = fileURLToPath(new URL("./cli.js", import.meta.url));
   const run = (...args: string[]) => {
     const result = spawnSync(process.execPath, [cli, "--workspace", workspace, "--json", ...args], { encoding: "utf8" });
     assert.equal(result.status, 0, result.stderr || result.stdout);
