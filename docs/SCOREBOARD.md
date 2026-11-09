@@ -16,7 +16,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
 | PR #66 | Open draft, stacked on #65; owner-approved terminal memory writes and bounded memory list | [PR #66](https://github.com/ReactionLabs/sam/pull/66), latest tested source head `fd474ed0373df9e7aa81c41646050cc2b6e585bf`, [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), 115/115 on Node 22 and Node 24 |
-| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), head `4c6f65f26869760ed73c0e4c92bf56dc9abf0a12`; CI pending |
+| Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), head `f2426c82abc88b106cb4f9277e36fd49575902cd`, [run #42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520), 117/117 on Node 22 and Node 24 |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
 
@@ -25,7 +25,7 @@ PRs #13 and #17 are merged, and PR #18 is merged as the integration of #10-#17. 
 ## Verified capabilities on the integration stack
 
 - **Dashboard exists:** local Mission Control on `127.0.0.1`, randomized URL token, persistent chats, chat branching, named agent profiles, model chat, status panels, and connector management.
-- **Dashboard connector chat:** model-selected read-only MCP calls are available when a profile is pinned to an authorized connector. PR #64's baseline main chat is text-only; PR #68 adds opt-in local SQLite memory and bounded workspace tools for the built-in SAM profile, with durable chat/journal audit. PR #68 is unmerged and CI pending.
+- **Dashboard connector chat:** model-selected read-only MCP calls are available when a profile is pinned to an authorized connector. PR #64's baseline main chat is text-only; PR #68 adds opt-in local SQLite memory and bounded workspace tools for the built-in SAM profile, with durable chat/journal audit. PR #68 is unmerged; its Node 22/24 CI passed 117/117 tests per version.
 - **Live terminal chat:** OpenAI-compatible/MiniMax model transport with bounded in-process conversation context.
 - **Memory:** SQLite persistence, provenance, source/content hash, CLI add/list/search/archive, and opt-in model-selected read-only `memory_search` on PR #64. This branch adds `memory_list` and approval-gated `memory_add`.
 - **Workspace:** opt-in, bounded read-only list/read/search and skill inspection; protected-path, traversal, symlink, and size checks are covered by tests in the integration stack.
@@ -38,7 +38,7 @@ PRs #13 and #17 are merged, and PR #18 is merged as the integration of #10-#17. 
 
 Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 
-### Implemented in code, awaiting CI
+### Implemented and Node 22/24 CI verified
 
 - Added `memory_list` to the bounded model tool registry.
 - Added opt-in `memory_add`, advertised only when the owner starts `talk --live --memory-write`.
@@ -50,7 +50,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 - Added tests for explicit opt-in, approval, denial, missing approval handler, credential rejection, provenance, SQLite reopen persistence, bounded list queries, and conditional tool advertisement.
 - Corrected SAM's default identity so it describes capabilities as session-scoped instead of claiming all file/memory tools are unavailable; `talk --live` now injects an accurate tool-capability contract before user messages. Updated identity tests.
 
-### Not yet verified
+### Remaining owner acceptance
 
 - First CI run [#42552720833](https://github.com/ReactionLabs/sam/actions/runs/42552720833) exposed an existing over-escaped loopback hostname regex in `completeToolTurn`; Node 22 tests failed at the new mock-provider test and Node 24 was cancelled.
 - Fixed the regex in commit `91cedf16`. Head `7e3118ed` passed [run #42552804697](https://github.com/ReactionLabs/sam/actions/runs/42552804697): Node 22 **113/113**, Node 24 **113/113**.
@@ -69,8 +69,8 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 | Agent profiles and chat branches | Implemented on PR #64 stack; CI green | Profiles are not independent Agent Boxes |
 | Live MiniMax chat | Owner previously verified on an earlier Windows branch | Re-test against the exact current integration head |
 | Model memory search | Implemented on PR #64 stack; CI green | Read-only search only |
-| Model memory list | Added on current branch; CI pending | Read-only, bounded to ten recent records |
-| Model memory add | Added on current branch; CI pending | Explicit per-write local owner confirmation |
+| Model memory list | Implemented on PR #66; Node 22/24 CI green | Read-only, bounded to ten recent records |
+| Model memory add | Implemented on PR #66; Node 22/24 CI green | Explicit per-write local owner confirmation |
 | Model memory update/delete | Planned | Requires action-bound approval and audit |
 | Local workspace list/read/search | Implemented on PR #64 stack; CI green | Explicit opt-in, read-only, bounded |
 | Model shell/computer control | Not implemented | No unrestricted shell or remote PC control |
@@ -97,7 +97,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 
 ### Not yet verified
 
-- PR #68 GitHub Actions Node 22/24 CI: pending at handoff.
+- PR #68 GitHub Actions run [#42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520) passed build and **117/117 tests on Node 22 and Node 24**.
 - Windows build and full test suite: pending.
 - Live MiniMax dashboard tool-call acceptance: pending. No paid model call was made during this build cycle.
 - The dashboard memory-write approval UI is not implemented. Terminal `--memory-write` remains the only model-proposed write path, and every terminal write requires local confirmation.
@@ -106,7 +106,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 
 1. The integrated dashboard stack is still an open PR, not main.
 2. GitHub CI is green on Node 22/24; Windows owner verification and live MiniMax tool-call verification remain pending.
-3. PR #68 adds the dashboard local tool loop, but its CI, Windows behavior, and live MiniMax acceptance are still pending; it is not on main.
+3. PR #68's Node 22/24 CI is green at 117/117 tests per version; Windows behavior and live MiniMax acceptance remain pending, and it is not on main.
 4. Multi-profile configuration is not equivalent to independent Agent Boxes. Current profiles share workspace-level stores, connectors, and process environment.
 5. Do not install untrusted skills or Agent Reach dependencies, add credentials, expose the dashboard, merge, or deploy without owner approval.
 
@@ -117,8 +117,8 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 - **Targets:** PR #66 terminal memory tools and PR #68 dashboard local tool bridge.
 - **Acceptance:** On Node 22, run `npm ci`, `npm run build`, and `npm test`; repeat on Node 24 if installed. In terminal chat, approve one non-sensitive memory write, restart `talk --live`, and retrieve the exact record; decline a second proposal and verify no record exists. In Mission Control, verify memory search/list and workspace file read with `--workspace C:\Projects\sam --tool-root C:\Projects`; verify the skill registry still reads from the SAM state root; verify workspace calls are rejected when the flag is off; verify named profiles do not inherit local tools; inspect chat activity and `loop list` for durable evidence.
 - **Dependencies:** PR #64 integration, #65 connector hardening, #66 terminal memory write, and #68 dashboard local tools.
-- **Ready:** PR #66 Node 22/24 CI is green at 115/115; PR #68 code and mock-provider tests are committed in a draft PR.
-- **Not ready:** PR #68 CI, Windows owner verification, live MiniMax compatibility, dashboard memory writes, merge.
+- **Ready:** PR #66 Node 22/24 CI is green at 115/115; PR #68 Node 22/24 CI is green at 117/117 and its mock-provider tool/audit tests pass.
+- **Not ready:** Windows owner verification, live MiniMax compatibility, dashboard memory-write approvals, merge.
 
 Do not build another dashboard. After this acceptance pass, add a separate browser approval flow for dashboard memory writes, then continue the durable mission loop.
 
