@@ -7,22 +7,25 @@ import { addHeartbeatJob } from "./heartbeat.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { installSkill } from "./skill-registry.js";
+import { createDraft } from "./drafts.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
 // is deliberately internal-only: save a memory note, set a standing law, create
-// a heartbeat job, or post a message into one of SAM's own chats. No external
-// sends, no service control, no money, no trading - widening this list is an
-// owner decision, never a model decision. Every step lands in the activity
-// ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill";
+// a heartbeat job, post a message into one of SAM's own chats, or (P12, on the
+// owner's own program order) save an outbound DRAFT the owner then sends
+// themselves - drafting writes only to SAM's own store, there is no send path.
+// No external sends, no service control, no money, no trading - widening this
+// list is an owner decision, never a model decision. Every step lands in the
+// activity ledger, so a proposal's whole life is auditable.
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
   status: ActionStatus; createdAt: string; decidedAt: string | null; result: string | null;
   chatId: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft"];
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
@@ -74,6 +77,15 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const db = new ChatStore(root);
     try { db.add(spec.chatId, "assistant", spec.text); return "Message posted to chat " + spec.chatId; }
     finally { db.close(); }
+  }
+  if (a.kind === "draft") {
+    // P12 outbound drafting: the approved execution writes a draft record
+    // into SAM's own store and stops there. There is no send path; the
+    // owner copies the draft and sends it themselves. A contact marked
+    // no-drafts refuses here, so the proposal lands as failed, not sent.
+    const spec = JSON.parse(a.detail) as { to: string; channel?: string; subject?: string | null; body: string };
+    const draft = createDraft(root, { actor: a.actor, to: spec.to, channel: spec.channel, subject: spec.subject ?? null, body: spec.body, via: "proposal" });
+    return "Draft saved for " + draft.to + " (" + draft.id + ") - the owner sends it";
   }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));

@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { join,resolve } from "node:path";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
-export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null }
+export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string }
 export class ChatStore {
@@ -23,25 +23,33 @@ export class ChatStore {
     if(!cols.some(c=>c.name==="parent_chat_id"))this.db.exec("ALTER TABLE chats ADD COLUMN parent_chat_id TEXT REFERENCES chats(id)");
     if(!cols.some(c=>c.name==="pinned"))this.db.exec("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0 CHECK(pinned IN (0,1))");
     if(!cols.some(c=>c.name==="agent_name"))this.db.exec("ALTER TABLE chats ADD COLUMN agent_name TEXT");
+    // Visitor chats (P12): the person talking is a customer, not the owner.
+    // Their text never becomes preference, law, or confirmed fact.
+    if(!cols.some(c=>c.name==="visitor"))this.db.exec("ALTER TABLE chats ADD COLUMN visitor INTEGER NOT NULL DEFAULT 0 CHECK(visitor IN (0,1))");
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
   }
-  create(title:string,agentName?:string|null):ChatRecord {
+  create(title:string,agentName?:string|null,opts?:{visitor?:boolean}):ChatRecord {
     if(!title.trim()||title.length>120)throw new Error("Chat title must be 1 to 120 characters");
     if(agentName!==undefined&&agentName!==null&&!/^[a-z][a-z0-9._-]{0,63}$/.test(agentName))throw new Error("Invalid agent profile");
-    const now=new Date().toISOString(),item={id:randomUUID(),title:title.trim(),created_at:now,updated_at:now,agent_name:agentName??null};
-    this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,agent_name) VALUES (@id,@title,@created_at,@updated_at,@agent_name)").run(item);return item;
+    const now=new Date().toISOString(),item={id:randomUUID(),title:title.trim(),created_at:now,updated_at:now,agent_name:agentName??null,visitor:opts?.visitor?1:0};
+    this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,agent_name,visitor) VALUES (@id,@title,@created_at,@updated_at,@agent_name,@visitor)").run(item);return item;
+  }
+  isVisitor(id:string):boolean{
+    const row=this.db.prepare("SELECT visitor FROM chats WHERE id=?").get(id) as {visitor:number}|undefined;
+    return !!row&&row.visitor===1;
   }
   branch(parentId:string,title:string):ChatRecord {
     if(!title.trim()||title.length>120)throw new Error("Invalid branch title");
     const now=new Date().toISOString();
-    const item={id:randomUUID(),title:title.trim(),created_at:now,updated_at:now,parent_chat_id:parentId,agent_name:null as string|null};
+    const item={id:randomUUID(),title:title.trim(),created_at:now,updated_at:now,parent_chat_id:parentId,agent_name:null as string|null,visitor:0};
     this.db.transaction(()=>{
-      const parent=this.db.prepare("SELECT agent_name FROM chats WHERE id=?").get(parentId) as {agent_name:string|null}|undefined;
+      const parent=this.db.prepare("SELECT agent_name,visitor FROM chats WHERE id=?").get(parentId) as {agent_name:string|null;visitor?:number}|undefined;
       if(!parent)throw new Error("Parent chat not found");
       item.agent_name=parent.agent_name;
-      this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,parent_chat_id,agent_name) VALUES (@id,@title,@created_at,@updated_at,@parent_chat_id,@agent_name)").run(item);
+      item.visitor=parent.visitor===1?1:0;
+      this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,parent_chat_id,agent_name,visitor) VALUES (@id,@title,@created_at,@updated_at,@parent_chat_id,@agent_name,@visitor)").run(item);
       const history=this.messages(parentId);
       for(const m of history){this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at) VALUES (?,?,?,?,?)").run(randomUUID(),item.id,m.role,m.content,m.created_at);}
     })();

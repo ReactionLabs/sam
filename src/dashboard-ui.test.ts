@@ -21,6 +21,13 @@ test("dashboard page: model routing + spend surface (P11)",()=>{
   assert.match(dashboardHtml,/Model &amp; spend/);
 });
 
+test("dashboard page: drafts + contacts surface (P12)",()=>{
+  assert.match(dashboardHtml,/id="drafts"/);
+  assert.match(dashboardHtml,/id="contacts"/);
+  assert.match(dashboardHtml,/function renderDrafts\(/);
+  assert.match(dashboardHtml,/Drafts \(you send these\)/);
+});
+
 test("dashboard page: owner console surfaces (P8) - law revoke, approvals history, activity filter",()=>{
   // Law is a control surface now, not a flat <pre>: a container the script
   // fills with per-law Revoke buttons wired to the dashboard revoke route.

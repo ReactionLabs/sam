@@ -9,7 +9,9 @@ import { runChatTurn } from "./agent-turn.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
-import { doorForKey, doorEnabled, doorHomeLink, listDoors, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
+import { doorForKey, doorEnabled, doorHomeLink, doorModeForKey, listDoors, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
+import { listDrafts } from "./drafts.js";
+import { listContacts } from "./contacts.js";
 import { DoorAbuseGuard, screenDoorMessage } from "./door-guard.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { listActions, decideAction } from "./actions.js";
@@ -202,7 +204,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           if(screen.blocked){doorGuard.noteBlocked();recordActivity(workspace,miniName,"door-blocked","Refused a "+screen.category+" message at the door");json(400,{error:"That message can't be sent through this door."});return;}
           if(!doorLimiter.allow(miniName+":"+session)) {json(429,{error:"Slow down a little. Try again in a moment."});return;}
           if(!doorGuard.allowMini(miniName)) {json(429,{error:"This SAM has had a lot of messages in the last hour. Try again later."});return;}
-          const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName==="sam"?null:miniName).id;}finally{store.close();}};
+          const visitorDoor=doorModeForKey(workspace,doorMatch[1])==="visitor";
+          const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName==="sam"?null:miniName,{visitor:visitorDoor}).id;}finally{store.close();}};
           const chatId=sessionChat(workspace,miniName,session,makeChat);
           try{const reply=await runChatTurn(workspace,chatId,content.trim());json(200,{reply:{role:"assistant",content:reply}});}
           catch(error){
@@ -235,7 +238,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

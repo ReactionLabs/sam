@@ -10,8 +10,10 @@ import { minis } from "./minis.js";
 // exactly one chat bound to the mini's profile, so a mini's web conversations
 // live in the same scoped world as everything else it owns.
 // Doors are rate-limited per session and per mini. Preference capture applies
-// to door turns: a mini exists to learn its person, and the door is the person
-// talking. (Client chatbots, where visitors are customers, get their own kit.)
+// to OWNER door turns: a mini exists to learn its person, and the owner door
+// is the person talking. A door issued in visitor mode (P12) is a customer
+// talking to that person's SAM: those chats are marked visitor, and capture
+// never runs on them - visitor words become neither law nor confirmed fact.
 // Stranger hardening (P10): keys are 256-bit and EXPIRE 30 days after issue -
 // a leaked link is a bounded credential, not a forever one, and rotation is
 // the renewal. Records written before expiry existed carry no expires_at;
@@ -19,7 +21,8 @@ import { minis } from "./minis.js";
 // none lives forever either. Door text is screened and abuse is counted by
 // door-guard.ts; probing and aggregate rate caps live there.
 export const DOOR_KEY_TTL_DAYS=30;
-interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string; expires_at?:string; keyVersion?:number; homeLink?:boolean }
+export type DoorMode = "owner" | "visitor";
+interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string; expires_at?:string; keyVersion?:number; homeLink?:boolean; mode?:DoorMode }
 interface DoorSession { mini:string; session:string; chatId:string; updated_at:string }
 interface DoorFile { doors:Door[]; sessions:DoorSession[] }
 function doorPath(root:string){return join(resolve(root),".sam","mini-doors.json");}
@@ -39,20 +42,33 @@ export function doorExpiry(door:Door):string{
 function doorLive(door:Door,now=Date.now()):boolean{
   return door.enabled&&now<Date.parse(doorExpiry(door));
 }
-export interface DoorAudit { mini:string; enabled:boolean; expired:boolean; created_at:string; expires_at:string; keyVersion:number; homeLink:boolean; sessions:number }
+export interface DoorAudit { mini:string; enabled:boolean; expired:boolean; created_at:string; expires_at:string; keyVersion:number; homeLink:boolean; mode:DoorMode; sessions:number }
 export function listDoors(root:string,now=Date.now()):DoorAudit[]{
   const file=load(root);
-  return file.doors.map(door=>({mini:door.mini,enabled:door.enabled,expired:now>=Date.parse(doorExpiry(door)),created_at:door.created_at,expires_at:doorExpiry(door),keyVersion:door.keyVersion??1,homeLink:!!door.homeLink,sessions:file.sessions.filter(s=>s.mini===door.mini).length}));
+  return file.doors.map(door=>({mini:door.mini,enabled:door.enabled,expired:now>=Date.parse(doorExpiry(door)),created_at:door.created_at,expires_at:doorExpiry(door),keyVersion:door.keyVersion??1,homeLink:!!door.homeLink,mode:door.mode??"owner",sessions:file.sessions.filter(s=>s.mini===door.mini).length}));
 }
-export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolean}):string{
+export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolean;visitor?:boolean}):string{
   // "sam" is the core itself: the main SAM gets a door too, not just the minis.
   if(miniName!=="sam"&&!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
   const key=randomBytes(32).toString("hex");
   const file=load(root);
   const rest=file.doors.filter(d=>d.mini!==miniName);
   const now=new Date();
-  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,created_at:now.toISOString(),expires_at:new Date(now.getTime()+DOOR_KEY_TTL_DAYS*86400000).toISOString(),keyVersion:2}]});
+  // Door mode (P12): an owner door is the mini's own person talking; a
+  // visitor door is a customer of theirs. Records written before modes
+  // existed read as owner doors, so live doors keep learning their person.
+  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,mode:opts?.visitor?"visitor":"owner",created_at:now.toISOString(),expires_at:new Date(now.getTime()+DOOR_KEY_TTL_DAYS*86400000).toISOString(),keyVersion:2}]});
   return key;
+}
+export function doorModeForKey(root:string,key:string):DoorMode|null{
+  if(!keyShapeOk(key))return null;
+  const wanted=Buffer.from(hashKey(key),"hex");
+  for(const door of load(root).doors){
+    if(!doorLive(door))continue;
+    const stored=Buffer.from(door.keyHash,"hex");
+    if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return door.mode??"owner";
+  }
+  return null;
 }
 export function disableDoor(root:string,miniName:string):boolean{
   const file=load(root);let changed=false;
