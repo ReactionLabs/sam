@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { recordVerification } from "./verification.js";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -80,6 +81,11 @@ export async function executeApprovedTestRun(root:string,id:string,confirmedDige
     child.on("close",(code,signal)=>finish({exitCode:code,signal}));
   });
   audit(sam,{event:"finished",id,kind:request.kind,exitCode:result.exitCode,timedOut:result.timedOut,truncated:result.truncated,durationMs:Date.now()-start,error:result.error??null});
-  return {id,kind:request.kind,passed:result.exitCode===0&&!result.timedOut,durationMs:Date.now()-start,...result,
+  const passed=result.exitCode===0&&!result.timedOut;
+  // Verify-on-stop: every approved run settles the verification
+  // ledger, so an applied change can only become "verified" through
+  // a fresh run recorded here, never through a text claim.
+  recordVerification(root,{kind:request.kind,passed,runId:id});
+  return {id,kind:request.kind,passed,durationMs:Date.now()-start,...result,
     warning:"Executed trusted project code without OS sandbox"};
 }

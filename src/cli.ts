@@ -13,6 +13,7 @@ import { proposeEdit, applyEdit, rejectEdit } from "./file-edits.js";
 import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
+import { verificationGate, verificationStatus } from "./verification.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, addHeartbeatJob, removeHeartbeatJob, runHeartbeat, deliverToChannel } from "./heartbeat.js";
@@ -147,6 +148,8 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .option("--timeout <ms>","Timeout from 1000 to 120000 milliseconds","30000")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
+const verifyCmd=program.command("verify").description("Verify-on-stop: applied changes stay unverified until a fresh approved build AND test pass after the last change; the gate is the only 'done' check");
+verifyCmd.command("status").description("Show the verification ledger state and whether a session holding these changes may close").action(()=>{const root=program.opts().workspace;output({status:verificationStatus(root),gate:verificationGate(root)});});
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
 channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, realpathSync, writeFileSync, renameSync, unlinkSync, openSync, closeSync, mkdirSync } from "node:fs";
+import { recordChange } from "./verification.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const LIMIT = 32_000;
@@ -105,5 +106,9 @@ export function applyEdit(root:string,id:string,confirmedDigest:string) {
     try { unlinkSync(temp); } catch {}
     throw error;
   }
-  return {applied:true,path:proposal.path,replacementHash:proposal.replacementHash};
+  // Verify-on-stop: an applied change is recorded as unverified the
+  // moment it lands. It is not done until a fresh build and test pass
+  // after it (src/verification.ts); the apply result says so.
+  recordChange(root,{path:proposal.path,replacementHash:proposal.replacementHash,source:"edit-apply"});
+  return {applied:true,path:proposal.path,replacementHash:proposal.replacementHash,verification:"pending"};
 }
