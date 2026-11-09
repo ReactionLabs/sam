@@ -14,6 +14,8 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
+import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
+import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { proposeModelEdit } from "./model-edit.js";
@@ -120,6 +122,29 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
+const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
+channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,name,profile,tokenEnv)));
+channelCmd.command("list").action(()=>output(channels(program.opts().workspace)));
+channelCmd.command("owners").argument("<id>").argument("<ids>").action((id:string,ids:string)=>output(setChannelOwners(program.opts().workspace,id,ids.split(",").map(x=>Number(x.trim())))));
+channelCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeChannel(program.opts().workspace,id)}));
+program.command("telegram-bridge").description("Run the Telegram channel bridge (long-polling, owner allowlisted)")
+ .option("--channel <name>","Channel name (default: first enabled telegram channel)")
+ .option("--dashboard-url <url>","SAM dashboard base URL",process.env.SAM_DASHBOARD_URL??"http://127.0.0.1:4317")
+ .option("--dashboard-log <path>","Dashboard log file to discover the current dashboard token from",process.env.SAM_DASHBOARD_LOG??"")
+ .option("--dashboard-token <token>","Dashboard token (overrides log discovery)",process.env.SAM_DASHBOARD_TOKEN??"")
+ .action(async(o:{channel?:string;dashboardUrl:string;dashboardLog:string;dashboardToken:string})=>{
+  const root=program.opts().workspace as string;
+  const channel=channels(root).find(c=>c.enabled&&c.kind==="telegram"&&(!o.channel||c.name===o.channel));
+  if(!channel)throw new Error("No enabled telegram channel configured");
+  const botToken=process.env[channel.tokenEnv];
+  if(!botToken)throw new Error("Channel credential missing from environment: "+channel.tokenEnv);
+  const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
+  const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
+  console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
+  await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
+ });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
 chats.command("new").argument("<title>").action((title:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title));}finally{db.close();}});
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
