@@ -16,6 +16,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
 | PR #66 | Open draft, stacked on #65; owner-approved terminal memory writes and bounded memory list | [PR #66](https://github.com/ReactionLabs/sam/pull/66), latest tested source head `fd474ed0373df9e7aa81c41646050cc2b6e585bf`, [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), 115/115 on Node 22 and Node 24 |
+| PR #67 | Open draft, based on #64; per-box mission/memory/chat/profile storage namespaces; not in the #66/#68 stack | [PR #67](https://github.com/ReactionLabs/sam/pull/67), head `b723f90313ebfaee5d6feafb4978916a81268c50`, [run #42556313860](https://github.com/ReactionLabs/sam/actions/runs/42556313860), 113/113 on Node 22 and Node 24 |
 | Current branch / PR #68 | Open draft, stacked on #66; connects the existing dashboard main chat to opt-in read-only memory/workspace tools | [PR #68](https://github.com/ReactionLabs/sam/pull/68), latest tested code head `f2426c82abc88b106cb4f9277e36fd49575902cd`, [run #42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520), 117/117 on Node 22 and Node 24; later commits are documentation-only |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
@@ -26,6 +27,7 @@ PRs #13 and #17 are merged, and PR #18 is merged as the integration of #10-#17. 
 
 - **Dashboard exists:** local Mission Control on `127.0.0.1`, randomized URL token, persistent chats, chat branching, named agent profiles, model chat, status panels, and connector management.
 - **Dashboard connector chat:** model-selected read-only MCP calls are available when a profile is pinned to an authorized connector. PR #64's baseline main chat is text-only; PR #68 adds opt-in local SQLite memory and bounded workspace tools for the built-in SAM profile, with durable chat/journal audit. PR #68 is unmerged; its Node 22/24 CI passed 117/117 tests per version.
+- **Agent Box storage:** PR #67 adds separate box-scoped databases/workspaces for mission, memory, chat, and profiles, with two-box persistence tests; it is open and separate from the #66/#68 stack. Credential/process isolation is not implemented.
 - **Live terminal chat:** OpenAI-compatible/MiniMax model transport with bounded in-process conversation context.
 - **Memory:** SQLite persistence, provenance, source/content hash, CLI add/list/search/archive, and opt-in model-selected read-only `memory_search` on PR #64. This branch adds `memory_list` and approval-gated `memory_add`.
 - **Workspace:** opt-in, bounded read-only list/read/search and skill inspection; protected-path, traversal, symlink, and size checks are covered by tests in the integration stack.
@@ -75,7 +77,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 | Local workspace list/read/search | Implemented on PR #64 stack; CI green | Explicit opt-in, read-only, bounded |
 | Model shell/computer control | Not implemented | No unrestricted shell or remote PC control |
 | MCP connector read calls | Implemented on PR #64 stack; PR #65 hardening CI green | Read-only allowlist; not a universal MCP manager |
-| Agent Box isolation | In progress in separate PR chain | PRs #40/#42/#48/#57/#59/#62/#63 are not included in #64; no live two-box verification |
+| Agent Box isolation | Storage namespace slice in PR #67; Node 22/24 CI green at 113/113 | PR #67 is separate from #66/#68; no authenticated instance identity, process/credential isolation, or Windows two-box verification |
 | Skill discovery/read | Implemented on PR #64 stack; CI green | No install/update/remove/activation or arbitrary skill execution |
 | Durable autonomous mission loop | Planned/in progress foundations | Scheduler/leases and journal exist; no verified browser-independent worker loop |
 | Obsidian, Agent Reach, Blender, channels, webhooks, Tailscale | Planned | No connection or adapter should be described as active |
@@ -107,7 +109,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 1. The integrated dashboard stack is still an open PR, not main.
 2. GitHub CI is green on Node 22/24; Windows owner verification and live MiniMax tool-call verification remain pending.
 3. PR #68's Node 22/24 CI is green at 117/117 tests per version; Windows behavior and live MiniMax acceptance remain pending, and it is not on main.
-4. Multi-profile configuration is not equivalent to independent Agent Boxes. Current profiles share workspace-level stores, connectors, and process environment.
+4. PR #67 adds per-box storage but is not integrated into the #66/#68 stack; authenticated identity, process isolation, and credential isolation remain missing.
 5. Do not install untrusted skills or Agent Reach dependencies, add credentials, expose the dashboard, merge, or deploy without owner approval.
 
 ## Next single assignment
