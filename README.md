@@ -12,7 +12,7 @@ The dashboard is real and already exists on the integration branch. The current 
 - **Integration PR [#64](https://github.com/ReactionLabs/sam/pull/64):** folds the post-#18 feature stack into main, including Mission Control, durable chats and branches, agent profiles, model chat, skills discovery, bounded CLI memory/workspace tools, research-team workflows, MCP connectors, and the offline-runner clock fence. It is open and unmerged.
 - **Connector hardening PR [#65](https://github.com/ReactionLabs/sam/pull/65):** validates the persisted MCP connector registry before credential use. It is a draft stacked on #64 and is also unmerged.
 - **Memory-write PR [#66](https://github.com/ReactionLabs/sam/pull/66):** adds opt-in `memory_add` to terminal chat with a local confirmation for every write. Source head `fd474ed0` passed GitHub Actions run [#42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), with 115/115 tests on Node 22 and Node 24. The current branch tip is a documentation-only sync. Windows and live MiniMax acceptance remain pending.
-- **Dashboard local-tool PR [#68](https://github.com/ReactionLabs/sam/pull/68):** open draft stacked on #66. It connects the existing main chat to opt-in, read-only SQLite memory and bounded workspace tools, with a separate file root and durable audit. CI and Windows/live acceptance are pending. It is not on `main`.
+- **Dashboard local-tool PR [#68](https://github.com/ReactionLabs/sam/pull/68):** open draft stacked on #66. It connects the existing main chat to opt-in, read-only SQLite memory and bounded workspace tools, with a separate file root and durable audit. GitHub Actions run [#42558039520](https://github.com/ReactionLabs/sam/actions/runs/42558039520) passed build and 117/117 tests on both Node 22 and Node 24. Windows/live acceptance remain pending. It is not on `main`.
 
 Do not treat any unmerged PR as part of main. Do not merge or deploy without owner approval.
 
@@ -38,7 +38,7 @@ The server binds to `127.0.0.1` and prints a randomized local URL. The dashboard
 - A main chat that calls the configured model
 - Optional model-selected, read-only MCP connector tools when a connector is configured and selected
 
-The PR #64 baseline dashboard chat is text-only. Draft PR #68 adds opt-in local tools to the existing built-in SAM chat: `--memory-tools` enables read-only SQLite search/list, while `--workspace-tools` adds bounded directory/file/skill reads. A separate `--tool-root` can authorize a broader file root without moving SAM's state database or skill registry. Tool requests and outcomes are written to the existing chat activity feed and durable loop journal. Named agent profiles do not inherit these local grants. This is still an unmerged draft, not a capability on `main`.
+The PR #64 baseline dashboard chat is text-only. Draft PR #68 adds opt-in local tools to the existing built-in SAM chat: `--memory-tools` enables read-only SQLite search/list, while `--workspace-tools` adds bounded directory/file/skill reads. A separate `--tool-root` can authorize a broader file root without moving SAM's state database or skill registry. Tool requests and outcomes are written to the existing chat activity feed and durable loop journal. Named agent profiles do not inherit these local grants. PR #68 passed Node 22/24 CI at 117/117 tests per version, but remains an unmerged draft and is not a capability on `main`.
 
 The dashboard does not yet run missions, spawn persistent background workers, execute shell commands, stream tokens, or install skills. Stored schedules are not an autonomous scheduler. The local URL token is not multi-user authentication or an OS sandbox. Keep the dashboard on loopback.
 
@@ -140,7 +140,7 @@ npm run build
 npm test
 ```
 
-PRs #64, #65, and #66 have successful Node 22/24 GitHub Actions runs. PR #66's latest tested source head passed 115/115 tests on each version. PR #68's CI is pending. A green CI run does not replace the owner's Windows live MiniMax acceptance test.
+PRs #64, #65, #66, and #68 have successful Node 22/24 GitHub Actions runs. PR #66 passed 115/115 tests per version; PR #68 passed 117/117 tests per version in run #42558039520. A green CI run does not replace the owner's Windows live MiniMax acceptance test.
 
 ## Safety boundaries
 
