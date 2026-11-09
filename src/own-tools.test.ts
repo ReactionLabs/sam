@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { createLink } from "./links.js";
-import { executeOwnTool, ownToolsChat } from "./own-tools.js";
+import { executeOwnTool, ownToolsChat, ownToolsFor, skillCatalogForPrompt } from "./own-tools.js";
 import { readActivity } from "./activity.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 
@@ -69,6 +69,68 @@ test("own tools: the loop executes a memory search and answers from it",async()=
   } as unknown as OpenAICompatibleProvider;
   const reply=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"what is the vault code word?"}]);
   assert.match(reply,/otter/);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+function seedSkill(root:string,name:string,description:string,body:string){
+ const dir=join(root,".agents","skills",name);
+ mkdirSync(dir,{recursive:true});
+ writeFileSync(join(dir,"SKILL.md"),"---\nname: "+name+"\ndescription: "+description+"\n---\n"+body);
+}
+
+test("own tools: installed skills list and read in chat, refusals name their reason",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-own-skills-"));
+ try{
+  seedSkill(root,"agent-reach","Reach the public web","Step one: run the reach check.");
+  seedSkill(root,"reporting","Write the weekly report","Use the three-part shape.");
+  const list=executeOwnTool(root,"sam","sam_list_skills",{}) as {untrusted:boolean;skills:Array<{name:string;description:string}>};
+  assert.equal(list.untrusted,true);
+  assert.deepEqual(list.skills.map(s=>s.name),["agent-reach","reporting"]);
+  // Metadata only: listing must not inline any skill's instructions.
+  assert.ok(!JSON.stringify(list).includes("Step one"));
+  const read=executeOwnTool(root,"sam","sam_read_skill",{name:"agent-reach"}) as {untrusted:boolean;instructions:string};
+  assert.equal(read.untrusted,true);
+  assert.match(read.instructions,/run the reach check/);
+  // A traversal name and a missing skill refuse with their real reasons,
+  // so the model can correct itself instead of hallucinating contents.
+  assert.match((executeOwnTool(root,"sam","sam_read_skill",{name:"../.env"}) as {error:string}).error,/Invalid skill name/);
+  assert.match((executeOwnTool(root,"sam","sam_read_skill",{name:"missing"}) as {error:string}).error,/Skill not found/);
+  assert.match((executeOwnTool(root,"sam","sam_read_skill",{}) as {error:string}).error,/Invalid skill name/);
+  // Both tools are in the definitions every chat turn is offered.
+  const names=ownToolsFor(root).map(t=>(t as {function:{name:string}}).function.name);
+  assert.ok(names.includes("sam_list_skills")&&names.includes("sam_read_skill"));
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("own tools: the skill catalog rides the chat system prompt, names and descriptions only",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-own-catalog-"));
+ try{
+  // No skills installed: no catalog line, no error.
+  assert.equal(skillCatalogForPrompt(root),"");
+  seedSkill(root,"agent-reach","Reach the public web","SECRET-BODY-TEXT");
+  const line=skillCatalogForPrompt(root);
+  assert.match(line,/agent-reach: Reach the public web/);
+  assert.match(line,/sam_read_skill/);
+  assert.ok(!line.includes("SECRET-BODY-TEXT"),"the catalog must never inline instructions");
+  let step=0;
+  const fake={
+   async completeConnectorTurn(_model:string,messages:Array<Record<string,unknown>>,tools:Array<{function?:{name?:string}}>){
+    step++;
+    if(step===1){
+     // The turn is offered the read tool and told the catalog up front.
+     assert.ok(tools.some(t=>t.function?.name==="sam_read_skill"));
+     const system=messages.find(m=>m.role==="system");
+     assert.ok(system&&String(system.content).includes("agent-reach: Reach the public web"));
+     return {content:null,calls:[{id:"c1",name:"sam_read_skill",args:{name:"agent-reach"}}]};
+    }
+    const toolMsg=messages.find(m=>m.role==="tool");
+    assert.ok(toolMsg&&String(toolMsg.content).includes("SECRET-BODY-TEXT"));
+    assert.ok(toolMsg&&String(toolMsg.content).includes('"untrusted":true'));
+    return {content:"Read it.",calls:[]};
+   }
+  } as unknown as OpenAICompatibleProvider;
+  const reply=await ownToolsChat(root,"sam",fake,"test-model",[{role:"user",content:"use the reach skill"}]);
+  assert.equal(reply,"Read it.");
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
