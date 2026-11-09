@@ -284,7 +284,7 @@ program.command("talk").description("Interactive terminal conversation with conf
             options.memoryWrite || options.workspaceTools
               ? "No shell, desktop, GUI, install, external publishing, or unrestricted file-write tool is available in this session."
               : ""
-          ].filter(Boolean).join("\\n");
+          ].filter(Boolean).join("\n");
           if(sessionRules)context.splice(1,0,{role:"system",content:sessionRules});
           const answer=options.memoryTools || options.workspaceTools || options.memoryWrite
             ?await runMemoryToolTurn((turn,enabled,writeEnabled)=>provider.completeToolTurn(model,turn,enabled,Boolean(options.workspaceTools),Boolean(writeEnabled)),context,dbPath(),
