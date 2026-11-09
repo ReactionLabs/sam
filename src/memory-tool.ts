@@ -64,7 +64,7 @@ export function validateToolTurn(value: unknown, workspaceTools = false, memoryW
     if (typeof content !== "string" || !content.trim()) throw new Error("Empty model response");
     return { content };
   }
-  if (!Array.isArray(item.tool_calls) || item.tool_calls.length > 3) throw new Error("At most three read-only tool calls are permitted");
+  if (!Array.isArray(item.tool_calls) || item.tool_calls.length > 3) throw new Error("At most three bounded tool calls are permitted");
   const calls = item.tool_calls as ToolCall[];
   const ids = new Set<string>();
   for (const call of calls) {
@@ -119,14 +119,14 @@ export function parseMemoryAddArguments(rawArgs: string): MemoryWriteProposal {
   if (Object.keys(value).length !== 2 ||
       !["observation", "decision", "failure", "procedure"].includes(String(value.kind)) ||
       typeof value.content !== "string" || !value.content.trim() ||
-      value.content.length > 2000 || value.content.includes("\\0"))
+      value.content.length > 2000 || value.content.includes("\0"))
     throw new Error("Invalid memory add arguments");
   return { kind: value.kind as MemoryKind, content: value.content.trim() };
 }
 
 /** Reject common credential formats before asking the owner to persist model-proposed text. */
 export function containsCredentialMaterial(content: string): boolean {
-  return /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\\bAKIA[0-9A-Z]{16}\\b|\\bBearer\\s+[A-Za-z0-9._~+/-]{12,}|\\b(?:api[_-]?key|access[_-]?token|password|client_secret)\\s*[:=]\\s*[^\\s]{8,}|\\b(?:sk|pk)_[A-Za-z0-9]{16,}/i.test(content);
+  return /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}|\b(?:api[_-]?key|access[_-]?token|password|client_secret)\s*[:=]\s*[^\s]{8,}|\b(?:sk|pk)_[A-Za-z0-9]{16,}/i.test(content);
 }
 
 export function executeMemoryAdd(path: string, proposal: MemoryWriteProposal): string {
@@ -148,7 +148,7 @@ export type ToolMessage = Message | { role: "tool"; tool_call_id: string; conten
   { role: "assistant"; content: string | null; tool_calls: ToolCall[] };
 
 export async function runMemoryToolTurn(
-  request: (messages: ToolMessage[], toolsEnabled: boolean) => Promise<ToolTurn>,
+  request: (messages: ToolMessage[], toolsEnabled: boolean, memoryWriteEnabled?: boolean) => Promise<ToolTurn>,
   messages: Message[], dbPath: string,
   onAudit?: (event: { tool: string; status: "requested" | "completed" | "failed" | "denied"; detail: string }) => void,
   workspace?: string,
@@ -165,7 +165,7 @@ export async function runMemoryToolTurn(
     const turn = validateToolTurn(await request(conversation, true, memoryWriteEnabled), Boolean(workspace), memoryWriteEnabled);
     if (!turn.tool_calls?.length) return turn.content!;
     if (usedCalls + turn.tool_calls.length > MAX_CALLS) {
-      onAudit?.({ tool: "tool_budget", status: "failed", detail: "Maximum read-only tool calls reached" });
+      onAudit?.({ tool: "tool_budget", status: "failed", detail: "Maximum tool calls reached" });
       // A requested call is not executed once the budget is exhausted. Return a
       // matching tool result for each call so the provider can finish cleanly.
       conversation.push({ role: "assistant", content: turn.content, tool_calls: turn.tool_calls });
