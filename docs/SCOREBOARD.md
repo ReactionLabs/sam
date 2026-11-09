@@ -88,7 +88,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 
 - `dashboard --memory-tools` enables the existing bounded `memory_search` and `memory_list` model tools.
 - `dashboard --workspace-tools` additionally enables bounded read-only `list_directory`, `read_file`, `search_files`, `list_skills`, and `read_skill`.
-- `--tool-root` separates the filesystem grant from SAM's state workspace. Example: `--workspace C:\\Projects\\sam` plus `--tool-root C:\\Projects`.
+- `--tool-root` separates the filesystem grant from SAM's state workspace. Example: `--workspace C:\Projects\sam` plus `--tool-root C:\Projects`.
 - The Agent Skills registry remains rooted in the SAM state workspace even when the file tool root is broader.
 - Local tools are available only to the built-in SAM chat. Named profiles do not inherit these grants. Profile-pinned MCP connector chat remains a separate route.
 - Tool request/completion/failure events are recorded in the existing chat activity feed and durable SQLite loop journal. The UI reloads the selected chat after a reply so the events appear immediately.
@@ -115,7 +115,7 @@ Branch: `feat/dashboard-local-tool-bridge-20261108`, draft PR [#68](https://gith
 **Run the Windows owner acceptance pass for PRs #66 and #68.**
 
 - **Targets:** PR #66 terminal memory tools and PR #68 dashboard local tool bridge.
-- **Acceptance:** On Node 22, run `npm ci`, `npm run build`, and `npm test`; repeat on Node 24 if installed. In terminal chat, approve one non-sensitive memory write, restart `talk --live`, and retrieve the exact record; decline a second proposal and verify no record exists. In Mission Control, verify memory search/list and workspace file read with `--workspace C:\\Projects\\sam --tool-root C:\\Projects`; verify the skill registry still reads from the SAM state root; verify workspace calls are rejected when the flag is off; verify named profiles do not inherit local tools; inspect chat activity and `loop list` for durable evidence.
+- **Acceptance:** On Node 22, run `npm ci`, `npm run build`, and `npm test`; repeat on Node 24 if installed. In terminal chat, approve one non-sensitive memory write, restart `talk --live`, and retrieve the exact record; decline a second proposal and verify no record exists. In Mission Control, verify memory search/list and workspace file read with `--workspace C:\Projects\sam --tool-root C:\Projects`; verify the skill registry still reads from the SAM state root; verify workspace calls are rejected when the flag is off; verify named profiles do not inherit local tools; inspect chat activity and `loop list` for durable evidence.
 - **Dependencies:** PR #64 integration, #65 connector hardening, #66 terminal memory write, and #68 dashboard local tools.
 - **Ready:** PR #66 Node 22/24 CI is green at 115/115; PR #68 code and mock-provider tests are committed in a draft PR.
 - **Not ready:** PR #68 CI, Windows owner verification, live MiniMax compatibility, dashboard memory writes, merge.
