@@ -65,6 +65,22 @@ export class ChatStore {
     const agent={id:randomUUID(),name,instructions:instructions.trim(),created_at:new Date().toISOString(),model,connector_id:connectorId};
     this.db.prepare("INSERT INTO agent_profiles (id,name,instructions,created_at,model,connector_id) VALUES (@id,@name,@instructions,@created_at,@model,@connector_id)").run(agent);return agent;
   }
+  // Re-pinning (found live 2026-11-09): profiles were create-only, so moving
+  // a profile to a new model meant a direct UPDATE on chats.db. These are
+  // the store-level update the CLI `agents set-model` / `set-connector`
+  // verbs ride on. Validation is exactly createAgent's: a bad value throws
+  // "Invalid agent profile"; an unknown name returns null and changes
+  // nothing. null clears the pin (back to the route tier / no connector).
+  setAgentModel(name:string,model:string|null):AgentProfile|null{
+    if(model!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(model))throw new Error("Invalid agent profile");
+    if(this.db.prepare("UPDATE agent_profiles SET model=? WHERE name=?").run(model,name).changes!==1)return null;
+    return this.agents().find(a=>a.name===name)??null;
+  }
+  setAgentConnector(name:string,connectorId:string|null):AgentProfile|null{
+    if(connectorId!==null&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectorId))throw new Error("Invalid agent profile");
+    if(this.db.prepare("UPDATE agent_profiles SET connector_id=? WHERE name=?").run(connectorId,name).changes!==1)return null;
+    return this.agents().find(a=>a.name===name)??null;
+  }
   rename(id:string,title:string):boolean{
     if(!title.trim()||title.length>120)throw new Error("Chat title must be 1 to 120 characters");
     return this.db.prepare("UPDATE chats SET title=?,updated_at=? WHERE id=?").run(title.trim(),new Date().toISOString(),id).changes===1;

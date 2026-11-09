@@ -91,3 +91,33 @@ test("agent profiles carry model and connector pins, and chats bind to a profile
     reopened.close();
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("agent profile pins can be re-pinned and cleared after creation",()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-repin-"));
+  try{
+    const db=new ChatStore(root);
+    const cid="123e4567-e89b-42d3-a456-426614174000";
+    const cid2="123e4567-e89b-42d3-a456-426614174001";
+    db.createAgent("trading","Watch the stack",{model:"MiniMax-M3",connectorId:cid});
+    // The 2026-11-09 box switch, as a supported operation this time.
+    const moved=db.setAgentModel("trading","MiniMax-M2.5");
+    assert.equal(moved?.model,"MiniMax-M2.5");
+    assert.equal(moved?.connector_id,cid);
+    const reconnected=db.setAgentConnector("trading",cid2);
+    assert.equal(reconnected?.connector_id,cid2);
+    assert.equal(reconnected?.model,"MiniMax-M2.5");
+    // Clearing a pin returns the profile to the tier table / no connector.
+    assert.equal(db.setAgentModel("trading",null)?.model,null);
+    assert.equal(db.setAgentConnector("trading",null)?.connector_id,null);
+    // Same validation as creation; unknown names change nothing.
+    assert.throws(()=>db.setAgentModel("trading","not a model"),/Invalid agent/);
+    assert.throws(()=>db.setAgentConnector("trading","nope"),/Invalid agent/);
+    assert.equal(db.setAgentModel("missing","MiniMax-M3"),null);
+    assert.equal(db.setAgentConnector("missing",cid),null);
+    db.close();
+    const reopened=new ChatStore(root);
+    assert.equal(reopened.agents()[0].model,null);
+    assert.equal(reopened.agents()[0].connector_id,null);
+    reopened.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
+});

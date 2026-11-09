@@ -57,6 +57,8 @@ import { listDoors } from "./mini-door.js";
 import { runRedTeamPack, screenDoorMessage } from "./door-guard.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 import { modelRoutingTable } from "./model-routing.js";
+import { connectors } from "./connectors.js";
+import { recordActivity } from "./activity.js";
 import { usageSummary, readUsage } from "./usage.js";
 
 const program=new Command();
@@ -256,6 +258,39 @@ const corrCmd=program.command("corrections").description("Corrections (P6): owne
 corrCmd.command("detect").argument("<text>").description("Detection only: show the rule statement a message would propose; proposes nothing").action((text:string)=>output({correction:detectCorrection(text)}));
 corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat <id>","Stamp the chat the correction came from").description("Detect a correction in a message and route it into the approval gate as a pending law proposal (deduped)").action((profile:string,text:string,o:{chat?:string})=>{const correction=detectCorrection(text);if(!correction){output({correction:null,proposal:null});return;}const routed=proposeCorrection(program.opts().workspace,{actor:profile,chatId:o.chat??null,text});output({correction,proposal:routed?.proposal??null,created:routed?.created??false});});
 program.command("models").description("Model routing (P11): which model each route tier runs - heartbeat polls on the cheap tier, chat on main, background on deep; a profile pin always wins").action(()=>output(modelRoutingTable()));
+const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
+agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
+agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
+  const root=program.opts().workspace as string;
+  if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its model is the SAM_MODEL environment value");
+  const db=new ChatStore(root);
+  try{
+    const updated=db.setAgentModel(name,model==="none"?null:model);
+    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    recordActivity(root,name,"agent-repin","Model pin "+(updated.model?("set to "+updated.model):"cleared (route tier decides)"));
+    output(updated);
+  }finally{db.close();}
+});
+agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; use 'none' to clear the pin").action((name:string,connector:string)=>{
+  const root=program.opts().workspace as string;
+  if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; it uses no pinned connector");
+  let connectorId:string|null=null;
+  if(connector!=="none"){
+    if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connector))connectorId=connector;
+    else{
+      const found=connectors(root).find(c=>c.name===connector);
+      if(!found)throw new Error("Unknown connector \""+connector+"\". Registered connectors: "+(connectors(root).map(c=>c.name).join(", ")||"(none)"));
+      connectorId=found.id;
+    }
+  }
+  const db=new ChatStore(root);
+  try{
+    const updated=db.setAgentConnector(name,connectorId);
+    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    recordActivity(root,name,"agent-repin","Connector pin "+(updated.connector_id?("set to "+updated.connector_id):"cleared"));
+    output(updated);
+  }finally{db.close();}
+});
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
