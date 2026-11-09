@@ -11,7 +11,9 @@ The dashboard is real and already exists on the integration branch. The current 
 - **Main:** still contains the earlier CLI and mission-runtime foundation.
 - **Integration PR [#64](https://github.com/ReactionLabs/sam/pull/64):** folds the post-#18 feature stack into main, including Mission Control, durable chats and branches, agent profiles, model chat, skills discovery, bounded CLI memory/workspace tools, research-team workflows, MCP connectors, and the offline-runner clock fence. It is open and unmerged.
 - **Connector hardening PR [#65](https://github.com/ReactionLabs/sam/pull/65):** validates the persisted MCP connector registry before credential use. It is a draft stacked on #64 and is also unmerged.
-- **Current build branch:** adds an explicitly opted-in model memory write tool. Each proposed write requires a local owner confirmation. The latest verified branch head `166613ef` passed GitHub Actions run [#42553295849](https://github.com/ReactionLabs/sam/actions/runs/42553295849) on Node 22 and Node 24 with 115/115 tests each. Windows and live MiniMax verification are still pending.
+- **Memory-write PR [#66](https://github.com/ReactionLabs/sam/pull/66):** adds opt-in `memory_add` to terminal chat with a local confirmation for every write. Source head `fd474ed0` passed GitHub Actions run [#42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897), with 115/115 tests on Node 22 and Node 24. Windows and live MiniMax acceptance remain pending.
+- **Agent Box storage PR [#67](https://github.com/ReactionLabs/sam/pull/67):** open draft based on #64. It adds per-box mission/memory/chat/profile storage namespaces and passed 113/113 tests on Node 22 and Node 24 in run [#42556313860](https://github.com/ReactionLabs/sam/actions/runs/42556313860). It is a separate branch, not included in the #66/#68 stack, and does not yet provide process or credential isolation.
+- **Dashboard local-tool PR [#68](https://github.com/ReactionLabs/sam/pull/68):** open draft stacked on #66. It connects the existing main chat to opt-in, read-only SQLite memory and bounded workspace tools, with a separate file root and durable audit. Common credential-bearing filenames are blocked and common key/token/password patterns cause file content to be withheld. GitHub Actions run [#42558439222](https://github.com/ReactionLabs/sam/actions/runs/42558439222) passed build and 117/117 tests on both Node 22 and Node 24. Windows/live acceptance remain pending. It is not on `main`.
 
 Do not treat any unmerged PR as part of main. Do not merge or deploy without owner approval.
 
@@ -23,6 +25,8 @@ Start it from the SAM workspace:
 
 ```powershell
 node dist/cli.js dashboard
+# On PR #68 only, opt into read-only local memory and workspace tools:
+node dist/cli.js --workspace C:\Projects\sam dashboard --memory-tools --workspace-tools --tool-root C:\Projects
 ```
 
 The server binds to `127.0.0.1` and prints a randomized local URL. The dashboard includes:
@@ -35,7 +39,9 @@ The server binds to `127.0.0.1` and prints a randomized local URL. The dashboard
 - A main chat that calls the configured model
 - Optional model-selected, read-only MCP connector tools when a connector is configured and selected
 
-The dashboard chat does **not** yet call the local SQLite memory or workspace file tools. It does not run missions, spawn persistent workers, execute shell commands, stream tokens, or install skills. Stored schedules are not an autonomous scheduler. The local URL token is not multi-user authentication or an OS sandbox. Keep the dashboard on loopback.
+The PR #64 baseline dashboard chat is text-only. Draft PR #68 adds opt-in local tools to the existing built-in SAM chat: `--memory-tools` enables read-only SQLite search/list, while `--workspace-tools` adds bounded directory/file/skill reads. A separate `--tool-root` can authorize a broader file root without moving SAM's state database or skill registry. Tool requests and outcomes are written to the existing chat activity feed and durable loop journal. Common credential filenames and credential-like content are withheld from file reads/searches, but this is defense in depth, not a complete secret scanner. Named agent profiles do not inherit these local grants. PR #68 passed Node 22/24 CI at 117/117 tests per version in run #42558439222, but remains an unmerged draft and is not a capability on `main`.
+
+The dashboard does not yet run missions, spawn persistent background workers, execute shell commands, stream tokens, or install skills. Stored schedules are not an autonomous scheduler. The local URL token is not multi-user authentication or an OS sandbox. Keep the dashboard on loopback.
 
 ### Live model chat and bounded tools
 
@@ -50,7 +56,7 @@ The terminal chat keeps a bounded in-memory conversation for the current process
 On the integration stack:
 
 - `--memory-tools` enables model-selected read-only SQLite memory search.
-- `--workspace-tools` additionally enables bounded read-only directory listing, file reads, file search, and reading installed skill instructions as untrusted reference material.
+- `--workspace-tools` additionally enables bounded read-only directory listing, file reads, file search, and reading installed skill instructions as untrusted reference material. `--tool-root <path>` separates the file root from the SAM state/skill root; for example, keep `--workspace C:\Projects\sam` and set `--tool-root C:\Projects`.
 - The model tool loop is limited to four rounds and eight calls per user turn, with no more than three calls in one model response.
 - Tool activity and outcomes are recorded in the local SQLite agent-loop journal. Restart recovery marks an unfinished loop interrupted; it never replays tool calls automatically.
 - Embedded `<think>` reasoning blocks are removed from user-facing model replies; incomplete or reasoning-only output is rejected.
@@ -89,7 +95,7 @@ Skill install, update, enable/disable, removal, sandbox testing, self-authored s
 
 ### Agents, teams, connectors, and missions
 
-- Agent profiles can pin a model and one connector. A profile is not yet an independent Agent Box with isolated memory, credentials, and process environment.
+- Agent profiles can pin a model and one connector. Draft PR #67 adds per-box storage namespaces for missions, memory, chats, branches, and profiles, but it is separate from the #66/#68 stack and remains unmerged. It is not OS/process or credential isolation.
 - The bounded research-team command makes separate Research, QA, and SAM model calls and stores attributed events in a durable chat. Optional workspace evidence, bounded Brave Search snippets, and read-only workspace tools are explicit flags. This is not persistent autonomous delegation.
 - MCP connectors use environment-backed credentials, an exact host allowlist, and a read-only tool allowlist. The browser never receives the credential value. PR #65 adds strict validation of the saved connector registry. This is not a general MCP capability manager or a hardened multi-tenant credential vault.
 - Missions, tasks, leases, and an offline deterministic echo runner are durable. The daemon is a local control IPC process, not yet an asynchronous mission worker that continues plan/act/evaluate loops independently of the browser.
@@ -135,7 +141,7 @@ npm run build
 npm test
 ```
 
-The integration PR and connector-hardening PR have successful Node 22/24 GitHub Actions runs. The current memory-write branch has not yet received its own CI result. A green CI run does not replace the owner's Windows live MiniMax acceptance test.
+PRs #64, #65, #66, and #68 have successful Node 22/24 GitHub Actions runs. PR #66 passed 115/115 tests per version; PR #68 passed 117/117 tests per version in run #42558039520. A green CI run does not replace the owner's Windows live MiniMax acceptance test.
 
 ## Safety boundaries
 
@@ -150,9 +156,9 @@ The integration PR and connector-hardening PR have successful Node 22/24 GitHub 
 
 ## Next milestones
 
-1. Verify the owner-approved live memory write/read flow on Windows with MiniMax, including a fresh-process read and denied-write test.
-2. Connect the existing dashboard chat to the same scoped local memory/workspace tool router with explicit owner-controlled grants and durable audit.
-3. Complete true per-Agent-Box identity, memory, connector, and credential isolation before claiming multi-instance isolation.
+1. Verify PR #66's owner-approved terminal memory write/read flow on Windows with MiniMax, including a fresh-process read and denied-write test.
+2. Verify PR #68's dashboard memory/workspace read tools on Windows with MiniMax, including the split `C:\Projects\sam` state root and `C:\Projects` file root, disabled-tool denial, profile scoping, and durable chat/journal audit.
+3. Reconcile PR #67's per-box storage branch with the #66/#68 memory and dashboard tool stack before any merge; then complete authenticated identity, connector credential, and process isolation before claiming independent Agent Boxes.
 4. Add memory update/archive tools through action-bound owner approval.
 5. Build the durable background mission loop, then the standards-based Skill Engine and reviewed Agent Reach adapter.
 6. Add optional Obsidian vault access, webhook wake-ups, Tailscale Serve, and later application adapters such as Blender only after the core permission model is verified.

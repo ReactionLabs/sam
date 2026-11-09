@@ -154,7 +154,8 @@ export async function runMemoryToolTurn(
   workspace?: string,
   checkpoint?: (round: number, calls: number) => void,
   memoryWriteEnabled = false,
-  approveMemoryWrite?: (proposal: MemoryWriteProposal) => Promise<boolean> | boolean
+  approveMemoryWrite?: (proposal: MemoryWriteProposal) => Promise<boolean> | boolean,
+  skillRoot?: string
 ): Promise<string> {
   const conversation: ToolMessage[] = [...messages];
   // Permit bounded sequential tool use; every memory write still requires a local owner decision.
@@ -199,7 +200,7 @@ export async function runMemoryToolTurn(
         } else {
           result = call.function.name === "memory_search" ? executeMemorySearch(dbPath, call.function.arguments)
             : call.function.name === "memory_list" ? executeMemoryList(dbPath)
-            : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments)
+            : workspace ? executeWorkspaceTool(workspace, call.function.name, call.function.arguments, skillRoot ?? workspace)
             : (() => { throw new Error("Workspace tools not authorized"); })();
           onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
         }
