@@ -205,3 +205,18 @@ test("credential-like content is rejected before owner approval and memory listi
     assert.deepEqual(listed.records, []);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("memory list uses a validated SQLite row limit", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sam-memory-list-limit-"));
+  const db = join(dir, "memory.db");
+  const store = new MemoryStore(db);
+  try {
+    for (let i = 0; i < 15; i++) store.add({
+      kind: "observation", content: "bounded record " + i, source: "test"
+    });
+    assert.equal(store.list(undefined, 10).length, 10);
+    assert.throws(() => store.list(undefined, 0), /Invalid memory list limit/);
+    assert.throws(() => store.list(undefined, 1001), /Invalid memory list limit/);
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
