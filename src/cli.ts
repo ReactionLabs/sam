@@ -22,6 +22,7 @@ import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromL
 import { serveWebhookChannel } from "./webhook.js";
 import { postDiscord } from "./discord.js";
 import { minis, spawnMini, removeMini } from "./minis.js";
+import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "./links.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
@@ -200,6 +201,12 @@ miniCmd.command("list").action(()=>output(minis(program.opts().workspace)));
 miniCmd.command("door").argument("<name>").description("Issue (or rotate) the web door key for a mini; the key is shown once").action((name:string)=>{const key=issueDoorKey(program.opts().workspace,name);output({mini:name,path:"/mini/"+key});});
 miniCmd.command("door-off").argument("<name>").action((name:string)=>output({disabled:disableDoor(program.opts().workspace,name)}));
 miniCmd.command("remove").argument("<name>").action((name:string)=>output({removed:removeMini(program.opts().workspace,name)}));
+const linkCmd=program.command("links").description("Link groups: the only bridge between profiles. Linked profiles share one memory level");
+linkCmd.command("create").argument("<name>").argument("<members...>","Profile names, at least two (sam is the core)").action((name:string,members:string[])=>output(createLink(program.opts().workspace,name,members)));
+linkCmd.command("list").action(()=>output(links(program.opts().workspace)));
+linkCmd.command("add").argument("<id>").argument("<member>").action((id:string,member:string)=>output(addLinkMember(program.opts().workspace,id,member)));
+linkCmd.command("remove").argument("<id>").argument("<member>").action((id:string,member:string)=>output(removeLinkMember(program.opts().workspace,id,member)));
+linkCmd.command("delete").argument("<id>").action((id:string)=>output({deleted:deleteLink(program.opts().workspace,id)}));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")

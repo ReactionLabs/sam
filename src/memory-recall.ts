@@ -1,16 +1,19 @@
 import { MemoryStore } from "./memory.js";
+import { dirname } from "node:path";
+import { visibleScopes } from "./links.js";
 import type { Message } from "./model-conversation.js";
 
 /**
  * Explicit opt-in, read-only recall. Memory is untrusted evidence, not an instruction.
  * This is NOT a model tool bridge and never writes memory.
  */
-export function recallMemory(dbPath: string, maxRecords = 10): Message | undefined {
+export function recallMemory(dbPath: string, maxRecords = 10, actor = "sam"): Message | undefined {
   if (!Number.isInteger(maxRecords) || maxRecords < 1 || maxRecords > 20)
     throw new Error("Invalid memory recall limit");
   const store = new MemoryStore(dbPath);
   try {
-    const records = store.list().slice(0, maxRecords);
+    const root = dirname(dirname(dbPath));
+    const records = store.list(undefined, visibleScopes(root, actor)).slice(0, maxRecords);
     if (records.length === 0) return undefined;
     const lines = records.map(r => JSON.stringify({
       id: r.id, kind: r.kind, source: r.source,
