@@ -24,9 +24,16 @@ test("workspace read tools reject traversal, secrets, symlinks and unsupported w
   const root=mkdtempSync(join(tmpdir(),"sam-files-sec-"));
   try {
     writeFileSync(join(root,".env"),"SECRET=abc");
+    writeFileSync(join(root,"credentials.json"),'{"api_key":"not-a-real-secret-123"}');
     writeFileSync(join(root,"safe.ts"),"safe");
+    writeFileSync(join(root,"config.ts"),'export const api_key = "not-a-real-secret-123";\\n');
     assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"../outside"}'),/outside|workspace/);
     assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":".env"}'),/Protected/);
+    assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"credentials.json"}'),/Protected/);
+    assert.throws(()=>executeWorkspaceTool(root,"read_file",'{"path":"config.ts"}'),/credential material/);
+    const searched=executeWorkspaceTool(root,"search_files",'{"path":".","query":"api_key"}');
+    assert.match(searched,/withheldSensitiveFiles":1/);
+    assert.doesNotMatch(searched,/not-a-real-secret-123/);
     assert.throws(()=>executeWorkspaceTool(root,"write_file",'{"path":"safe.ts"}'),/Unsupported/);
     try {
       symlinkSync(join(root,"safe.ts"),join(root,"alias.ts"));
