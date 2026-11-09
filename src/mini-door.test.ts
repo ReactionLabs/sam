@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnMini } from "./minis.js";
-import { issueDoorKey, disableDoor, doorForKey, sessionChat, RateLimiter, miniDoorPage } from "./mini-door.js";
+import { issueDoorKey, disableDoor, doorForKey, doorHomeLink, peekSessionChat, sessionChat, RateLimiter, miniDoorPage } from "./mini-door.js";
 
 test("mini door: keys resolve to exactly one mini, rotation kills the old key",()=>{
  const root=mkdtempSync(join(tmpdir(),"sam-door-"));
@@ -39,5 +39,18 @@ test("mini door: a session keeps one chat, and the limiter trips on floods",()=>
   assert.equal(limiter.allow("s",1001),true);
   assert.equal(limiter.allow("s",1002),true);
   assert.equal(limiter.allow("s",1003),false);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("mini door: the core can hold a door, and the home-link flag rides the record",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-door3-"));
+ try{
+  spawnMini(root,{name:"alex",person:"Alex",instructions:"Help Alex."});
+  const coreKey=issueDoorKey(root,"sam",{homeLink:true});
+  assert.equal(doorForKey(root,coreKey),"sam");
+  assert.equal(doorHomeLink(root,coreKey),true);
+  const miniKey=issueDoorKey(root,"alex");
+  assert.equal(doorHomeLink(root,miniKey),false);
+  assert.equal(peekSessionChat(root,"alex","session-1234567890"),null);
  }finally{rmSync(root,{recursive:true,force:true});}
 });

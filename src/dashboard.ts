@@ -9,7 +9,7 @@ import { runChatTurn } from "./agent-turn.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
-import { doorForKey, doorEnabled, miniDoorPage, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
+import { doorForKey, doorEnabled, doorHomeLink, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -139,13 +139,20 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         json(200,{reply:result.message});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
-    const doorMatch=/^\/mini\/([0-9a-f]{32})(\/message)?$/.exec(req.url??"");
+    const doorMatch=/^\/mini\/([0-9a-f]{32})(\/(message|history))?(\?.*)?$/.exec(req.url??"");
     if(doorMatch){
       const miniName=doorForKey(workspace,doorMatch[1]);
       if(!miniName){res.writeHead(404);res.end();return;}
       const miniRecord=minis(workspace).find(m=>m.name===miniName);
-      if(req.method==="GET"&&!doorMatch[2]){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(miniDoorPage(miniRecord?.person??miniName,miniName));return;}
-      if(req.method==="POST"&&doorMatch[2]){
+      if(req.method==="GET"&&!doorMatch[2]){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(miniDoorPage(miniRecord?.person??miniName,miniName,doorHomeLink(workspace,doorMatch[1])));return;}
+      if(req.method==="GET"&&doorMatch[2]==="/history"){
+        const session=new URL(req.url??"","http://localhost").searchParams.get("session")??"";
+        const chatId=peekSessionChat(workspace,miniName,session);
+        if(!chatId){json(200,{messages:[]});return;}
+        const store=new ChatStore(workspace);let msgs;try{msgs=store.messages(chatId).slice(-50).map(m=>({role:m.role,content:m.content}));}finally{store.close();}
+        json(200,{messages:msgs});return;
+      }
+      if(req.method==="POST"&&doorMatch[2]==="/message"){
         try{
           let raw="";for await(const chunk of req){raw+=chunk.toString("utf8");if(raw.length>8000)throw Error("Request too large");}
           const body:unknown=JSON.parse(raw);
@@ -153,7 +160,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const session=(body as Record<string,unknown>).session, content=(body as Record<string,unknown>).content;
           if(typeof session!=="string"||typeof content!=="string"||!content.trim()||content.length>2000)throw Error("Invalid door message");
           if(!doorLimiter.allow(miniName+":"+session)) {json(429,{error:"Slow down a little. Try again in a moment."});return;}
-          const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName).id;}finally{store.close();}};
+          const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName==="sam"?null:miniName).id;}finally{store.close();}};
           const chatId=sessionChat(workspace,miniName,session,makeChat);
           try{const reply=await runChatTurn(workspace,chatId,content.trim());json(200,{reply:{role:"assistant",content:reply}});}
           catch(error){

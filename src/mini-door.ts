@@ -12,7 +12,7 @@ import { minis } from "./minis.js";
 // Doors are rate-limited per session and per mini. Preference capture applies
 // to door turns: a mini exists to learn its person, and the door is the person
 // talking. (Client chatbots, where visitors are customers, get their own kit.)
-interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string }
+interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string; homeLink?:boolean }
 interface DoorSession { mini:string; session:string; chatId:string; updated_at:string }
 interface DoorFile { doors:Door[]; sessions:DoorSession[] }
 function doorPath(root:string){return join(resolve(root),".sam","mini-doors.json");}
@@ -24,12 +24,13 @@ function load(root:string):DoorFile{
 }
 function save(root:string,file:DoorFile){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(doorPath(root),JSON.stringify(file,null,2),{mode:0o600});}
 function hashKey(key:string):string{return createHash("sha256").update(key).digest("hex");}
-export function issueDoorKey(root:string,miniName:string):string{
-  if(!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
+export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolean}):string{
+  // "sam" is the core itself: the main SAM gets a door too, not just the minis.
+  if(miniName!=="sam"&&!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
   const key=randomBytes(16).toString("hex");
   const file=load(root);
   const rest=file.doors.filter(d=>d.mini!==miniName);
-  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,created_at:new Date().toISOString()}]});
+  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,created_at:new Date().toISOString()}]});
   return key;
 }
 export function disableDoor(root:string,miniName:string):boolean{
@@ -47,6 +48,20 @@ export function doorForKey(root:string,key:string):string|null{
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return door.mini;
   }
   return null;
+}
+export function doorHomeLink(root:string,key:string):boolean{
+  if(!/^[0-9a-f]{32}$/.test(key))return false;
+  const wanted=Buffer.from(hashKey(key),"hex");
+  for(const door of load(root).doors){
+    if(!door.enabled)continue;
+    const stored=Buffer.from(door.keyHash,"hex");
+    if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return !!door.homeLink;
+  }
+  return false;
+}
+export function peekSessionChat(root:string,miniName:string,session:string):string|null{
+  if(!/^[A-Za-z0-9-]{16,64}$/.test(session))return null;
+  return load(root).sessions.find(s=>s.mini===miniName&&s.session===session)?.chatId??null;
 }
 export function sessionChat(root:string,miniName:string,session:string,createChat:()=>string):string{
   if(!/^[A-Za-z0-9-]{16,64}$/.test(session))throw new Error("Invalid session");
@@ -77,8 +92,11 @@ export class RateLimiter {
   }
 }
 function esc(text:string):string{return text.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
-export function miniDoorPage(person:string,miniName:string):string{
-  const title=esc(person)+"'s SAM";
+export function miniDoorPage(person:string,miniName:string,homeLink=false):string{
+  const core=miniName==="sam";
+  const title=core?"SAM":esc(person)+"'s SAM";
+  const hint=core?"Your main SAM. Everything it knows, it knows for you.":("Say hello. This is "+esc(person)+"'s own SAM, it only knows their world.");
+  const homeAnchor=homeLink?'<a href="/sam" style="margin-left:auto;color:#80b4ff;text-decoration:none;font-size:14px">Main SAM</a>':"";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>${title}</title><style>
 *{box-sizing:border-box}body{margin:0;background:#101114;color:#f2f3f5;font:16px/1.5 -apple-system,"Segoe UI",sans-serif;height:100dvh;display:flex;flex-direction:column}
 header{padding:14px 18px;border-bottom:1px solid #26282e;display:flex;gap:10px;align-items:center;color:#dbe7ff}header svg{width:22px;height:22px;stroke:#80b4ff;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}header strong{font-size:17px;color:#f2f3f5}
@@ -94,8 +112,8 @@ button.send{background:#2f6fbd;border:0;border-radius:12px;color:#fff;padding:0 
 </style></head><body>
 <header><svg viewBox="0 0 24 24"><path d="M18 11c-1.5 0-2.5.5-3 2" />
   <path d="M4 6a2 2 0 0 0-2 2v4a5 5 0 0 0 5 5 8 8 0 0 1 5 2 8 8 0 0 1 5-2 5 5 0 0 0 5-5V8a2 2 0 0 0-2-2h-3a8 8 0 0 0-5 2 8 8 0 0 0-5-2z" />
-  <path d="M6 11c1.5 0 2.5.5 3 2" /></svg><strong>${title}</strong></header>
-<div id="thread"><div class="hint">Say hello. This is ${esc(person)}'s own SAM, it only knows their world.</div></div>
+  <path d="M6 11c1.5 0 2.5.5 3 2" /></svg><strong>${title}</strong>${homeAnchor}</header>
+<div id="thread"><div class="hint">${hint}</div></div>
 <button id="toBottom" title="Jump to latest">&#8595;</button>
 <form id="composer"><textarea id="message" rows="1" maxlength="2000" placeholder="Message SAM..."></textarea><button class="send" id="send">Send</button></form>
 <script>
@@ -103,6 +121,7 @@ const KEY=location.pathname.split("/").pop();
 let session=localStorage.getItem("sam-mini-session");
 if(!session){session=(crypto.randomUUID?crypto.randomUUID():"s"+Date.now()+Math.random().toString(16).slice(2));localStorage.setItem("sam-mini-session",session);}
 const thread=document.getElementById("thread"),input=document.getElementById("message"),send=document.getElementById("send"),toBottom=document.getElementById("toBottom");
+fetch("/mini/"+KEY+"/history?session="+encodeURIComponent(session)).then(r=>r.json()).then(d=>{for(const m of (d.messages||[]))bubble(m.role,m.content);}).catch(()=>{});
 function bubble(role,text){const hint=thread.querySelector(".hint");if(hint)hint.remove();const b=document.createElement("div");b.className="bubble "+role;b.textContent=text;const c=document.createElement("button");c.className="copy";c.textContent="Copy";c.onclick=async()=>{try{await navigator.clipboard.writeText(text);}catch(e){}c.textContent="Copied";setTimeout(()=>{c.textContent="Copy";},1200);};b.append(c);thread.append(b);thread.scrollTop=thread.scrollHeight;}
 thread.addEventListener("scroll",()=>{const d=thread.scrollHeight-thread.scrollTop-thread.clientHeight;toBottom.style.display=d>320?"flex":"none";});
 toBottom.onclick=()=>{thread.scrollTo({top:thread.scrollHeight,behavior:"smooth"});};
