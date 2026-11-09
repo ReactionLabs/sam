@@ -14,3 +14,19 @@ test("dashboard page: the inline script parses as valid JavaScript",()=>{
   assert.match(dashboardHtml,/id="configPanel"/);
   assert.match(dashboardHtml,/id="toBottom"/);
 });
+
+test("dashboard page: owner console surfaces (P8) - law revoke, approvals history, activity filter",()=>{
+  // Law is a control surface now, not a flat <pre>: a container the script
+  // fills with per-law Revoke buttons wired to the dashboard revoke route.
+  assert.match(dashboardHtml,/id="laws" class="appr"/);
+  assert.match(dashboardHtml,/function renderLaws\(/);
+  assert.match(dashboardHtml,/function revokeLawUi\(/);
+  assert.match(dashboardHtml,/preferences\/'\+id\+'\/revoke/);
+  // Decided approvals get their own history view beside the pending queue.
+  assert.match(dashboardHtml,/id="approvalHistory"/);
+  assert.match(dashboardHtml,/function renderApprovalHistory\(/);
+  // Agent activity can be narrowed to one profile, server-side.
+  assert.match(dashboardHtml,/id="activityFilter"/);
+  assert.match(dashboardHtml,/function renderActivityFilter\(/);
+  assert.match(dashboardHtml,/\?actor=/);
+});

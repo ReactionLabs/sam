@@ -10,10 +10,7 @@ import { connectors } from "./connectors.js";
 // read models behind the CLI commands - the same shapes the dashboard shows,
 // so the terminal, the dashboard, and a script all read one truth.
 export function activityView(root: string, opts: { limit?: number; actor?: string; kind?: string } = {}): ActivityLine[] {
-  let lines = readActivity(root, 500);
-  if (opts.actor) lines = lines.filter(l => l.actor === opts.actor);
-  if (opts.kind) lines = lines.filter(l => l.kind === opts.kind);
-  return lines.slice(-(opts.limit ?? 20));
+  return readActivity(root, opts.limit ?? 20, { actor: opts.actor, kind: opts.kind });
 }
 export function actionsView(root: string, opts: { pending?: boolean; chat?: string; actor?: string } = {}): ActionProposal[] {
   let items = listActions(root);

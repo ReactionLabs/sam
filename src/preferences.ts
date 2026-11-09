@@ -51,6 +51,7 @@ export class PreferenceStore {
     return (profile?this.db.prepare("SELECT * FROM preferences WHERE profile=? ORDER BY status,updated_at DESC LIMIT 200").all(profile):this.db.prepare("SELECT * FROM preferences ORDER BY updated_at DESC LIMIT 200").all()) as Preference[];
   }
   lawsFor(profile:string):Preference[]{return this.db.prepare("SELECT * FROM preferences WHERE profile=? AND status='law' ORDER BY updated_at DESC LIMIT 50").all(profile) as Preference[];}
+  get(id:string):Preference|undefined{return this.db.prepare("SELECT * FROM preferences WHERE id=?").get(id) as Preference|undefined;}
   revoke(id:string):boolean{return this.db.prepare("UPDATE preferences SET status='revoked',updated_at=? WHERE id=? AND status!='revoked'").run(new Date().toISOString(),id).changes===1;}
   close(){this.db.close();}
 }

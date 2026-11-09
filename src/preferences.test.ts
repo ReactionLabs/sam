@@ -27,6 +27,18 @@ test("preferences: explicit rules are law instantly, likes promote on the third 
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
+test("preferences: get reads one record back by id and misses cleanly",()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-prefs-get-"));
+ try{
+  const store=new PreferenceStore(root);
+  const rule=store.note("trading","Always confirm before acting","rule","chat-1");
+  assert.equal(store.get(rule.id)?.statement,"Always confirm before acting");
+  assert.equal(store.get(rule.id)?.status,"law");
+  assert.equal(store.get("00000000-0000-0000-0000-000000000000"),undefined);
+  store.close();
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
 test("preference extraction hears first-person likes, dislikes, and rules only",()=>{
  assert.deepEqual(extractPreferences("I like short answers and I never trade on Fridays").map(x=>x.kind),["rule","like"]);
  assert.equal(extractPreferences("Remember: the box is sovereign")[0].kind,"rule");

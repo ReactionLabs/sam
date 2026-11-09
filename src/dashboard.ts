@@ -12,7 +12,8 @@ import { minis } from "./minis.js";
 import { doorForKey, doorEnabled, doorHomeLink, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { listActions, decideAction } from "./actions.js";
-import { readActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
+import type { Preference } from "./preferences.js";
 import { listBackgroundTasks } from "./background.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -50,6 +51,21 @@ export function addSchedule(root:string,name:string,minutes:number):Schedule{
   mkdirSync(join(resolve(root),".sam"),{recursive:true});
   writeFileSync(scheduleFile(root),JSON.stringify([...items,item],null,2),{flag:"w",mode:0o600});
   return item;
+}
+// Owner console (P8): revoking standing law from the dashboard. The CLI has
+// had `preferences revoke` since CLI parity; this is the same store operation
+// behind the dashboard's own authenticated POST, plus the ledger line that
+// makes the revocation itself auditable. Returns the revoked record, or null
+// when the id is unknown or the record was already revoked.
+export function revokeLaw(root:string,id:string):Preference|null{
+  const store=new PreferenceStore(root);
+  try{
+    const pref=store.get(id);
+    if(!pref||pref.status==="revoked")return null;
+    if(!store.revoke(id))return null;
+    recordActivity(root,"owner","law-revoked",pref.profile+": "+pref.statement);
+    return store.get(id)??null;
+  }finally{store.close();}
 }
 const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SAM Local Dashboard</title><style>
 :root{color-scheme:dark;font:16px system-ui;background:#0c111b;color:#eaf0ff}body{max-width:960px;margin:50px auto;padding:0 20px}h1{font-size:38px}section{background:#161f2f;border:1px solid #2b3b53;border-radius:14px;padding:22px;margin:18px 0}strong{color:#76d9bc}pre{white-space:pre-wrap;overflow-wrap:anywhere}small{color:#a4b4cd}
@@ -97,6 +113,10 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     const actionRoute=req.url?.match(new RegExp("^"+route+"/actions/([0-9a-f-]{36})/decide$"));
     if(actionRoute&&req.method==="POST"){
       try{const body=await post();json(200,await decideAction(workspace,actionRoute[1],body.decision==="approve"));}catch{json(400,{error:"Invalid action decision"});}return;
+    }
+    const lawRoute=req.url?.match(new RegExp("^"+route+"/preferences/([0-9a-f-]{36})/revoke$"));
+    if(lawRoute&&req.method==="POST"){
+      try{await post();const revoked=revokeLaw(workspace,lawRoute[1]);if(!revoked){json(404,{error:"Law not found or already revoked"});}else{json(200,revoked);}}catch{json(400,{error:"Invalid law revocation"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/connectors"){
       try{const b=await post();if(typeof b.name!=="string"||typeof b.url!=="string"||typeof b.tokenEnv!=="string")throw Error("Invalid connector");
@@ -184,7 +204,10 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     if(req.method!=="GET"){res.writeHead(405);res.end();return;}
     if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
-    if(req.url===`/api/status/${token}`){
+    const statusParts=(req.url??"").split("?");
+    if(statusParts[0]===`/api/status/${token}`){
+      const statusParams=new URLSearchParams(statusParts[1]??"");
+      const activityFilter={actor:statusParams.get("actor")||undefined,kind:statusParams.get("kind")||undefined};
       try{
         const store=new MissionStore(join(workspace,".sam","missions.db"));
         let missions:unknown;
@@ -198,7 +221,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),activity:readActivity(workspace,30),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),activity:readActivity(workspace,30,activityFilter),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }
