@@ -227,7 +227,7 @@ program.command("talk").description("Interactive terminal conversation with conf
   .requiredOption("--live","Allow model API requests (may incur provider charges)")
   .option("--model <id>","Model ID")
   .option("--with-memory","Explicitly include recent workspace memory records in model context")
-  .option("--memory-tools","Allow model to call read-only SQLite memory_search (may incur an additional API request)")
+  .option("--memory-tools","Allow model to call read-only SQLite memory search/list tools (may incur an additional API request)")
   .option("--workspace-tools","Allow read-only workspace tools and installed skill reading (includes memory search)")
   .option("--memory-write","Allow model-proposed memory writes; confirm every write locally")
   .action(async(options:{live:boolean,model?:string,withMemory?:boolean,memoryTools?:boolean,workspaceTools?:boolean,memoryWrite?:boolean})=>{
