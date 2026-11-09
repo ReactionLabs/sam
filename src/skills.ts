@@ -21,9 +21,46 @@ export function parseSkillMetadata(markdown: string): { name: string; descriptio
   const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown);
   if (!match || match[1].length > 8192) return;
   const values: Record<string, string> = {};
-  for (const line of match[1].split(/\r?\n/)) {
-    const entry = /^(name|description):\s*(.+?)\s*$/.exec(line);
-    if (entry) values[entry[1]] = entry[2].replace(/^(['"])(.*)\1$/, "$2");
+  const lines = match[1].split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const entry = /^(name|description):\s*(.*?)\s*$/.exec(lines[i]);
+    if (!entry) continue;
+    const key = entry[1];
+    const raw = entry[2];
+    const block = /^([>|])[+-]?[0-9]?\s*(?:#.*)?$/.exec(raw);
+    if (!block) { values[key] = raw.replace(/^(['"])(.*)\1$/, "$2"); continue; }
+    // YAML block scalar (description: > or |): the value lives on the
+    // following indented lines. Popular skills (agent-reach among them)
+    // write descriptions this way; a single-line parser reads the
+    // literal ">" and the skill becomes unmatchable. Folded joins the
+    // lines of a paragraph with spaces, literal keeps the newlines;
+    // chomping is a trim either way, which suits a metadata value.
+    const blockLines: string[] = [];
+    let indent = -1;
+    let j = i + 1;
+    for (; j < lines.length; j++) {
+      const line = lines[j];
+      if (line.trim() === "") { blockLines.push(""); continue; }
+      const lineIndent = /^[ \t]*/.exec(line)![0].length;
+      if (lineIndent === 0) break;
+      if (indent === -1) indent = lineIndent;
+      if (lineIndent < indent) break;
+      blockLines.push(line.slice(indent));
+    }
+    i = j - 1;
+    while (blockLines.length > 0 && blockLines[blockLines.length - 1] === "") blockLines.pop();
+    if (block[1] === "|") {
+      values[key] = blockLines.join("\n").trim();
+    } else {
+      const paragraphs: string[] = [];
+      let current: string[] = [];
+      for (const blockLine of blockLines) {
+        if (blockLine === "") { if (current.length > 0) { paragraphs.push(current.join(" ")); current = []; } }
+        else current.push(blockLine);
+      }
+      if (current.length > 0) paragraphs.push(current.join(" "));
+      values[key] = paragraphs.join("\n").trim();
+    }
   }
   if (!values.name || !values.description || values.name.length > 100 || values.description.length > 1000 ||
       !/^[a-z0-9][a-z0-9_-]*$/.test(values.name)) return;
