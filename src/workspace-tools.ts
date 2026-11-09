@@ -3,7 +3,8 @@ import { relative, resolve, sep, isAbsolute } from "node:path";
 import { inspectDirectory } from "./local-inspection.js";
 import { discoverSkills, readSkill } from "./skills.js";
 
-const BLOCKED = /^(?:\.env(?:\..*)?|\.git|\.sam|node_modules|id_(?:rsa|ed25519)|.*\.(?:pem|key|p12|pfx))$/i;
+const BLOCKED = /^(?:\.env(?:\..*)?|\.git|\.sam|node_modules|\.npmrc|\.pypirc|\.netrc|\.aws|\.ssh|\.kube|kubeconfig|credentials?(?:\..*)?|secrets?(?:\..*)?|tokens?(?:\..*)?|service[-_]?account(?:\..*)?|id_(?:rsa|ed25519)|.*\.(?:pem|key|p12|pfx|jks|keystore))$/i;
+const CREDENTIAL_CONTENT = /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bAKIA[0-9A-Z]{16}\b|\bBearer\s+[A-Za-z0-9._~+/-]{12,}|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client_secret|password|secret|token)\s*[:=]\s*["']?[A-Za-z0-9._~+/-]{8,}|\b(?:gh[pousr]_[A-Za-z0-9]{30,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,})/i;
 const MAX_BYTES = 32_000;
 
 function checkedPath(root: string, requested: string, file = true): string {
@@ -56,6 +57,7 @@ export function executeWorkspaceTool(root: string, name: string, rawArgs: string
     const file = checkedPath(root,path);
     const content = readFileSync(file,"utf8");
     if (content.includes("\0")) throw new Error("Binary file denied");
+    if (CREDENTIAL_CONTENT.test(content)) throw new Error("Potential credential material detected; file content withheld");
     return JSON.stringify({ untrusted: true, path, content });
   }
   if (typeof args.query !== "string" || !args.query.trim() || args.query.length > 120)
@@ -64,6 +66,7 @@ export function executeWorkspaceTool(root: string, name: string, rawArgs: string
   const directory = path === "." ? realpathSync(resolve(root)) : checkedPath(root,path,false);
   if (!lstatSync(directory).isDirectory()) throw new Error("Not a directory");
   const matches: { path:string; line:number; text:string }[] = [];
+  let withheldSensitiveFiles = 0;
   for (const entry of readdirSync(directory).sort().slice(0,100)) {
     if (entry.startsWith(".") || BLOCKED.test(entry)) continue;
     let file: string;
@@ -71,11 +74,12 @@ export function executeWorkspaceTool(root: string, name: string, rawArgs: string
     catch { continue; }
     const contents = readFileSync(file,"utf8");
     if (contents.includes("\0")) continue;
+    if (CREDENTIAL_CONTENT.test(contents)) { withheldSensitiveFiles++; continue; }
     for (const [index,line] of contents.split("\n").entries()) {
       if (line.toLowerCase().includes(query)) matches.push({ path: path === "." ? entry : path+"/"+entry, line:index+1, text:line.slice(0,250) });
       if (matches.length >= 20) break;
     }
     if (matches.length >= 20) break;
   }
-  return JSON.stringify({ untrusted:true, matches, truncated:matches.length>=20 }).slice(0,10_000);
+  return JSON.stringify({ untrusted:true, matches, truncated:matches.length>=20, withheldSensitiveFiles }).slice(0,10_000);
 }
