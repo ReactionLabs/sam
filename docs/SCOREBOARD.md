@@ -15,7 +15,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #64 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42550646841](https://github.com/ReactionLabs/sam/actions/runs/42550646841); PR author reports 107/107 tests |
 | PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
-| Current branch | PR #66, based on PR #65; latest verified head passed Node 22/24 CI, 115/115 tests each; subsequent status refresh is docs-only | [PR #66](https://github.com/ReactionLabs/sam/pull/66), verified head `166613ef8ca0d6aa43a34f8ab85a064f868982dd`, [run #42553295849](https://github.com/ReactionLabs/sam/actions/runs/42553295849) |
+| Current branch | PR #66, based on PR #65; latest tested head passed Node 22/24 CI, 115/115 tests each | [PR #66](https://github.com/ReactionLabs/sam/pull/66), tested head `fd474ed0373df9e7aa81c41646050cc2b6e585bf`, [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897) |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
 
@@ -54,7 +54,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 - First CI run [#42552720833](https://github.com/ReactionLabs/sam/actions/runs/42552720833) exposed an existing over-escaped loopback hostname regex in `completeToolTurn`; Node 22 tests failed at the new mock-provider test and Node 24 was cancelled.
 - Fixed the regex in commit `91cedf16`. Head `7e3118ed` passed [run #42552804697](https://github.com/ReactionLabs/sam/actions/runs/42552804697): Node 22 **113/113**, Node 24 **113/113**.
 - Added a SQL-level row limit for model memory listing and tests for bounded queries and missing approval handlers. Head `c747eae` passed [run #42553001709](https://github.com/ReactionLabs/sam/actions/runs/42553001709): Node 22 **115/115**, Node 24 **115/115**.
-- Follow-up commit `866be83` applies the same query-level limit to explicit memory recall. The latest verified head `166613ef` passed [run #42553295849](https://github.com/ReactionLabs/sam/actions/runs/42553295849): Node 22 **115/115**, Node 24 **115/115**; both build and test steps succeeded. The following status refresh changes documentation only.
+- Follow-up commit `866be83` applies the same query-level limit to explicit memory recall. The latest tested head `fd474ed0` passed [run #42553391897](https://github.com/ReactionLabs/sam/actions/runs/42553391897): Node 22 **115/115**, Node 24 **115/115**; both build and test steps succeeded. A subsequent status-only sync leaves source code unchanged.
 - Windows Node 22/24 build and tests are pending.
 - Real MiniMax tool-call compatibility is pending.
 - Owner acceptance is pending: approve one memory write in a live session, exit, start a fresh process, read the exact record, then verify a denied proposal creates no record.
