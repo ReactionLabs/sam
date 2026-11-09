@@ -103,7 +103,7 @@ export function executeMemorySearch(path: string, rawArgs: string): string {
 export function executeMemoryList(path: string): string {
   const store = new MemoryStore(path);
   try {
-    const records = store.list().slice(0, 10).map(r => ({
+    const records = store.list(undefined, 10).map(r => ({
       id: r.id, kind: r.kind, source: r.source, created_at: r.created_at,
       content: r.content.slice(0, 500)
     }));
