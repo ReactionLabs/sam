@@ -1,6 +1,7 @@
 import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { connectorChat } from "./connector-chat.js";
+import { ownToolsChat } from "./own-tools.js";
 import { connectors } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
 import { readDashboardConfig } from "./dashboard.js";
@@ -38,11 +39,11 @@ export async function runChatTurn(root:string,chatId:string,content:string):Prom
     if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
     reply=await connectorChat(root,provider,model,messages,active.connector_id);
   }else if(chatAgent){
-    const result=await provider.complete({model,messages});reply=result.message.content;
+    reply=await ownToolsChat(root,profileName,provider,model,messages);
   }else{
     const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
     if(useConnectors)reply=await connectorChat(root,provider,model,messages);
-    else{const result=await provider.complete({model,messages});reply=result.message.content;}
+    else reply=await ownToolsChat(root,profileName,provider,model,messages);
   }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
   return reply;
