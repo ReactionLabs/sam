@@ -220,3 +220,27 @@ test("memory list uses a validated SQLite row limit", () => {
     assert.throws(() => store.list(undefined, 1001), /Invalid memory list limit/);
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
+
+
+test("memory add fails closed when no owner approval callback is supplied", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sam-memory-no-approval-"));
+  const db = join(dir, "memory.db");
+  let requests = 0;
+  const audit: string[] = [];
+  try {
+    const request = async (messages: ToolMessage[]): Promise<ToolTurn> => {
+      requests++;
+      if (requests === 1) return { content: null, tool_calls: [{ id: "save_no_approval", type: "function", function: {
+        name: "memory_add", arguments: JSON.stringify({ kind: "observation", content: "Approval callback is required." })
+      } }] };
+      assert.deepEqual(JSON.parse(messages.at(-1)?.content ?? "{}"), { ok: false, reason: "owner_approval_required" });
+      return { content: "No approval handler, so nothing was saved." };
+    };
+    const answer = await runMemoryToolTurn(request, [{ role: "user", content: "Remember this." }], db,
+      event => audit.push(event.status), undefined, undefined, true);
+    assert.equal(answer, "No approval handler, so nothing was saved.");
+    assert.deepEqual(audit, ["requested", "denied"]);
+    const reopened = new MemoryStore(db);
+    try { assert.equal(reopened.list().length, 0); } finally { reopened.close(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
