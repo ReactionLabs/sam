@@ -73,7 +73,11 @@ export function createBackup(root: string, destDir: string, keep = 7): BackupInf
     writeFileSync(join(staging, "manifest.json"), JSON.stringify(manifest, null, 2), { mode: 0o600 });
     const archive = "sam-state-" + stamp(created) + ".tar.gz";
     const archivePath = join(dest, archive);
-    execFileSync("tar", ["-czf", archivePath, "-C", staging, "."]);
+    // Archive the staged files by name, never ".": Windows bsdtar refuses
+    // to visit "." in a temp dir ("Couldn't visit directory: Permission
+    // denied", owner-hit on Dip's PC 2026-11-09), and an explicit operand
+    // list is deterministic on every platform's tar.
+    execFileSync("tar", ["-czf", archivePath, "-C", staging, ...files.map(f => f.name), "manifest.json"]);
     // Prune to the newest `keep` archives; names sort chronologically.
     const all = listBackups(dest);
     for (const old of all.slice(0, Math.max(0, all.length - keep))) rmSync(old.path, { force: true });
