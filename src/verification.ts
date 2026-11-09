@@ -71,6 +71,15 @@ export function recordChange(root: string, change: { path: string; replacementHa
   append(root, { type: "change", at: new Date().toISOString(), path: change.path, replacementHash: change.replacementHash, source: change.source });
 }
 
+/** Every recorded change, in ledger order. The goldfish verifier
+ *  binds its reviews to this list (hashes + count), so a review can
+ *  never silently cover changes it never saw. */
+export function listChanges(root: string): PendingChange[] {
+  return readEvents(root)
+    .filter(e => e.type === "change")
+    .map(e => { const c = e as Extract<LedgerEvent, { type: "change" }>; return { path: c.path, replacementHash: c.replacementHash, at: c.at, source: c.source }; });
+}
+
 /** Record an approved verification run's verdict. Called by the
  *  approved test runner for both kinds (build, test). */
 export function recordVerification(root: string, run: { kind: "build" | "test"; passed: boolean; runId: string }): void {

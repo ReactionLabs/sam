@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, writeFileSync, renameSync, unlinkSync, openSync, closeSync, mkdirSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync, writeFileSync, renameSync, unlinkSync, openSync, closeSync, mkdirSync } from "node:fs";
 import { recordChange } from "./verification.js";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -90,7 +90,8 @@ export function applyEdit(root:string,id:string,confirmedDigest:string) {
   if(expected.digest!==confirmedDigest || expected.replacementHash!==proposal.replacementHash || Buffer.byteLength(proposal.replacement)>LIMIT)
     throw new Error("Proposal integrity check failed");
   const target=targetPath(root,proposal.path);
-  if(hash(readFileSync(target))!==proposal.originalHash) throw new Error("Target changed since proposal");
+  const beforeBytes=readFileSync(target);
+  if(hash(beforeBytes)!==proposal.originalHash) throw new Error("Target changed since proposal");
   const temp=join(dirname(target),".sam-edit-"+randomUUID()+".tmp");
   const fd=openSync(temp,"wx",0o600);
   try {
@@ -105,6 +106,17 @@ export function applyEdit(root:string,id:string,confirmedDigest:string) {
     try { closeSync(fd); } catch {}
     try { unlinkSync(temp); } catch {}
     throw error;
+  }
+  // Change artifact for the goldfish verifier: the before/after pair,
+  // keyed by the replacement hash, so a fresh-context reviewer can
+  // reconstruct exactly what this apply did without any conversation.
+  const changesDir=join(proposalDir(root),"changes");
+  mkdirSync(changesDir,{recursive:true,mode:0o700});
+  const artifact=join(changesDir,proposal.replacementHash+".json");
+  if(!existsSync(artifact)) {
+    const fd=openSync(artifact,"wx",0o600);
+    try { writeFileSync(fd,JSON.stringify({path:proposal.path,before:beforeBytes.toString("utf8"),after:proposal.replacement,at:new Date().toISOString()}),"utf8"); }
+    finally { closeSync(fd); }
   }
   // Verify-on-stop: an applied change is recorded as unverified the
   // moment it lands. It is not done until a fresh build and test pass

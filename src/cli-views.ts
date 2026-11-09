@@ -10,6 +10,7 @@ import { standingSummary } from "./standing-files.js";
 import { listCompactions } from "./compaction.js";
 import type { ChatCompaction } from "./chats.js";
 import { verificationStatus, type VerificationStatus } from "./verification.js";
+import { goldfishStatus, type GoldfishState } from "./goldfish.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -41,6 +42,7 @@ export function statusSnapshot(root: string): {
   standingFiles: Array<{ profile: string; files: string[]; chars: number }>;
   compactions: ChatCompaction[];
   verification: VerificationStatus;
+  goldfish: { state: GoldfishState; verdict: string | null; uncoveredChanges: number };
 } {
   return {
     at: new Date().toISOString(),
@@ -54,5 +56,6 @@ export function statusSnapshot(root: string): {
     standingFiles: standingSummary(root),
     compactions: listCompactions(root),
     verification: verificationStatus(root),
+    goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
   };
 }

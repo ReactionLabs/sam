@@ -14,6 +14,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { verificationGate, verificationStatus } from "./verification.js";
+import { goldfishStatus, runGoldfishReview, sessionGate } from "./goldfish.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, addHeartbeatJob, removeHeartbeatJob, runHeartbeat, deliverToChannel } from "./heartbeat.js";
@@ -149,7 +150,26 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .action(async(options:{id:string;confirm:string;timeout:string})=>
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 const verifyCmd=program.command("verify").description("Verify-on-stop: applied changes stay unverified until a fresh approved build AND test pass after the last change; the gate is the only 'done' check");
-verifyCmd.command("status").description("Show the verification ledger state and whether a session holding these changes may close").action(()=>{const root=program.opts().workspace;output({status:verificationStatus(root),gate:verificationGate(root)});});
+verifyCmd.command("status").description("Show the verification ledger state and whether a session holding these changes may close").action(()=>{const root=program.opts().workspace;output({status:verificationStatus(root),gate:verificationGate(root),goldfish:goldfishStatus(root),session:sessionGate(root)});});
+const goldfishCmd=program.command("goldfish").description("Goldfish verifier: fresh-context review (diff + spec + live source + Pattern Catalog, no conversation history) with the last word on 'done'");
+goldfishCmd.command("status").description("Show the latest goldfish verdict, its coverage, and the combined session gate").action(()=>{const root=program.opts().workspace;output({status:goldfishStatus(root),session:sessionGate(root)});});
+goldfishCmd.command("review").description("Run one fresh-context goldfish review over the changes no review has covered yet")
+  .requiredOption("--live","Explicitly allow one model API request (may incur charges)")
+  .requiredOption("--spec <text>","The task spec the change was made against")
+  .option("--model <id>","Reviewer model ID")
+  .option("--timeout <seconds>","Model request timeout, 5 to 120 seconds","90")
+  .action(async(options:{live:boolean;spec:string;model?:string;timeout:string})=>{
+    const selected=process.env.SAM_MODEL_PROVIDER??"";
+    const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+    const model=options.model??process.env.SAM_GOLDFISH_MODEL??process.env.SAM_MODEL;
+    if(!endpoint || !model) throw new Error("Configure SAM_MODEL_ENDPOINT/SAM_MODEL or SAM_MODEL_PROVIDER=minimax/SAM_MODEL");
+    const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined);
+    if(!key) throw new Error("Missing model API key");
+    const seconds=Number(options.timeout);
+    if(!Number.isInteger(seconds) || seconds<5 || seconds>120) throw new Error("Timeout must be 5 to 120 seconds");
+    const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
+    output(await runGoldfishReview(program.opts().workspace,options.spec,model,provider));
+  });
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
 channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));
