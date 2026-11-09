@@ -95,7 +95,7 @@ test("MCP connector registry validates persisted credential references and exact
   assert.throws(()=>connectors(root),/Invalid connector tool allowlist/);
   writeFileSync(file,JSON.stringify([{...valid,credential:"must-not-be-stored"}]));
   assert.throws(()=>connectors(root),/Invalid connector registry entry/);
-  writeFileSync(file,JSON.stringify([valid,{...valid,id:"123e4567-e89b-12d3-a456-426614174001",name:"Test 2"}]));
+  writeFileSync(file,JSON.stringify([valid,{...valid,name:"Test 2"}]));
   assert.throws(()=>connectors(root),/Duplicate connector identity/);
   writeFileSync(file,JSON.stringify([valid]));
   assert.deepEqual(connectors(root),[valid]);
