@@ -11,7 +11,7 @@ The dashboard is real and already exists on the integration branch. The current 
 - **Main:** still contains the earlier CLI and mission-runtime foundation.
 - **Integration PR [#64](https://github.com/ReactionLabs/sam/pull/64):** folds the post-#18 feature stack into main, including Mission Control, durable chats and branches, agent profiles, model chat, skills discovery, bounded CLI memory/workspace tools, research-team workflows, MCP connectors, and the offline-runner clock fence. It is open and unmerged.
 - **Connector hardening PR [#65](https://github.com/ReactionLabs/sam/pull/65):** validates the persisted MCP connector registry before credential use. It is a draft stacked on #64 and is also unmerged.
-- **Current build branch:** adds an explicitly opted-in model memory write tool. Each proposed write requires a local owner confirmation. CI and live Windows/MiniMax verification are pending.
+- **Current build branch:** adds an explicitly opted-in model memory write tool. Each proposed write requires a local owner confirmation. GitHub Actions passed on Node 22 and Node 24 with 113/113 tests each; Windows and live MiniMax verification are pending.
 
 Do not treat any unmerged PR as part of main. Do not merge or deploy without owner approval.
 
@@ -64,7 +64,7 @@ The current branch adds:
 - Validation of the memory kind and content size, plus rejection of common credential patterns before owner confirmation.
 - A success response containing the persisted record ID, and a durable audit event containing that ID.
 
-A model proposal is not a saved record. If the owner declines, the tool returns a denial and no record is written. This branch's tests, Windows verification, and live MiniMax acceptance test are still pending. Memory update/delete through model tools is not implemented.
+A model proposal is not a saved record. If the owner declines, the tool returns a denial and no record is written. GitHub Actions passes 113/113 tests on Node 22 and Node 24. Windows verification and the live MiniMax acceptance test are still pending. Memory update/delete through model tools is not implemented.
 
 ### Memory
 
