@@ -11,7 +11,7 @@ The dashboard is real and already exists on the integration branch. The current 
 - **Main:** still contains the earlier CLI and mission-runtime foundation.
 - **Integration PR [#64](https://github.com/ReactionLabs/sam/pull/64):** folds the post-#18 feature stack into main, including Mission Control, durable chats and branches, agent profiles, model chat, skills discovery, bounded CLI memory/workspace tools, research-team workflows, MCP connectors, and the offline-runner clock fence. It is open and unmerged.
 - **Connector hardening PR [#65](https://github.com/ReactionLabs/sam/pull/65):** validates the persisted MCP connector registry before credential use. It is a draft stacked on #64 and is also unmerged.
-- **Current build branch:** adds an explicitly opted-in model memory write tool. Each proposed write requires a local owner confirmation. The latest branch head passed GitHub Actions run [#42553221250](https://github.com/ReactionLabs/sam/actions/runs/42553221250) on Node 22 and Node 24 with 115/115 tests each. Windows and live MiniMax verification are still pending.
+- **Current build branch:** adds an explicitly opted-in model memory write tool. Each proposed write requires a local owner confirmation. The latest verified branch head `166613ef` passed GitHub Actions run [#42553295849](https://github.com/ReactionLabs/sam/actions/runs/42553295849) on Node 22 and Node 24 with 115/115 tests each. Windows and live MiniMax verification are still pending.
 
 Do not treat any unmerged PR as part of main. Do not merge or deploy without owner approval.
 
