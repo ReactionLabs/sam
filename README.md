@@ -45,7 +45,7 @@ Configure a supported OpenAI-compatible endpoint or MiniMax, then use:
 node dist/cli.js talk --live
 ```
 
-The terminal chat keeps a bounded in-memory conversation for the current process. It does not persist the transcript.
+The terminal chat keeps a bounded in-memory conversation for the current process. It does not persist the transcript. SAM's system identity now describes only the capabilities explicitly enabled for that session; tool-enabled sessions receive a separate capability contract before user messages. No general shell or desktop-control access is implied.
 
 On the integration stack:
 
