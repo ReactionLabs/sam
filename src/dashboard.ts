@@ -72,10 +72,16 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     };
     const route=`/api/${token}`;
     if(req.method==="POST" && req.url===route+"/chats"){
-      try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid title");const db=new ChatStore(workspace);try{json(201,db.create(body.title));}finally{db.close();}}catch{json(400,{error:"Unable to create chat"});}return;
+      try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid title");let agentName:string|null=null;
+        if(body.agent!==undefined&&body.agent!=="sam"){if(typeof body.agent!=="string")throw Error("Invalid agent");if(!chatStoreAgents(workspace).some(a=>a.name===body.agent))throw Error("Unknown agent");agentName=body.agent;}
+        const db=new ChatStore(workspace);try{json(201,db.create(body.title,agentName));}finally{db.close();}}catch{json(400,{error:"Unable to create chat"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/agents"){
-      try{const body=await post();if(typeof body.name!=="string"||typeof body.instructions!=="string")throw Error("Invalid agent");const db=new ChatStore(workspace);try{json(201,db.createAgent(body.name,body.instructions));}finally{db.close();}}catch{json(400,{error:"Unable to create agent"});}return;
+      try{const body=await post();if(typeof body.name!=="string"||typeof body.instructions!=="string")throw Error("Invalid agent");
+        const model=body.model===undefined?null:body.model;const connectorId=body.connectorId===undefined?null:body.connectorId;
+        if(model!==null&&typeof model!=="string")throw Error("Invalid agent");
+        if(connectorId!==null&&(typeof connectorId!=="string"||!connectors(workspace).some(c=>c.id===connectorId)))throw Error("Unknown connector");
+        const db=new ChatStore(workspace);try{json(201,db.createAgent(body.name,body.instructions,{model,connectorId}));}finally{db.close();}}catch{json(400,{error:"Unable to create agent"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/config"){
       try{json(200,saveDashboardConfig(workspace,await post()));}catch{json(400,{error:"Invalid configuration"});}return;
@@ -105,10 +111,12 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     if(req.method==="POST"&&branchMatch){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
     }
-    const editChat=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/(rename|pin)$"));
+    const editChat=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/(rename|pin|profile)$"));
     if(req.method==="POST"&&editChat){
       try{const body=await post();const db=new ChatStore(workspace);try{
-        const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned));
+        let profileOk=true;
+        if(editChat[2]==="profile"){const a=body.agent;if(a!==null&&a!=="sam"&&!(typeof a==="string"&&chatStoreAgents(workspace).some(x=>x.name===a)))profileOk=false;}
+        const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):editChat[2]==="pin"?(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned)):(profileOk&&db.setAgent(editChat[1],body.agent==="sam"?null:(body.agent as string|null)));
         if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
       }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
     }
@@ -123,19 +131,31 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
         const providerName=process.env.SAM_MODEL_PROVIDER??"";
         const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
-        const model=process.env.SAM_MODEL;
-        if(!endpoint||!model)throw Error("Model not configured");
+        if(!endpoint)throw Error("Model not configured");
         const key=process.env.SAM_MODEL_API_KEY??(providerName==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
         const provider=new OpenAICompatibleProvider(endpoint,key,60000);
-        const db=new ChatStore(workspace);let history;
-        try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");db.add(id,"user",body.content);}finally{db.close();}
-        const config=readDashboardConfig(workspace);const profiles=chatStoreAgents(workspace);const active=profiles.find(a=>a.name===config.defaultAgent);
-        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning and renaming chats using the three-dot menu, creating named agent profiles, and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Approved read-only MCP connector tools may be available if configured. Do not invent folders, archive, search, or other unsupported UI features. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
-        const useConnectors=connectors(workspace).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-        const result=useConnectors?{message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}}:await provider.complete({model,messages});
+        const db=new ChatStore(workspace);let history;let chatAgent:string|null=null;
+        try{history=db.messages(id);if(history.length>=100)throw Error("Chat history limit reached");chatAgent=db.list().find(c=>c.id===id)?.agent_name??null;db.add(id,"user",body.content);}finally{db.close();}
+        const config=readDashboardConfig(workspace);const profiles=chatStoreAgents(workspace);const active=profiles.find(a=>a.name===(chatAgent??config.defaultAgent));
+        const model=active?.model??process.env.SAM_MODEL;
+        if(!model)throw Error("Model not configured");
+        const messages=[{role:"system" as const,content:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Approved read-only MCP connector tools may be available if configured for the active profile. Do not invent folders, archive, search, or other unsupported UI features. "+(active?"Adopt the role of agent "+active.name+": "+active.instructions:"")},...history.slice(-24).map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:body.content}];
+        let result;
+        if(active?.connector_id){
+          // A profile connector pin governs absolutely: that connector, or a loud failure.
+          const pinned=connectors(workspace).find(c=>c.id===active.connector_id);
+          if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
+          result={message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages,active.connector_id)}};
+        }else if(chatAgent){
+          // A chat pinned to a profile without a connector is sandboxed: plain model, no live data.
+          result=await provider.complete({model,messages});
+        }else{
+          const useConnectors=connectors(workspace).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+          result=useConnectors?{message:{role:"assistant" as const,content:await connectorChat(workspace,provider,model,messages)}}:await provider.complete({model,messages});
+        }
         const saved=new ChatStore(workspace);try{saved.add(id,"assistant",result.message.content); }finally{saved.close();}
         json(200,{reply:result.message});
-      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
+      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
     if(req.method!=="GET"){res.writeHead(405);res.end();return;}
     if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}

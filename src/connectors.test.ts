@@ -62,3 +62,21 @@ test("MCP handshake retains session, discovers read tools, and rejects writes",a
   rmSync(root,{recursive:true,force:true});
  }
 });
+
+test("loopback MCP needs an allowlisted host, and trading tools are authorized read-only",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-mcp-loop-"));
+ const before=process.env.SAM_MCP_ALLOWED_HOSTS;
+ try{
+  process.env.SAM_MCP_ALLOWED_HOSTS="mcp.secondshiftos.com,127.0.0.1";
+  const c=addConnector(root,"Nines","http://127.0.0.1:4390/mcp/v1","SAM_MCP_TOKEN_NINES");
+  assert.ok(c.allowedTools.includes("stack_health"));
+  assert.ok(c.allowedTools.includes("coin_lookup"));
+  await assert.rejects(mcpCall(c,"tools/call",{},"stack_health"),/credential missing/);
+  await assert.rejects(mcpCall(c,"tools/call",{},"drop_table"),/not authorized/);
+  process.env.SAM_MCP_ALLOWED_HOSTS="mcp.secondshiftos.com";
+  assert.throws(()=>addConnector(root,"bad","http://127.0.0.1:4390/mcp/v1","SAM_MCP_TOKEN_NINES"),/HTTPS/);
+ }finally{
+  if(before===undefined)delete process.env.SAM_MCP_ALLOWED_HOSTS;else process.env.SAM_MCP_ALLOWED_HOSTS=before;
+  rmSync(root,{recursive:true,force:true});
+ }
+});

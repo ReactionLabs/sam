@@ -66,3 +66,28 @@ test("chat pin and rename persist, pinned chats sort first",()=>{
   reopened.close();
  }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("agent profiles carry model and connector pins, and chats bind to a profile",()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-profiles-"));
+  try{
+    const db=new ChatStore(root);
+    const cid="123e4567-e89b-42d3-a456-426614174000";
+    const agent=db.createAgent("trading","Watch the stack",{model:"MiniMax-M3",connectorId:cid});
+    assert.equal(agent.model,"MiniMax-M3");
+    assert.equal(agent.connector_id,cid);
+    assert.throws(()=>db.createAgent("badmodel","x",{model:"not a model"}),/Invalid agent/);
+    assert.throws(()=>db.createAgent("badconn","x",{connectorId:"nope"}),/Invalid agent/);
+    const chat=db.create("Trading desk","trading");
+    assert.equal(chat.agent_name,"trading");
+    const child=db.branch(chat.id,"Trading branch");
+    assert.equal(child.agent_name,"trading");
+    const plain=db.create("Plain chat");
+    assert.equal(plain.agent_name,null);
+    db.close();
+    const reopened=new ChatStore(root);
+    assert.equal(reopened.agents()[0].model,"MiniMax-M3");
+    assert.equal(reopened.agents()[0].connector_id,cid);
+    assert.equal(reopened.list().find(c=>c.id===chat.id)?.agent_name,"trading");
+    reopened.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
+});

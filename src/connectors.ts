@@ -3,15 +3,29 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 export type Connector = { id:string; name:string; url:string; tokenEnv:string; enabled:boolean; allowedTools:string[] };
-const readOnlyTools = new Set(["whoami","list_leads","get_lead","pipeline_summary","analytics_summary"]);
+// Every tool SAM may ever call, across all known MCP servers. All are read-only by
+// construction on their servers; authorization still intersects this set with the
+// connector's own allowedTools and the tools the server actually advertises.
+export const readOnlyTools = new Set(["whoami","list_leads","get_lead","pipeline_summary","analytics_summary","coin_lookup","list_candidates","list_alerts","paper_setups","stack_health"]);
 const namePattern = /^[A-Za-z0-9 _.-]{1,64}$/;
 const envPattern = /^SAM_MCP_TOKEN_[A-Z0-9_]{1,64}$/;
 function path(root:string){return join(resolve(root),".sam","connectors.json");}
 function allowedUrl(raw:string):string{
  const u=new URL(raw);
- if(u.protocol!=="https:"||u.username||u.password||u.hash||u.search||u.port)throw Error("MCP endpoint must be a plain HTTPS URL");
+ if(u.username||u.password||u.hash||u.search)throw Error("MCP endpoint must be a plain URL");
  const allowed=(process.env.SAM_MCP_ALLOWED_HOSTS??"mcp.secondshiftos.com").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean);
- if(!allowed.includes(u.hostname.toLowerCase()))throw Error("MCP host not allowlisted. Set SAM_MCP_ALLOWED_HOSTS locally.");
+ const host=u.hostname.toLowerCase();
+ const loopback=host==="127.0.0.1"||host==="localhost"||host==="::1";
+ // Narrow loopback exception: a same-machine MCP server (e.g. the Nines MCP on
+ // Johnny's box) may use plain http on an explicit port, but only when the
+ // operator allowlisted the loopback host by name. Remote stays HTTPS-only.
+ if(loopback&&allowed.includes(host)){
+  if(u.protocol!=="http:")throw Error("Loopback MCP endpoint must use plain http on this machine");
+  if(!u.port)throw Error("Loopback MCP endpoint needs an explicit port");
+  return u.toString();
+ }
+ if(u.protocol!=="https:"||u.port)throw Error("MCP endpoint must be a plain HTTPS URL");
+ if(!allowed.includes(host))throw Error("MCP host not allowlisted. Set SAM_MCP_ALLOWED_HOSTS locally.");
  return u.toString();
 }
 export function connectors(root:string):Connector[]{
@@ -109,6 +123,6 @@ export async function testConnector(c:Connector){
  return {initialized:true,protocolVersion:session.version,tools,approved:tools.filter(x=>readOnlyTools.has(x)&&c.allowedTools.includes(x))};
 }
 export async function readConnectorTool(c:Connector,tool:string,args:Record<string,unknown>={}){
- if(!["whoami","pipeline_summary","list_leads"].includes(tool))throw Error("Tool not available in first connector slice");
+ if(!readOnlyTools.has(tool)||!c.allowedTools.includes(tool))throw Error("Tool not authorized for this connector");
  return mcpCall(c,"tools/call",args,tool);
 }
