@@ -15,7 +15,7 @@ Connect the existing local Mission Control dashboard, live model runtime, persis
 | PR #64 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42550646841](https://github.com/ReactionLabs/sam/actions/runs/42550646841); PR author reports 107/107 tests |
 | PR #65 | Draft, open, not merged; strict validation of persisted MCP connector registry; based on PR #64 | [PR #65](https://github.com/ReactionLabs/sam/pull/65), head `24dc4a69e7ad6819a7e7d7be2c3124a4b453cd67` |
 | PR #65 CI | Passed on Node 22 and Node 24; build and test steps succeeded | [Run #42551687637](https://github.com/ReactionLabs/sam/actions/runs/42551687637); PR author reports 108/108 tests on each version |
-| Current branch | PR #66, based on PR #65; code and tests added, first CI attempt failed on a loopback-only mock endpoint check; fix pushed, rerun pending | [PR #66](https://github.com/ReactionLabs/sam/pull/66), latest fix `91cedf16c2c179b8ddaefc4f34a277265ee8ae72` |
+| Current branch | PR #66, based on PR #65; CI green on Node 22 and Node 24, 113/113 tests each | [PR #66](https://github.com/ReactionLabs/sam/pull/66), head `7e3118eddee80c9e93490a768759d31dad255be5`, [run #42552804697](https://github.com/ReactionLabs/sam/actions/runs/42552804697) |
 
 PR #64's integration description says its stack includes the Mission Control dashboard, chats, branches, agent profiles, connector UI, model conversation, memory/workspace tools, skills, research team, and PR #19's offline-runner clock fence. The individual stacked PRs remain open in GitHub; do not merge them independently while #64 is the integration path.
 
@@ -50,8 +50,8 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 
 ### Not yet verified
 
-- First CI run [#42552720833](https://github.com/ReactionLabs/sam/actions/runs/42552720833): Node 22 build passed, but tests failed because the new loopback mock-provider test was rejected by an over-escaped IPv4/IPv6 hostname regex in `completeToolTurn`; Node 24 was cancelled after the Node 22 failure.
-- Fixed the tool transport loopback regex in commit `91cedf16`; the corrected head has not yet completed CI.
+- First CI run [#42552720833](https://github.com/ReactionLabs/sam/actions/runs/42552720833) exposed an existing over-escaped loopback hostname regex in `completeToolTurn`; Node 22 tests failed at the new mock-provider test and Node 24 was cancelled.
+- Fixed the regex in commit `91cedf16`. Exact current head `7e3118ed` passed [run #42552804697](https://github.com/ReactionLabs/sam/actions/runs/42552804697): Node 22 **113/113**, Node 24 **113/113**; both build and test steps succeeded.
 - Windows Node 22/24 build and tests are pending.
 - Real MiniMax tool-call compatibility is pending.
 - Owner acceptance is pending: approve one memory write in a live session, exit, start a fresh process, read the exact record, then verify a denied proposal creates no record.
@@ -79,7 +79,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 ## Current blockers
 
 1. The integrated dashboard stack is still an open PR, not main.
-2. The first memory-write CI attempt failed on the mock loopback endpoint guard; a fix is pushed and the rerun is pending. Windows/live MiniMax verification is also pending.
+2. CI is green on Node 22/24; Windows owner verification and live MiniMax tool-call verification remain pending.
 3. Dashboard chat still lacks the local memory/workspace tool loop.
 4. Multi-profile configuration is not equivalent to independent Agent Boxes. Current profiles share workspace-level stores, connectors, and process environment.
 5. Do not install untrusted skills or Agent Reach dependencies, add credentials, expose the dashboard, merge, or deploy without owner approval.
@@ -91,7 +91,7 @@ Branch: `feat/approved-model-memory-write-20261109`, based on PR #65.
 - **Targets:** `src/memory-tool.ts`, `src/openai-compatible.ts`, `src/cli.ts`, `src/memory-tool.test.ts`, `src/openai-compatible.test.ts`.
 - **Acceptance:** Node 22/24 CI green; Windows build and full tests green; MiniMax actually requests `memory_add`; owner approval writes a record with runtime provenance; a fresh `talk --live` process can retrieve it; declining approval writes nothing; credential-like input is rejected; audit contains the persisted record ID.
 - **Dependencies:** PR #64 integration stack and PR #65 connector hardening.
-- **Ready:** code and offline tests are staged on the current branch.
+- **Ready:** code and Node 22/24 CI are green on PR #66.
 - **Not ready:** merge, live MiniMax verification, Windows owner acceptance.
 
 After this passes, connect the **existing** dashboard chat to the same memory/workspace tool router with explicit owner-controlled read grants and approval-gated memory writes. Do not build a second dashboard.
