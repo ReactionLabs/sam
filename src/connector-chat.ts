@@ -104,8 +104,8 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
  // The synthesis step is tool-free; a model that still asks for tools gets a
  // plain partial answer, not a dead turn.
  if(final.calls.length||exhausted){
-  if(!exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
-  return budgetFallbackAnswer(executed,skipped,budget.maxCalls);
+  if(!exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
+  return budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps");
  }
  return "MCP results received but no summary was produced.";
 }

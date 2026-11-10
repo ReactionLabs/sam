@@ -442,8 +442,8 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  const final=await provider.completeConnectorTurn(model,messages,[]);
  if(final.content)return final.content;
  if(final.calls.length||exhausted){
-  if(!exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
-  return budgetFallbackAnswer(executed,skipped,budget.maxCalls);
+  if(!exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
+  return budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps");
  }
  return "Results received but no summary was produced.";
 }

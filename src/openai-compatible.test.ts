@@ -51,7 +51,7 @@ test("provider retries an empty completion once, then surfaces it (owner defect 
   } finally { server.close(); await once(server, "close"); }
 });
 
-test("provider gives up after two empty completions", async () => {
+test("provider gives up after three empty completions", async () => {
   let hits = 0;
   const server = createServer((_req, res) => {
     hits++;
@@ -65,21 +65,19 @@ test("provider gives up after two empty completions", async () => {
     if (!addr || typeof addr === "string") throw new Error("No port");
     const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
     await assert.rejects(provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []), /Empty model response/);
-    assert.equal(hits, 2);
+    assert.equal(hits, 3);
   } finally { server.close(); await once(server, "close"); }
 });
 
-test("provider retries a markup-leaking completion once, then surfaces it (owner defect 2026-11-10)", async () => {
+test("provider strips a markup leak and keeps the prose (owner defect 2026-11-10)", async () => {
   let hits = 0;
   const server = createServer((_req, res) => {
     hits++;
     res.setHeader("Content-Type", "application/json");
-    // First attempt: MiniMax leaked tool markup into the visible
-    // content, which the connector path refuses as unsafe. Second
-    // attempt answers cleanly. No tool has executed for either
-    // call, so the fresh attempt cannot double-run anything.
-    if (hits === 1) res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Working on it <tool_call>{\"name\":\"x\"}</tool_call>" } }] }));
-    else res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Recovered answer" } }] }));
+    // MiniMax leaked tool markup into the visible content around
+    // real prose. The leak is machinery, not an answer failure: the
+    // prose is the answer, stripped and returned on the first hit.
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Working on it <tool_call>{\"name\":\"x\"}</tool_call>" } }] }));
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -88,17 +86,17 @@ test("provider retries a markup-leaking completion once, then surfaces it (owner
     if (!addr || typeof addr === "string") throw new Error("No port");
     const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
     const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []);
-    assert.equal(turn.content, "Recovered answer");
-    assert.equal(hits, 2);
+    assert.equal(turn.content, "Working on it");
+    assert.equal(hits, 1);
   } finally { server.close(); await once(server, "close"); }
 });
 
-test("provider gives up after two markup-leaking completions", async () => {
+test("provider gives up after three leak-only completions", async () => {
   let hits = 0;
   const server = createServer((_req, res) => {
     hits++;
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Still leaking <tool_call>x</tool_call>" } }] }));
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "<tool_call>x</tool_call>" } }] }));
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -107,7 +105,7 @@ test("provider gives up after two markup-leaking completions", async () => {
     if (!addr || typeof addr === "string") throw new Error("No port");
     const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
     await assert.rejects(provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []), /Unsafe model output/);
-    assert.equal(hits, 2);
+    assert.equal(hits, 3);
   } finally { server.close(); await once(server, "close"); }
 });
 
