@@ -193,6 +193,43 @@ export function validateGitPushDetail(root: string, detail: string): { branch: s
   return { branch };
 }
 
+/** Every path the working tree disagrees with HEAD about (staged,
+ *  unstaged, and untracked), with deletions flagged. Built for the
+ *  managed engine runtime (C6): the engine writes files directly,
+ *  so this porcelain read is how SAM learns exactly what it did.
+ *  Rename entries report the new path (the old path is gone from
+ *  the tree either way). Throws when the code root is not the git
+ *  repository root - callers gate on gitRepoRoot first. */
+export function worktreeChanges(root: string): Array<{ path: string; deleted: boolean }> {
+  const repo = gitRepoRoot(root);
+  if (!repo) throw new Error("The code root is not a git repository rooted at itself");
+  const probe = gitSync(repo, ["status", "--porcelain=v1", "-z", "--untracked-files=normal"]);
+  if (!probe.ok) throw new Error("Could not read the code root's git status: " + probe.out.slice(0, 200));
+  const fields = probe.out.split("\0");
+  const out: Array<{ path: string; deleted: boolean }> = [];
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i];
+    if (!entry || entry.length < 4) continue;
+    const xy = entry.slice(0, 2);
+    const path = entry.slice(3);
+    if (!path) continue;
+    // A rename/copy entry is followed by its source path field.
+    if (xy.includes("R") || xy.includes("C")) i++;
+    out.push({ path, deleted: xy.includes("D") });
+  }
+  return out;
+}
+
+/** A file's content at HEAD, or null when HEAD has no such file
+ *  (a creation) or it cannot be read as text. The "before" half of
+ *  an engine change record. */
+export function headFileContent(root: string, rel: string): string | null {
+  const repo = gitRepoRoot(root);
+  if (!repo) return null;
+  const probe = gitSync(repo, ["show", "HEAD:" + rel]);
+  return probe.ok ? probe.out : null;
+}
+
 export type GitPushRunner = (file: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ exitCode: number | null; output: string }>;
 
 /** The gated landing act itself: push ONE sam/* branch to origin.

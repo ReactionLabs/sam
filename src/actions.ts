@@ -12,6 +12,7 @@ import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js
 import { createDraft } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
 import { pushBranch, validateGitPushDetail } from "./git-work.js";
+import { queueEngineTask, validateEngineDetail } from "./engine.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -26,10 +27,15 @@ import { pushBranch, validateGitPushDetail } from "./git-work.js";
 // act for coding-loop work, validated at proposal time so a card that
 // cannot execute is never shown, consequential so smart mode can
 // never auto-approve it, and with no force flag and no PR creation.
+// One more kind rides on the coder program's end state (C6, Phase D
+// item 6): "engine" queues a managed Claude Code run inside the C4
+// branch sandbox; SAM records, verifies, reviews, and commits the
+// engine's work itself, and the run executes nothing until the owner
+// approves - approval queues it, the drain runs it.
 // No external sends, no service control, no money, no trading - widening this
 // list is an owner decision, never a model decision. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -47,7 +53,7 @@ export interface ActionProposal {
   risk: ProposalRisk | null;
   decidedBy: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
@@ -137,6 +143,15 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // remote - so the owner is never shown a card that cannot execute,
   // and no other branch (main included) can ever be proposed.
   if (input.kind === "git-push") validateGitPushDetail(root, detail);
+  // Managed engine runtime (Phase D item 6, C6): an engine run is
+  // validated at proposal time - task shape, a designated GIT code
+  // root (the branch sandbox), and the engine binary actually
+  // installed - and it needs a chat to report back into (the
+  // proposal's own chat, or one named in the detail).
+  if (input.kind === "engine") {
+    const parsed = validateEngineDetail(root, detail);
+    if (!input.chatId && !parsed.chatId) throw new Error("An engine proposal needs a chat to report back into - propose it from inside a chat, or name chatId in the detail");
+  }
   // The hardline never-list (Phase D item 1) binds at PROPOSAL time,
   // in every approval mode: a command-form payload (rm -rf /, a fork
   // bomb, mkfs, dd onto a device, a URL piped to a root shell) is
@@ -240,6 +255,18 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const { branch } = validateGitPushDetail(root, a.detail);
     const pushed = await pushBranch(root, branch);
     return "Pushed branch " + pushed.branch + " to origin (" + pushed.sha.slice(0, 12) + ") - no pull request was opened; that stays the owner's act";
+  }
+  if (a.kind === "engine") {
+    // C6 managed engine runtime: approval QUEUES the run - it does
+    // not execute inline. The heartbeat tick (or `engine drain`)
+    // runs the engine inside the task's branch sandbox, and SAM
+    // records, verifies, reviews, and commits its work before
+    // anything counts as done. Validation runs again inside
+    // queueEngineTask, so a record written around the proposal-time
+    // checks still cannot queue an unrunnable task.
+    const { task, chatId } = validateEngineDetail(root, a.detail);
+    const queued = queueEngineTask(root, { actor: a.actor, chatId: a.chatId ?? chatId ?? "", spec: task });
+    return "Engine run queued (" + queued.id + ") - the managed engine (Claude Code) will run it inside a sam/<task> branch sandbox on the next drain; SAM verifies, reviews, and commits its work, and the summary posts into the chat";
   }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));

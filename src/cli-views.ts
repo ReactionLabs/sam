@@ -22,6 +22,7 @@ import { skillAllowlists } from "./skills.js";
 import { loadApprovalPolicy, type ApprovalPolicy } from "./approval-policy.js";
 import { codeSummary } from "./code.js";
 import { codingSummary, type CodingTask } from "./coding.js";
+import { engineStatus, type EngineTask } from "./engine.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -65,6 +66,7 @@ export function statusSnapshot(root: string): {
   approvals: ApprovalPolicy;
   code: { root: string | null; writes: number; commands: string[] };
   coding: { root: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: CodingTask[] };
+  engine: { installed: boolean; binary: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[] };
 } {
   return {
     at: new Date().toISOString(),
@@ -90,5 +92,6 @@ export function statusSnapshot(root: string): {
     approvals: loadApprovalPolicy(root),
     code: codeSummary(root),
     coding: codingSummary(root),
+    engine: engineStatus(root),
   };
 }

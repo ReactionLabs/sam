@@ -11,6 +11,7 @@ import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { drainCodingTasks, type CodingTask } from "./coding.js";
+import { drainEngineTasks, type EngineTask } from "./engine.js";
 import type { GoldfishRecord } from "./goldfish.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
@@ -264,7 +265,7 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord> }
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
 // Default no-agent script runner: execFile on the allowlist argv -
 // no shell, a 60s timeout, a bounded buffer. A non-zero exit is a
 // result the caller logs, not a throw; an unknown script name or a
@@ -281,7 +282,7 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]}}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]}}>{
  const consolidation=consolidatePreferences(root);
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
@@ -406,7 +407,12 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // verifies, and iterates without the owner watching it happen.
  const coding=await drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn,review:deps.reviewCoding});
  if(coding.ran.length||coding.blocked.length||coding.failed.length||coding.recovered.length)appendLog(root,{type:"coding",ran:coding.ran.length,blocked:coding.blocked.length,failed:coding.failed.length,recovered:coding.recovered.length});
- return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding};
+ // Coder C6: the same tick drains the managed engine queue, after
+ // the coding loop - one owner-approved engine run per tick inside
+ // its branch sandbox, with SAM verifying and reviewing its work.
+ const engine=await drainEngineTasks(root,{review:deps.reviewEngine});
+ if(engine.ran.length||engine.blocked.length||engine.failed.length||engine.recovered.length)appendLog(root,{type:"engine",ran:engine.ran.length,blocked:engine.blocked.length,failed:engine.failed.length,recovered:engine.recovered.length});
+ return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding,engine};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.

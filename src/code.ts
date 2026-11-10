@@ -239,6 +239,16 @@ function writeCodeFileInternal(root: string, actor: string, rel: string, content
     beforeHash: created ? null : sha(before), afterHash: sha(content),
     addedLines: added, removedLines: removed, diff,
   };
+  persistCodeWrite(root, record, before, content);
+  return { ...record, verification: "pending" };
+}
+
+/** Ledger one code write that has ALREADY landed on disk: the writes
+ *  ledger line, the goldfish change artifact, the activity line, and
+ *  the verify-on-stop change entry - the exact four records
+ *  writeCodeFileInternal writes for its own writes. */
+function persistCodeWrite(root: string, record: CodeWriteRecord, before: string, after: string): void {
+  const rel = record.path;
   mkdirSync(join(resolve(root), ".sam"), { recursive: true, mode: 0o700 });
   appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
   // Change artifact for the goldfish verifier (Phase D item 4, C5):
@@ -253,13 +263,39 @@ function writeCodeFileInternal(root: string, actor: string, rel: string, content
   const artifact = join(changesDir, record.afterHash + ".json");
   if (!existsSync(artifact)) {
     const fd = openSync(artifact, "wx", 0o600);
-    try { writeFileSync(fd, JSON.stringify({ path: rel, before, after: content, at: record.at }), "utf8"); }
+    try { writeFileSync(fd, JSON.stringify({ path: rel, before, after, at: record.at }), "utf8"); }
     finally { closeSync(fd); }
   }
-  recordActivity(root, actor, "code-write", (created ? "Wrote " : "Edited ") + rel + " in the code root (+" + added + "/-" + removed + " lines)");
+  recordActivity(root, record.actor, "code-write", (record.created ? "Wrote " : "Edited ") + rel + " in the code root (+" + record.addedLines + "/-" + record.removedLines + " lines)");
   // Verify-on-stop: the write enters the ledger as an unverified change;
   // only a fresh C2 build/test verdict can settle it.
   recordChange(root, { path: rel, replacementHash: record.afterHash, source: "code-write" });
+}
+
+/** Record a change an EXTERNAL writer already made in the code root
+ *  (Phase D item 6, C6: the managed coding engine writes files
+ *  directly; SAM records them afterwards). The change enters the
+ *  exact same ledgers as a C1 write - writes ledger, goldfish
+ *  artifact, activity, verify-on-stop - so C2 verification and the
+ *  C5 review bind to engine work identically. The C1 fences are
+ *  enforced HERE, at record time: a path the write hands would
+ *  refuse (protected, secret-named, dot-path), binary content, or
+ *  an over-cap file throws, and the caller must treat that change
+ *  as unreviewable rather than letting it slip past the ledgers. */
+export function recordExternalChange(root: string, actor: string, rel: string, before: string, after: string, created: boolean): CodeWriteRecord & { verification: string } {
+  requireCodeRoot(root);
+  checkedParts(rel);
+  if (typeof after !== "string" || after.includes("\0")) throw new Error("Binary change cannot be recorded: " + rel);
+  if (Buffer.byteLength(after, "utf8") > MAX_FILE_BYTES) throw new Error("Change exceeds " + MAX_FILE_BYTES + " bytes and cannot be recorded: " + rel);
+  if (typeof before !== "string" || before.includes("\0") || Buffer.byteLength(before, "utf8") > MAX_FILE_BYTES) throw new Error("Prior content of " + rel + " cannot be recorded (binary or oversize)");
+  if (before === after) throw new Error("No change: " + rel + " already holds exactly this content");
+  const { diff, added, removed } = diffOf(rel, before, after, created);
+  const record: CodeWriteRecord = {
+    at: new Date().toISOString(), actor, path: rel, created,
+    beforeHash: created ? null : sha(before), afterHash: sha(after),
+    addedLines: added, removedLines: removed, diff,
+  };
+  persistCodeWrite(root, record, before, after);
   return { ...record, verification: "pending" };
 }
 
