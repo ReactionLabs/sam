@@ -22,7 +22,9 @@ test("the one capability statement describes the live turn truthfully", () => {
     /chats persist/,
     /standing law/,
     /background work/,
-    /only after the owner approves/,
+    /for the owner's approval/,
+    /content-scanned first and a flagged skill/,
+    /waits for the owner instead of installing/,
     /read-only tools/,
     /drafts are stored records the owner sends/,
   ]) assert.match(CAPABILITY_STATEMENT,truth);
@@ -50,7 +52,7 @@ test("workspace SOUL.md augments identity and does not erase the capability stat
     const identity=loadIdentity(dir);
     assert.match(identity,/Speak concisely/);
     assert.match(identity,/chats persist/);
-    assert.match(identity,/only after the owner approves/);
+    assert.match(identity,/for the owner's approval/);
   } finally {rmSync(dir,{recursive:true,force:true});}
 });
 

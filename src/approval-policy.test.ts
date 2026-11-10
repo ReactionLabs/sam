@@ -39,9 +39,10 @@ test("never-list: prose discussion and ordinary work pass", () => {
   for (const text of clean) assert.equal(scanNeverList(text), null, text);
 });
 
-test("classification: Dip's gated kinds are consequential; an ordinary note is internal; unknown kinds fail closed", () => {
-  for (const kind of ["law", "heartbeat", "say", "skill", "draft", "skill-author"]) assert.equal(classifyProposal(kind, null).risk, "consequential", kind);
+test("classification: Dip's gated kinds are consequential; notes and registry skill installs are internal; unknown kinds fail closed", () => {
+  for (const kind of ["law", "heartbeat", "say", "draft", "skill-author"]) assert.equal(classifyProposal(kind, null).risk, "consequential", kind);
   assert.equal(classifyProposal("note", null).risk, "internal");
+  assert.equal(classifyProposal("skill", null).risk, "internal");
   assert.equal(classifyProposal("note", "rec-1").risk, "consequential");
   assert.equal(classifyProposal("shell", null).risk, "consequential");
 });
@@ -50,9 +51,10 @@ test("policy: default is manual, a corrupt file fails closed to manual, save/loa
   const root = fresh();
   try {
     assert.deepEqual(loadApprovalPolicy(root), { mode: "manual", autoKinds: [], updatedAt: null });
-    const saved = saveApprovalPolicy(root, { mode: "smart", autoKinds: ["note"] });
+    const saved = saveApprovalPolicy(root, { mode: "smart", autoKinds: ["note", "skill"] });
+    assert.deepEqual(saved.autoKinds.sort(), ["note", "skill"]);
     assert.equal(saved.mode, "smart");
-    assert.deepEqual(loadApprovalPolicy(root).autoKinds, ["note"]);
+    assert.deepEqual(loadApprovalPolicy(root).autoKinds.sort(), ["note", "skill"]);
     mkdirSync(join(root, ".sam"), { recursive: true });
     writeFileSync(join(root, ".sam", "approval-policy.json"), "{not json");
     assert.equal(loadApprovalPolicy(root).mode, "manual");
@@ -71,6 +73,7 @@ test("auto via: manual never, smart only listed internal kinds, off everything",
   const smart = { mode: "smart" as const, autoKinds: ["note"], updatedAt: null };
   assert.equal(approvalAutoVia({ mode: "manual", autoKinds: ["note"], updatedAt: null }, "note", null), null);
   assert.equal(approvalAutoVia(smart, "note", null)?.via, "auto:smart");
+  assert.equal(approvalAutoVia({ mode: "smart", autoKinds: ["skill"], updatedAt: null }, "skill", null)?.via, "auto:smart");
   assert.equal(approvalAutoVia(smart, "note", "rec-1"), null);
   assert.equal(approvalAutoVia(smart, "law", null), null);
   assert.equal(approvalAutoVia({ mode: "off", autoKinds: [], updatedAt: null }, "law", null)?.via, "auto:off");

@@ -114,13 +114,20 @@ export function scanNeverList(text: string): NeverHit | null {
 // Internal = the effect stays inside SAM's own memory and is
 // owner-reversible (an ordinary note; notes are archived, never
 // deleted). Consequential = standing rules, recurring jobs, posts,
-// outbound text, and anything that writes code or skills - the
-// kinds Dip's ruling keeps approval-gated. Unknown kinds classify
-// consequential (fail-closed).
+// outbound text, code writes, and skills SAM authors itself - the
+// kinds Dip's ruling keeps approval-gated. A registry skill INSTALL
+// is the one deliberate exception (Dip, 2026-11-10: SAM finds and
+// installs its own skills so it keeps getting smarter): skill text
+// is untrusted reference that can never override law, the install
+// is shape/size validated, provenance-logged, curator-watched and
+// removable, and on the auto path its content is scanned first - a
+// flagged skill holds for the owner instead of executing.
+// Unknown kinds classify consequential (fail-closed).
 export type ProposalRisk = "internal" | "consequential";
-const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "skill", "draft", "skill-author"]);
+const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "draft", "skill-author"]);
 export function classifyProposal(kind: string, supersedes: string | null | undefined): { risk: ProposalRisk; reason: string } {
   if (CONSEQUENTIAL_KINDS.has(kind)) return { risk: "consequential", reason: "kind \"" + kind + "\" has owner-facing effects and always needs the owner's decision in manual and smart modes" };
+  if (kind === "skill") return { risk: "internal", reason: "a registry skill install: validated, provenance-logged, curator-watched and removable untrusted reference; content-scanned on the auto path, where a flagged skill holds for the owner" };
   if (kind === "note") {
     if (supersedes) return { risk: "consequential", reason: "the note supersedes record " + supersedes + ", retiring an existing record" };
     return { risk: "internal", reason: "an ordinary memory note: internal and owner-reversible" };

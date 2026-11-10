@@ -62,7 +62,13 @@ function saveInstalled(root: string, items: InstalledSkill[]): void {
 interface TreeEntry { path: string; type: string; mode?: string; size?: number }
 interface Candidate { dir: string; skillMdPath: string; name: string; markdown: string }
 
-export async function installSkill(root: string, ref: string, opts: { actor: string }): Promise<{ installed: InstalledSkill[]; skipped: string[] }> {
+interface FetchedSkills { source: string; owner: string; repo: string; entries: TreeEntry[]; selected: Candidate[] }
+
+// Fetch and select the install candidates for a ref WITHOUT writing
+// anything: the one download both installSkill (which writes) and
+// scanSkillRef (which only reads, for the auto-install content scan)
+// ride, so the two can never disagree about what a ref contains.
+async function fetchSkillCandidates(ref: string): Promise<FetchedSkills> {
   const { owner, repo, skill } = parseSkillRef(ref);
   const source = owner + "/" + repo;
   const treeData = await getJson(ghApi() + "/repos/" + owner + "/" + repo + "/git/trees/HEAD?recursive=1");
@@ -80,6 +86,47 @@ export async function installSkill(root: string, ref: string, opts: { actor: str
   if (!candidates.length) throw new Error("No valid SKILL.md found in " + source);
   const selected = skill ? candidates.filter(c => c.name === skill || (c.dir && c.dir.split("/").pop() === skill)) : candidates;
   if (skill && !selected.length) throw new Error("Skill not found in " + source + ": " + skill);
+  return { source, owner, repo, entries, selected };
+}
+
+// --- Skill content scan -------------------------------------------
+// Deterministic wording tripwires over a skill's SKILL.md text: the
+// shapes a poisoned skill uses to bend the agent reading it
+// (instruction override, approval bypass, credential exfiltration,
+// pipe-to-shell). The scan gates ONLY the auto-install path (see
+// actions.ts): a flagged skill waits for the owner instead of
+// installing itself. An owner's own approval or CLI install is
+// sovereign and is never blocked by the scan. Scope: the SKILL.md
+// markdown, the instruction surface a skill presents first;
+// reference files ride the same untrusted-reference framing.
+export interface SkillScanHit { id: string; label: string }
+const SKILL_SCAN_PATTERNS: Array<{ id: string; label: string; pattern: RegExp }> = [
+  { id: "ignore-instructions", label: "tells the agent to ignore its previous instructions", pattern: /\bignore\b[^.\n]{0,48}\b(previous|prior|above|earlier|system)\b[^.\n]{0,32}\b(instructions?|prompts?|rules?)\b/i },
+  { id: "disregard-rules", label: "tells the agent to disregard its instructions or rules", pattern: /\bdisregard\b[^.\n]{0,48}\b(instructions?|rules?|law|prompts?|guidelines?)\b/i },
+  { id: "override-gate", label: "tells the agent to override or bypass its rules, approvals or gates", pattern: /\b(override|bypass|circumvent|skip)\b[^.\n]{0,48}\b(instructions?|rules?|law|approvals?|gates?|guardrails?|restrictions?)\b/i },
+  { id: "exfiltrate-credentials", label: "asks for credentials to be sent, shared or revealed", pattern: /\b(send|post|upload|share|leak|exfiltrate|reveal|disclose|print|show|give)\b[^.\n]{0,64}\b(api[-_ ]?keys?|access tokens?|auth tokens?|passwords?|secrets?|credentials?|private keys?)\b/i },
+  { id: "pipe-to-shell", label: "pipes a downloaded URL into a shell", pattern: /\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|da|z)?sh\b/i },
+];
+export function scanSkillContent(text: string): SkillScanHit[] {
+  const hits: SkillScanHit[] = [];
+  for (const p of SKILL_SCAN_PATTERNS) if (p.pattern.test(text ?? "")) hits.push({ id: p.id, label: p.label });
+  return hits;
+}
+export class SkillScanHold extends Error {
+  readonly flagged: Array<{ name: string; hits: SkillScanHit[] }>;
+  constructor(flagged: Array<{ name: string; hits: SkillScanHit[] }>) {
+    super("flagged skill content: " + flagged.map(f => f.name + " [" + f.hits.map(h => h.id).join(", ") + "]").join("; "));
+    this.name = "SkillScanHold";
+    this.flagged = flagged;
+  }
+}
+export async function scanSkillRef(ref: string): Promise<Array<{ name: string; hits: SkillScanHit[] }>> {
+  const { selected } = await fetchSkillCandidates(ref);
+  return selected.map(c => ({ name: c.name, hits: scanSkillContent(c.markdown) })).filter(s => s.hits.length > 0);
+}
+
+export async function installSkill(root: string, ref: string, opts: { actor: string }): Promise<{ installed: InstalledSkill[]; skipped: string[] }> {
+  const { source, owner, repo, entries, selected } = await fetchSkillCandidates(ref);
   const existing = new Set(discoverSkills(root).map(s => s.name));
   const records = installedSkills(root);
   const installed: InstalledSkill[] = [];

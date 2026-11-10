@@ -7,7 +7,7 @@ import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
 import { compileSchedule, scriptArgv, validateTimezone } from "./schedule.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
-import { installSkill } from "./skill-registry.js";
+import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
@@ -208,6 +208,16 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const record = writeAuthoredSkill(root, draft, { actor: a.actor });
     return (patch ? "Patched" : "Authored") + " skill " + record.name + " (v" + record.version + ") - it is now in the installed catalog";
   }
+  // Registry skill install. On the AUTO path (the approvals engine
+  // executing under the owner's standing policy, never the owner's
+  // own tap) the skill's text is content-scanned first: a flagged
+  // skill does not execute - SkillScanHold reverts the decision to a
+  // pending card in applyDecision, so automation stays cautious and
+  // the owner stays sovereign.
+  if ((a.decidedBy ?? "").startsWith("auto:")) {
+    const flagged = await scanSkillRef(a.detail);
+    if (flagged.length) throw new SkillScanHold(flagged);
+  }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
   return "Installed skill(s): " + summary.installed.map(i => i.name).join(", ") + (summary.skipped.length ? " (skipped: " + summary.skipped.join("; ") + ")" : "");
@@ -240,6 +250,17 @@ async function applyDecision(root: string, items: ActionProposal[], a: ActionPro
   }
   try { a.result = await execute(root, a); a.status = "done"; }
   catch (e) {
+    if (e instanceof SkillScanHold && by !== "owner") {
+      // An auto-approved skill install the content scan flagged is
+      // HELD, not failed: the decision reverts to a pending card and
+      // the owner decides with the scan findings on the record. The
+      // owner's own approval of the same proposal executes as-is.
+      a.status = "pending"; a.decidedAt = null; a.decidedBy = null;
+      a.result = "Auto-install held by the skill content scan (" + e.message + ") - waiting for the owner, who can approve it as-is or install it from the CLI";
+      saveActions(root, items);
+      recordActivity(root, a.actor, "skill-scan-hold", a.kind + ": " + a.title + " - " + e.message);
+      return a;
+    }
     a.status = "failed"; a.result = e instanceof Error ? e.message : "Execution failed";
     // A failed card must not be a dead end. A heartbeat that died on an
     // unknown profile (a legacy proposal written before proposal-time
