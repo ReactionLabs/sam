@@ -22,6 +22,8 @@ test("stripModelMarkup keeps the prose and drops the machinery", () => {
   assert.equal(stripModelMarkup("<think>hidden</think>Visible."), "Visible.");
   assert.equal(stripModelMarkup("Text </think> more"), "Text  more");
   assert.equal(stripModelMarkup("<tool_call>only machinery</tool_call>"), "");
+  assert.equal(stripModelMarkup("[>"), "", "bracket debris is machinery remains, not an answer");
+  assert.equal(stripModelMarkup("\u2764\uFE0F"), "\u2764\uFE0F", "an emoji-only reply is a real reply");
 });
 
 async function withServer(handler: (hit: number, res: import("node:http").ServerResponse) => void, run: (provider: OpenAICompatibleProvider, hits: () => number) => Promise<void>): Promise<void> {

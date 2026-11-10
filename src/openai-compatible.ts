@@ -11,7 +11,7 @@ import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn }
  * conversation). Strip the machinery, keep the prose. Callers still
  * fail when nothing usable remains. */
 export function stripModelMarkup(text: string): string {
-  return text
+  const out = text
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
     .replace(/<invoke\b[\s\S]*?<\/invoke>/gi, "")
@@ -21,6 +21,13 @@ export function stripModelMarkup(text: string): string {
     .replace(/\]\s*<\]\s*minimax/gi, "")
     .replace(/[ \t]+\n/g, "\n")
     .trim();
+  // Debris is not prose: a residue with no letter, digit, or emoji in
+  // it ("[>" - the fragment of a leak that survived its own span) is
+  // machinery remains, and returning it as an answer is worse than
+  // the retry an empty result gets. (Live proof, 2026-11-10: the
+  // first post-fix turn answered "[>".)
+  if (out && !/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(out)) return "";
+  return out;
 }
 export interface TokenUsage { promptTokens: number; completionTokens: number; totalTokens: number }
 /** Extract a provider usage object (OpenAI-shaped) from a response payload. */
