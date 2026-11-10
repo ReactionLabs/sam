@@ -26,6 +26,7 @@ import { engineStatus, type EngineTask } from "./engine.js";
 import { sensesStatus } from "./senses.js";
 import { briefStatus } from "./brief.js";
 import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
+import { authStatus, type AuthStatus } from "./auth-status.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -73,6 +74,7 @@ export function statusSnapshot(root: string): {
   senses: { installed: boolean; binary: string | null; coreOnly: true; senses: string[] };
   brief: { installed: boolean; job: unknown; script: string };
   setup: SetupRecord | null;
+  auth: AuthStatus;
 } {
   return {
     at: new Date().toISOString(),
@@ -102,5 +104,6 @@ export function statusSnapshot(root: string): {
     senses: sensesStatus(),
     brief: briefStatus(root),
     setup: readSetupRecord(root),
+    auth: authStatus(root),
   };
 }
