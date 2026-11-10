@@ -69,6 +69,48 @@ test("provider gives up after two empty completions", async () => {
   } finally { server.close(); await once(server, "close"); }
 });
 
+test("provider retries a markup-leaking completion once, then surfaces it (owner defect 2026-11-10)", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => {
+    hits++;
+    res.setHeader("Content-Type", "application/json");
+    // First attempt: MiniMax leaked tool markup into the visible
+    // content, which the connector path refuses as unsafe. Second
+    // attempt answers cleanly. No tool has executed for either
+    // call, so the fresh attempt cannot double-run anything.
+    if (hits === 1) res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Working on it <tool_call>{\"name\":\"x\"}</tool_call>" } }] }));
+    else res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Recovered answer" } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []);
+    assert.equal(turn.content, "Recovered answer");
+    assert.equal(hits, 2);
+  } finally { server.close(); await once(server, "close"); }
+});
+
+test("provider gives up after two markup-leaking completions", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => {
+    hits++;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Still leaking <tool_call>x</tool_call>" } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    await assert.rejects(provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []), /Unsafe model output/);
+    assert.equal(hits, 2);
+  } finally { server.close(); await once(server, "close"); }
+});
+
 test("model transport rejects insecure remote endpoints and missing credentials", async () => {
   assert.throws(() => new OpenAICompatibleProvider("http://example.com/v1/chat/completions", "key"));
   assert.throws(() => new OpenAICompatibleProvider("https://user:secret@example.com/v1/chat/completions", "key"));

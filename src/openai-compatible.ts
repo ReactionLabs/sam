@@ -126,7 +126,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     // real failure and surfaces as before (owner defect
     // 2026-11-10: a bare "Empty model response" killed the turn).
     try{return await this.connectorTurnOnce(model,messages,tools);}
-    catch(e){if(e instanceof Error&&e.message==="Empty model response")return await this.connectorTurnOnce(model,messages,tools);throw e;}
+    catch(e){if(e instanceof Error&&(e.message==="Empty model response"||e.message==="Unsafe model output"))return await this.connectorTurnOnce(model,messages,tools);throw e;}
   }
   private async connectorTurnOnce(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
