@@ -37,7 +37,43 @@ const DASHBOARD_NOTE="This dashboard supports creating chats, branching the sele
 function setReactionSafe(root:string,chatId:string,messageId:string,reaction:string|null):void{
   try{const db=new ChatStore(root);try{db.setReaction(chatId,messageId,reaction);}finally{db.close();}}catch{/* a reaction is garnish, never the meal */}
 }
+// Turn failures are ledgered (hourly run 2026-11-10 18:04 EST):
+// a turn that threw used to record NOTHING in the activity ledger
+// - runChatTurn wrote only the successful "turn" line and the
+// dashboard handler's catch went to the server log alone (7
+// failures in the live dashboard.log against 0 failure lines in
+// the ledger), so the owner console could not count the
+// narration-death class at all. The wrapper below is the ONE seam
+// every route rides: any throw out of a turn writes one
+// "turn-failed" line - the acting profile (resolved best-effort
+// from the chat, since an early throw can precede the inner
+// resolution), the route, and the error's own message, never the
+// person's message content - then the error rethrows exactly as
+// before, so every caller's handling is unchanged. A nested turn
+// (a linked ask inside another turn) ledgers its own failure; if
+// that failure also kills the outer turn, the outer ledgers too -
+// two turns failed, two lines, which is the true count.
+export function turnFailureSummary(chatId:string,route:TurnRoute,error:unknown):string{
+  const message=error instanceof Error?error.message:String(error);
+  return "Turn failed in chat "+chatId.slice(0,8)+" ("+route+"): "+message;
+}
+export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,error:unknown):void{
+  let actor="sam";
+  try{
+    const look=new ChatStore(root);
+    try{actor=look.list().find(c=>c.id===chatId)?.agent_name??readDashboardConfig(root).defaultAgent??"sam";}finally{look.close();}
+  }catch{/* best effort: the line lands under the core actor */}
+  recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
+}
 export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
+  try{
+    return await runChatTurnInner(root,chatId,content,opts);
+  }catch(error){
+    try{recordTurnFailure(root,chatId,opts?.route??"chat",error);}catch{/* the ledger never breaks a turn, even a dead one */}
+    throw error;
+  }
+}
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
   const route=opts?.route??"chat";
   const budget=toolBudget(route);
   const providerName=process.env.SAM_MODEL_PROVIDER??"";
