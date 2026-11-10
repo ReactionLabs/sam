@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CORE_OWN_TOOLS, LOADER_TOOL_NAME, UPFRONT_LIMIT, deferredCatalogLine, loadedTools, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
+import { CORE_OWN_TOOLS, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, UPFRONT_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
+import { readActivity } from "./activity.js";
 import { OWN_TOOLS, ownToolsChat } from "./own-tools.js";
 import { addConnector } from "./connectors.js";
 import { connectorChat } from "./connector-chat.js";
@@ -123,6 +124,97 @@ test("tool tiers: a connector chat defers, stubs an early call, loads, then offe
     const result = await connectorChat(root, provider, "test-model", [{ role: "user", content: "hand this off" }], undefined, { actor: "sam", chatId: "tier-chat" });
     assert.equal(result, "Loaded and ready.");
     assert.deepEqual(loadedTools(root, "tier-chat"), ["sam_handoff_task"]);
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;
+    if (oldHosts === undefined) delete process.env.SAM_MCP_ALLOWED_HOSTS; else process.env.SAM_MCP_ALLOWED_HOSTS = oldHosts;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loader-loop guard: helpers classify rounds and phrase the honest ending", () => {
+  assert.equal(LOADER_LOOP_LIMIT, 2);
+  assert.equal(isLoaderOnlyRound([LOADER_TOOL_NAME]), true);
+  assert.equal(isLoaderOnlyRound([LOADER_TOOL_NAME, LOADER_TOOL_NAME]), true);
+  assert.equal(isLoaderOnlyRound([LOADER_TOOL_NAME, "sam_memory_search"]), false);
+  assert.equal(isLoaderOnlyRound([]), false);
+  assert.match(loaderLoopNudge(), /call one of the tools you loaded/i);
+  assert.match(loaderLoopLedgerSummary([LOADER_TOOL_NAME, LOADER_TOOL_NAME]), /Loader loop stopped: 2 consecutive/);
+  const fallback = loaderLoopFallbackAnswer([LOADER_TOOL_NAME, LOADER_TOOL_NAME]);
+  assert.match(fallback, /kept loading tools without using them/);
+  assert.doesNotMatch(fallback, /tool budget|ran out of steps/);
+});
+
+test("loader-loop guard: one loader-only round nudges and the turn recovers by using a loaded tool", async () => {
+  const root = scratch();
+  try {
+    const seen: string[] = [];
+    let step = 0;
+    const fake = {
+      async completeConnectorTurn(_model: string, messages: Array<Record<string, unknown>>, _tools: unknown) {
+        seen.push(messages.map(m => String(m.content ?? "")).join("\n"));
+        step++;
+        if (step === 1) return { content: null, calls: [{ id: "l1", name: LOADER_TOOL_NAME, args: { names: ["sam_handoff_task"] } }] };
+        if (step === 2) return { content: null, calls: [{ id: "w1", name: "sam_workspace_list", args: {} }] };
+        return { content: "Used the workspace tool.", calls: [] };
+      },
+    } as unknown as OpenAICompatibleProvider;
+    const reply = await ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "list files then hand off" }], undefined, "chat-nudge");
+    assert.equal(reply, "Used the workspace tool.");
+    assert.match(seen[1], /Loader-loop guard/, "the second step carries the nudge");
+    assert.equal(readActivity(root, 10, { kind: "loader-loop" }).length, 0, "a recovered turn is not a loader loop");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("loader-loop guard: two consecutive loader-only rounds stop the own-tools turn honestly", async () => {
+  const root = scratch();
+  try {
+    let step = 0;
+    const fake = {
+      async completeConnectorTurn(_model: string, _messages: Array<Record<string, unknown>>, tools: Array<unknown>) {
+        step++;
+        if (step === 1) return { content: null, calls: [{ id: "l1", name: LOADER_TOOL_NAME, args: { names: ["sam_handoff_task"] } }] };
+        if (step === 2) return { content: null, calls: [{ id: "l2", name: LOADER_TOOL_NAME, args: { names: ["sam_ask_linked"] } }] };
+        assert.equal(tools.length, 0, "after the trip only the tool-free synthesis runs");
+        return { content: null, calls: [{ id: "l3", name: LOADER_TOOL_NAME, args: { names: ["sam_brief"] } }] };
+      },
+    } as unknown as OpenAICompatibleProvider;
+    const reply = await ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "do the thing" }], undefined, "chat-trip");
+    assert.equal(step, 3, "no third tool round ran");
+    assert.match(reply, /kept loading tools without using them \(2 calls made: sam_load_tools, sam_load_tools\)/);
+    const logged = readActivity(root, 10, { kind: "loader-loop" });
+    assert.equal(logged.length, 1);
+    assert.match(logged[0].summary, /Loader loop stopped/);
+    assert.equal(readActivity(root, 10, { kind: "tool-budget" }).length, 0, "a loader loop is never dressed as a budget failure");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("loader-loop guard: two consecutive loader-only rounds stop the connector turn honestly", async () => {
+  const root = scratch();
+  const oldFetch = globalThis.fetch, oldKey = process.env.SAM_MCP_TOKEN_TEST, oldHosts = process.env.SAM_MCP_ALLOWED_HOSTS;
+  try {
+    process.env.SAM_MCP_ALLOWED_HOSTS = "mcp.secondshiftos.com";
+    process.env.SAM_MCP_TOKEN_TEST = "fake-key";
+    addConnector(root, "Second Shift", "https://mcp.secondshiftos.com/mcp/v1", "SAM_MCP_TOKEN_TEST");
+    let modelCalls = 0;
+    globalThis.fetch = async (input, init) => {
+      const url = String(input), body = JSON.parse(String(init?.body));
+      if (url.includes("model.example")) {
+        modelCalls++;
+        const names = modelCalls === 1 ? ["sam_handoff_task"] : ["sam_ask_linked"];
+        if (modelCalls <= 2) return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call-" + modelCalls, type: "function", function: { name: "sam_load_tools", arguments: JSON.stringify({ names }) } }] } }] }), { headers: { "Content-Type": "application/json" } });
+        return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call-3", type: "function", function: { name: "sam_load_tools", arguments: "{\"names\":[\"sam_brief\"]}" } }] } }] }), { headers: { "Content-Type": "application/json" } });
+      }
+      if (body.method === "notifications/initialized") return new Response(null, { status: 202 });
+      const result = body.method === "initialize" ? { protocolVersion: "2025-06-18" } : body.method === "tools/list" ? { tools: MCP_NAMES.map(name => ({ name })) } : { content: [{ type: "text", text: "ok" }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "Content-Type": "application/json" } });
+    };
+    const provider = new OpenAICompatibleProvider("https://model.example/v1/chat/completions", "model-test-key");
+    const result = await connectorChat(root, provider, "test-model", [{ role: "user", content: "check the stack" }], undefined, { actor: "trading", chatId: "tier-trip" });
+    assert.match(result, /kept loading tools without using them/);
+    assert.equal(modelCalls, 3, "two loader rounds plus the tool-free synthesis, no third tool round");
+    assert.equal(readActivity(root, 10, { kind: "loader-loop" }).length, 1);
+    assert.equal(readActivity(root, 10, { kind: "tool-budget" }).length, 0);
   } finally {
     globalThis.fetch = oldFetch;
     if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;

@@ -7,7 +7,7 @@ import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, deferredCatalogLine, loadedTools, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { patchNote, saveNote } from "./notes.js";
 import { proposeAuthoredSkill } from "./skill-author.js";
@@ -412,7 +412,8 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
   ...history];
  let callsUsed=0;
  const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
- for(let round=0;round<budget.rounds&&!exhausted;round++){
+ let loaderOnlyStreak=0;let loaderLoop=false;
+ for(let round=0;round<budget.rounds&&!exhausted&&!loaderLoop;round++){
   const part=partitionTools(allDefs,currentLoaded());
   const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
   let turn;
@@ -441,6 +442,7 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
   // appended in call order once the round settles.
   const outputs=new Map<string,unknown>();
   const pending:Array<{id:string;run:()=>Promise<unknown>}>=[];  
+  const roundCalls:string[]=[];
   for(const call of turn.calls){
    // Same graceful exhaustion as the connector loop: stub the call, keep the
    // transcript valid, and let the tool-free synthesis answer from partial
@@ -450,7 +452,7 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
    // does not spend budget: the stub names the loader, the model loads,
    // and the next round sends the real definition.
    if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
-   callsUsed++;executed.push(call.name);
+   callsUsed++;executed.push(call.name);roundCalls.push(call.name);
    if(call.name===LOADER_TOOL_NAME){
     const names=Array.isArray(call.args?.names)?call.args.names.filter((n):n is string=>typeof n==="string"):[];
     const valid=new Set(allDefs.map(toolNameOf));
@@ -468,10 +470,20 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
   }
+  // Loader-loop guard: one loader-only round gets a nudge for the
+  // next step; a second consecutive one stops the turn here and
+  // the synthesis below (or the loader-loop fallback) reports it
+  // honestly - never as a step or budget failure.
+  if(isLoaderOnlyRound(roundCalls)){
+   loaderOnlyStreak++;
+   if(loaderOnlyStreak>=LOADER_LOOP_LIMIT){loaderLoop=true;recordActivity(root,actor,"loader-loop",loaderLoopLedgerSummary(executed));}
+   else messages.push({role:"system",content:loaderLoopNudge()});
+  }else if(roundCalls.length)loaderOnlyStreak=0;
  }
  if(exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
  if(final.content)return final.content;
+ if(loaderLoop)return loaderLoopFallbackAnswer(executed);
  if(final.calls.length||exhausted){
   if(!exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
   return budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps");

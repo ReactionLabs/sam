@@ -109,6 +109,33 @@ export function deferredCatalogLine(deferred: Array<{ name: string; description:
   return (" More tools are available in this chat but not loaded yet: " + entries.join("; ") + ". Call " + LOADER_TOOL_NAME + " with the exact names to load them for this chat session before using them.").slice(0, 1600);
 }
 
+/** Loader-loop guard (Turn honesty remainder, live evidence
+ *  2026-11-10): a history-poisoned chat can spend every round
+ *  calling sam_load_tools and never act - the turn then ended
+ *  dressed as a step/budget failure (activity 15:59-16:10 UTC:
+ *  three turns whose only calls were the loader). Loading is
+ *  preparation, not progress. One loader-only round is
+ *  legitimate; the guard nudges on the next step, and a second
+ *  consecutive loader-only round stops the turn and reports it
+ *  honestly as a loader loop, never as a budget failure. */
+export const LOADER_LOOP_LIMIT = 2;
+
+export function isLoaderOnlyRound(names: string[]): boolean {
+  return names.length > 0 && names.every(n => n === LOADER_TOOL_NAME);
+}
+
+export function loaderLoopNudge(): string {
+  return "Loader-loop guard: your last step only loaded tools and used none of them. On your next step, call one of the tools you loaded, or answer from what you already have. Do not call " + LOADER_TOOL_NAME + " again unless a different tool that is not already loaded is essential to the task.";
+}
+
+export function loaderLoopLedgerSummary(executed: string[]): string {
+  return "Loader loop stopped: " + LOADER_LOOP_LIMIT + " consecutive loader-only rounds, " + executed.length + " calls used (" + (executed.join(", ") || "none") + "); no non-loader tool ran in those rounds";
+}
+
+export function loaderLoopFallbackAnswer(executed: string[]): string {
+  return "I stopped this turn because I kept loading tools without using them (" + executed.length + " calls made" + (executed.length ? ": " + executed.join(", ") : "") + ") - loading tools is not progress, so this answer is incomplete and no check was finished. Ask me to continue and I will start by using the tools already loaded for this chat.";
+}
+
 export function notLoadedStubContent(name: string): string {
   return JSON.stringify({
     error: "Tool not loaded in this chat session - the call was not executed",

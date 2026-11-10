@@ -2,7 +2,7 @@ import { connectors, testConnector, readConnectorTool, type Connector } from "./
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt } from "./own-tools.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, deferredCatalogLine, loadedTools, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
@@ -51,7 +51,8 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
  ];
  let callsUsed=0;
  const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
- for(let round=0;round<budget.rounds&&!exhausted;round++){
+ let loaderOnlyStreak=0;let loaderLoop=false;
+ for(let round=0;round<budget.rounds&&!exhausted&&!loaderLoop;round++){
   const part=partitionTools(allDefs,currentLoaded());
   const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
   let turn;
@@ -78,6 +79,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
   // slowest call, not the sum). Tool messages land in call order.
   const outputs=new Map<string,unknown>();
   const pending:Array<{id:string;run:()=>Promise<unknown>}>=[];  
+  const roundCalls:string[]=[];
   for(const call of turn.calls){
    // Budget exhaustion is graceful, never fatal: the call is stubbed (so the
    // transcript stays valid), the loop stops, and the tool-free synthesis
@@ -86,7 +88,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
    // A deferred tool called before loading is stubbed, not executed, and
    // does not spend budget: the stub names the loader.
    if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
-   callsUsed++;executed.push(call.name);
+   callsUsed++;executed.push(call.name);roundCalls.push(call.name);
    if(call.name===LOADER_TOOL_NAME){
     const names=Array.isArray(call.args?.names)?call.args.names.filter((n):n is string=>typeof n==="string"):[];
     const valid=new Set(allDefs.map(toolNameOf));
@@ -112,11 +114,21 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
   }
+  // Loader-loop guard: one loader-only round gets a nudge for the
+  // next step; a second consecutive one stops the turn here and
+  // the synthesis below (or the loader-loop fallback) reports it
+  // honestly - never as a step or budget failure.
+  if(isLoaderOnlyRound(roundCalls)){
+   loaderOnlyStreak++;
+   if(loaderOnlyStreak>=LOADER_LOOP_LIMIT){loaderLoop=true;recordActivity(root,own?.actor??"sam","loader-loop",loaderLoopLedgerSummary(executed));}
+   else messages.push({role:"system",content:loaderLoopNudge()});
+  }else if(roundCalls.length)loaderOnlyStreak=0;
  }
  // Never send a tool request in the final synthesis step.
  if(exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
  if(final.content)return final.content;
+ if(loaderLoop)return loaderLoopFallbackAnswer(executed);
  // The synthesis step is tool-free; a model that still asks for tools gets a
  // plain partial answer, not a dead turn.
  if(final.calls.length||exhausted){
