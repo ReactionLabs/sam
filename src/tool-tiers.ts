@@ -35,6 +35,7 @@ export const LOADER_TOOL_NAME = "sam_load_tools";
 export const CORE_OWN_TOOLS = [
   "sam_memory_search",
   "sam_memory_list",
+  "sam_search_chats",
   "sam_workspace_list",
   "sam_workspace_read",
   "sam_save_note",

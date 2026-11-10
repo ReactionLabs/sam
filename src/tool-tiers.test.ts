@@ -17,7 +17,7 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "sam-tiers-"));
 }
 
-const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_patch_note", "sam_author_skill", "sam_handoff_task", "sam_ask_linked"];
+const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_patch_note", "sam_author_skill", "sam_handoff_task", "sam_ask_linked"];
 const MCP_NAMES = ["whoami", "list_leads", "get_lead", "pipeline_summary", "analytics_summary", "coin_lookup", "list_candidates", "list_alerts", "paper_setups", "stack_health"];
 
 test("tool tiers: at or below the threshold nothing is deferred and no loader exists", () => {
@@ -64,9 +64,10 @@ test("tool tiers: loads persist per chat, unknown names are refused, stubs name 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("tool tiers: own-only chats stay below the threshold - the full set rides, no loader", async () => {
+test("tool tiers: own chats crossed the threshold with sam_search_chats (16 own tools) - the core rides upfront, the rest is deferred with the loader", async () => {
   const root = scratch();
   try {
+    assert.equal(OWN_TOOLS.length, 16);
     const sentNames: string[][] = [];
     let step = 0;
     const fake = {
@@ -79,8 +80,10 @@ test("tool tiers: own-only chats stay below the threshold - the full set rides, 
     } as unknown as OpenAICompatibleProvider;
     const reply = await ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "list files" }], undefined, "chat-x");
     assert.equal(reply, "Listed.");
-    assert.equal(sentNames[0].length, OWN_TOOLS.length);
-    assert.ok(!sentNames[0].includes(LOADER_TOOL_NAME));
+    assert.equal(sentNames[0].length, UPFRONT_LIMIT + 1);
+    assert.ok(sentNames[0].includes("sam_search_chats"), "chat search is core tier, offered upfront");
+    assert.ok(sentNames[0].includes(LOADER_TOOL_NAME));
+    assert.ok(!sentNames[0].includes("sam_handoff_task"), "handoff is deferred until loaded");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -85,16 +85,19 @@ export function unarchiveManagedChat(root: string, actor: string, chatId: string
   return withStore(root, store => { requireManaged(root, actor, store, chatId); store.archive(chatId, false); return store.get(chatId) as ChatRecord; });
 }
 
-export interface ChatSearchHit { chatId: string; title: string; role: string; snippet: string; created_at: string }
+export interface ChatSearchHit { chatId: string; title: string; role: string; snippet: string; created_at: string; rank: number }
 
 export function searchManagedChats(root: string, actor: string, query: string, limit = 20): ChatSearchHit[] {
   return withStore(root, store => {
     const mine = store.list({ includeArchived: false }).filter(c => isManagedChat(root, actor, c));
     const titles = new Map(mine.map(c => [c.id, c.title] as const));
-    return store.searchMessages(query, mine.map(c => c.id), limit).map(h => {
-      const at = h.content.toLowerCase().indexOf(query.toLowerCase());
-      const start = Math.max(0, at - 60);
-      return { chatId: h.chat_id, title: titles.get(h.chat_id) ?? "", role: h.role, snippet: (start > 0 ? "..." : "") + h.content.slice(start, start + 200), created_at: h.created_at };
-    });
+    // FTS (Phase B item 4): relevance-ranked multi-term prefix search
+    // over the whole message store, with the snippet cut by FTS around
+    // the match. The fence is unchanged - only the actor's own
+    // non-visitor, non-archived chats are ever in the id list.
+    return store.searchMessagesFts(query, mine.map(c => c.id), limit).map(h => ({
+      chatId: h.chat_id, title: titles.get(h.chat_id) ?? "", role: h.role,
+      snippet: h.snippet || h.content.slice(0, 200), created_at: h.created_at, rank: h.rank,
+    }));
   });
 }

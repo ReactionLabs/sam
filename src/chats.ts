@@ -8,6 +8,17 @@ export interface ChatRecord { id:string; title:string; created_at:string; update
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string }
 export interface ChatCompaction { chat_id:string; covered:number; summary:string; updated_at:string }
+// Turn a person's question into a safe FTS5 MATCH expression: plain
+// terms only (letters, numbers, underscore), deduplicated, capped at
+// 8, each a prefix term, joined with AND. Quotes, operators, and
+// punctuation in the question can never throw an FTS syntax error or
+// steer the query - they simply vanish. No terms means no search.
+export function ftsChatMatch(query:string):string|null{
+  const terms=query.toLowerCase().match(/[\p{L}\p{N}_]+/gu)??[];
+  const unique=[...new Set(terms)].slice(0,8);
+  if(!unique.length)return null;
+  return unique.map(t=>t+"*").join(" AND ");
+}
 export class ChatStore {
   private db:Database.Database;
   constructor(workspace:string){
@@ -32,6 +43,23 @@ export class ChatStore {
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
+    // Full-text chat search (Plan Phase B item 4): an FTS5 external-content
+    // index over chat_messages, the MemoryStore pattern - triggers keep it
+    // in step with inserts, and a DB that predates the index gets one
+    // rebuild so its existing conversations are searchable from the start.
+    const hadFts=!!this.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='chat_messages_fts'").get();
+    this.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS chat_messages_fts USING fts5(content, content='chat_messages', content_rowid='rowid');
+      CREATE TRIGGER IF NOT EXISTS chat_messages_fts_insert AFTER INSERT ON chat_messages BEGIN
+        INSERT INTO chat_messages_fts(rowid,content) VALUES(new.rowid,new.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS chat_messages_fts_delete AFTER DELETE ON chat_messages BEGIN
+        INSERT INTO chat_messages_fts(chat_messages_fts,rowid,content) VALUES('delete',old.rowid,old.content);
+      END;
+      CREATE TRIGGER IF NOT EXISTS chat_messages_fts_update AFTER UPDATE ON chat_messages BEGIN
+        INSERT INTO chat_messages_fts(chat_messages_fts,rowid,content) VALUES('delete',old.rowid,old.content);
+        INSERT INTO chat_messages_fts(rowid,content) VALUES(new.rowid,new.content);
+      END;`);
+    if(!hadFts)this.db.exec("INSERT INTO chat_messages_fts(chat_messages_fts) VALUES('rebuild')");
   }
   create(title:string,agentName?:string|null,opts?:{visitor?:boolean}):ChatRecord {
     if(!title.trim()||title.length>120)throw new Error("Chat title must be 1 to 120 characters");
@@ -111,6 +139,17 @@ export class ChatStore {
     if(!query.trim()||!chatIds.length)return [];
     const like="%"+query.replace(/[%_\\]/g,"\\$&")+"%";
     return this.db.prepare("SELECT chat_id,role,content,created_at FROM chat_messages WHERE chat_id IN ("+chatIds.map(()=>"?").join(",")+") AND content LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?").all(...chatIds,like,limit) as Array<{chat_id:string;role:string;content:string;created_at:string}>;
+  }
+  // FTS search over the same store (Phase B item 4): multi-term,
+  // prefix-aware, relevance-ranked by bm25, with the snippet cut by
+  // FTS around the actual match. The chat-id list is the fence - the
+  // caller (chat-manage) computes it from the acting profile, the
+  // store never widens it.
+  searchMessagesFts(query:string,chatIds:string[],limit=20):Array<{chat_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>{
+    const match=ftsChatMatch(query);
+    if(!match||!chatIds.length)return [];
+    const capped=Number.isInteger(limit)?Math.min(50,Math.max(1,limit)):20;
+    return this.db.prepare("SELECT m.chat_id,m.role,m.content,m.created_at,snippet(chat_messages_fts,0,'','',char(8230),24) AS snippet,bm25(chat_messages_fts) AS rank FROM chat_messages_fts JOIN chat_messages m ON m.rowid=chat_messages_fts.rowid WHERE chat_messages_fts MATCH ? AND m.chat_id IN ("+chatIds.map(()=>"?").join(",")+") ORDER BY rank,m.created_at DESC LIMIT ?").all(match,...chatIds,capped) as Array<{chat_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>;
   }
   messages(id:string):ChatMessage[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
