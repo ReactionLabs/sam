@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OpenAICompatibleProvider, stripModelMarkup } from "./openai-compatible.js";
@@ -92,5 +92,43 @@ test("a turn that runs out of steps says steps, not tool budget", async () => {
     assert.doesNotMatch(answer, /tool budget/);
     const ledger = readFileSync(join(root, ".sam", "activity.jsonl"), "utf8");
     assert.match(ledger, /Turn step limit reached/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a poisoned long history gets one context-reset retry before any tool runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-ctxreset-"));
+  try {
+    const history: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (let i = 0; i < 6; i++) { history.push({ role: "user", content: "old ask " + i }); history.push({ role: "assistant", content: "old answer " + i }); }
+    let calls = 0; let secondCallLength = 0;
+    const fake = {
+      completeConnectorTurn: async (_model: string, messages: Array<Record<string, unknown>>, _tools: Array<Record<string, unknown>>) => {
+        calls++;
+        if (calls === 1) throw new Error("Unsafe model output");
+        secondCallLength = messages.length;
+        return { content: "Recovered on a trimmed context.", calls: [] };
+      },
+    } as unknown as OpenAICompatibleProvider;
+    const answer = await ownToolsChat(root, "sam", fake, "test-model", history);
+    assert.equal(answer, "Recovered on a trimmed context.");
+    assert.equal(secondCallLength, 7, "system line plus the last six messages");
+    assert.match(readFileSync(join(root, ".sam", "activity.jsonl"), "utf8"), /Context reset after 'Unsafe model output'/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("no context reset once a tool has executed - the error surfaces instead", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-ctxreset2-"));
+  try {
+    let calls = 0;
+    const fake = {
+      completeConnectorTurn: async (_model: string, _messages: Array<Record<string, unknown>>, _tools: Array<Record<string, unknown>>) => {
+        calls++;
+        if (calls === 1) return { content: null, calls: [{ id: "x1", name: "sam_memory_list", args: {} }] };
+        throw new Error("Unsafe model output");
+      },
+    } as unknown as OpenAICompatibleProvider;
+    await assert.rejects(() => ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "go" }]), /Unsafe model output/);
+    const ledgerPath = join(root, ".sam", "activity.jsonl");
+    assert.doesNotMatch(existsSync(ledgerPath) ? readFileSync(ledgerPath, "utf8") : "", /Context reset/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

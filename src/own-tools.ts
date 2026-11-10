@@ -6,7 +6,7 @@ import { linkExchange } from "./collab.js";
 import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions.js";
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
-import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, type ToolBudget } from "./budgets.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, deferredCatalogLine, loadedTools, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { patchNote, saveNote } from "./notes.js";
@@ -415,7 +415,23 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  for(let round=0;round<budget.rounds&&!exhausted;round++){
   const part=partitionTools(allDefs,currentLoaded());
   const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
-  const turn=await provider.completeConnectorTurn(model,messages,sendTools);
+  let turn;
+  try { turn = await provider.completeConnectorTurn(model, messages, sendTools); }
+  catch (e) {
+    // Context-reset retry (owner defect 2026-11-10): a long or
+    // failure-poisoned history can make the model emit nothing but
+    // markup or empties for EVERY completion in a turn - the chat
+    // then stays broken forever, because each new turn inherits the
+    // same history. When the turn has executed NOTHING yet, retry
+    // the completion once against a trimmed context. If anything
+    // already ran, the error surfaces: replaying a half-done turn
+    // could double its effects.
+    const trimmed = (e instanceof Error && (e.message === "Unsafe model output" || e.message === "Empty model response") && executed.length === 0) ? trimHistoryForRetry(messages) : null;
+    if (!trimmed || trimmed.length >= messages.length) throw e;
+    messages.splice(0, messages.length, ...trimmed);
+    recordActivity(root, actor, "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
+    turn = await provider.completeConnectorTurn(model, messages, sendTools);
+  }
   if(!turn.calls.length)return turn.content??"No response.";
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   // Classify in order (budget + tier stubs are loop-local and instant),

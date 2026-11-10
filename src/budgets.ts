@@ -29,6 +29,13 @@ export function budgetStubContent(executed: string[], maxCalls: number): string 
   });
 }
 export type TurnEndReason = "calls" | "steps";
+/** The context-reset retry's trim: the system line plus the last six
+ * messages. Shorter histories pass through unchanged (and the caller
+ * treats "nothing trimmed" as no reset to offer). */
+export function trimHistoryForRetry<T>(messages: T[]): T[] {
+  if (messages.length <= 7) return messages;
+  return [messages[0], ...messages.slice(-6)];
+}
 export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
   if (reason === "steps") return "Turn step limit reached: " + executed.length + " calls used (" + (executed.join(", ") || "none") + ") - the call budget (" + maxCalls + ") was NOT reached" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
   return "Tool budget exhausted: " + executed.length + "/" + maxCalls + " calls used (" + (executed.join(", ") || "none") + ")" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
