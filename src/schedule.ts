@@ -213,6 +213,7 @@ export const SCRIPT_JOB_COMMANDS: Record<string, { description: string; argv: (r
   "sam-backups": { description: "The backup archive list (sam backup list)", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "backup", "list"] },
   "sam-curator": { description: "The skill curator pass over the library (sam skills curator)", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "skills", "curator"] },
   "sam-deliveries": { description: "The notification-worthiness ledger (sam deliveries list)", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "deliveries", "list"] },
+  "sam-brief": { description: "The morning brief (sam brief today): today's agenda and mail through the senses, what needs the owner, the watches' latest verdicts, and the open work queues - assembled deterministically, no model call", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "brief", "today"] },
 };
 export function scriptCommandNames(): string[] { return Object.keys(SCRIPT_JOB_COMMANDS); }
 export function scriptArgv(root: string, name: string): string[] {

@@ -65,10 +65,10 @@ test("tool tiers: loads persist per chat, unknown names are refused, stubs name 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("tool tiers: own chats crossed the threshold with sam_search_chats (21 own tools after sam_reach + sam_senses) - the core rides upfront, the rest is deferred with the loader", async () => {
+test("tool tiers: own chats crossed the threshold with sam_search_chats (22 own tools after sam_reach + sam_senses + sam_brief) - the core rides upfront, the rest is deferred with the loader", async () => {
   const root = scratch();
   try {
-    assert.equal(OWN_TOOLS.length, 21);
+    assert.equal(OWN_TOOLS.length, 22);
     const sentNames: string[][] = [];
     let step = 0;
     const fake = {
