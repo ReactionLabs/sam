@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { setCodeRoot, writeCodeFile } from "./code.js";
 import { recordVerification } from "./verification.js";
 import { drainCodingTasks, listCodingTasks, queueCodingTask } from "./coding.js";
-import { commitTaskPaths, isTaskBranch, listTaskBranches, prepareTaskBranch, pushBranch, taskBranchName, validateGitPushDetail } from "./git-work.js";
+import { commitTaskPaths, isTaskBranch, listTaskBranches, prepareTaskBranch, pushBranch, taskBranchName, validateGitPushDetail , canonicalPath } from "./git-work.js";
 import { decideAction, listActions, proposeAction } from "./actions.js";
 import { classifyProposal, saveApprovalPolicy } from "./approval-policy.js";
 import { readActivity } from "./activity.js";
@@ -60,6 +60,18 @@ test("prepare: a non-git code root records mode none - no branch is faked", () =
     assert.equal(state.mode, "none");
     assert.equal(state.branch, null);
     assert.deepEqual(listTaskBranches(sam), { repo: null, current: null, branches: [] });
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("canonicalPath: a symlinked spelling and the real spelling of one directory compare equal", () => {
+  const base = mkdtempSync(join(tmpdir(), "sam-canon-"));
+  try {
+    const real = join(base, "real");
+    mkdirSync(real);
+    const alias = join(base, "alias");
+    symlinkSync(real, alias, "junction");
+    assert.equal(canonicalPath(alias), canonicalPath(real));
+    assert.notEqual(canonicalPath(base), canonicalPath(real));
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 

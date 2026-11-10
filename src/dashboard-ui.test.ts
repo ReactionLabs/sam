@@ -57,9 +57,11 @@ test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:0
   assert.ok(copyFn,"copyText present");
   assert.ok(copyFn[0].indexOf("fallbackCopyText(text)")<copyFn[0].indexOf("navigator.clipboard.writeText"),"fallback is attempted before the async clipboard API");
   assert.match(dashboardHtml,/Long-press text to copy/);
-  // The affordance is a labeled, plainly tappable pill, not a faint icon.
-  assert.match(dashboardHtml,/\.bubble \.copy\{[^}]*min-height:36px/);
-  assert.match(dashboardHtml,/document\.createTextNode\(' Copy'\)/);
+  // The affordance shape was re-ruled by Dip 2026-11-10 ("way cleaner"):
+  // a slim icon-only corner chip replaces the labeled pill from the
+  // 2026-11-09 fix. The fallback machinery above is unchanged.
+  assert.match(dashboardHtml,/\.bubble \.copy\{[^}]*position:absolute/);
+  assert.match(dashboardHtml,/copy\.append\(iconEl\('copy','sm'\)\);/);
   // Text selection is never eaten: bubbles and their text spans carry
   // explicit selection + touch-callout CSS.
   assert.match(dashboardHtml,/\.bubble \.msgtext[^}]*-webkit-touch-callout:default/);

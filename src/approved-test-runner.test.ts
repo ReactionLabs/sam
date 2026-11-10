@@ -14,6 +14,7 @@ test("runner requires exact digest and consumes authorization once",async()=>{
   const root=mkdtempSync(join(tmpdir(),"sam-run-"));
   try {
     mkdirSync(join(root,"dist"));
+    writeFileSync(join(root,"package.json"),'{"type":"module"}');
     writeFileSync(join(root,"dist","demo.test.js"),'import test from "node:test"; test("works",()=>{});\n');
     const request=requestTestRun(root,"test");
     await assert.rejects(executeApprovedTestRun(root,request.id,"0".repeat(64)),/digest mismatch/);
@@ -30,6 +31,7 @@ test("runner reports failed test without executing arbitrary commands",async()=>
   const root=mkdtempSync(join(tmpdir(),"sam-run-"));
   try {
     mkdirSync(join(root,"dist"));
+    writeFileSync(join(root,"package.json"),'{"type":"module"}');
     writeFileSync(join(root,"dist","fail.test.js"),'import test from "node:test"; test("fails",()=>{throw Error("expected failure")});\n');
     const request=requestTestRun(root,"test");
     const result=await executeApprovedTestRun(root,request.id,request.digest,10000);

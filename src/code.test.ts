@@ -90,13 +90,17 @@ test("C1 fences: escapes, protected names, secrets, dot-paths, symlinks, binarie
     // A symlinked directory inside the root is not a door out of it.
     const outside = join(base, "outside");
     mkdirSync(outside, { recursive: true });
-    symlinkSync(outside, join(proj, "link"));
-    assert.throws(() => writeCodeFile(sam, "sam", "link/evil.txt", "x"), /Symlink/);
-    assert.equal(existsSync(join(outside, "evil.txt")), false);
+    let linked = true;
+    try { symlinkSync(outside, join(proj, "link"), "junction"); }
+    catch { try { symlinkSync(outside, join(proj, "link")); } catch { linked = false; } }
+    if (linked) {
+      assert.throws(() => writeCodeFile(sam, "sam", "link/evil.txt", "x"), /Symlink/);
+      assert.equal(existsSync(join(outside, "evil.txt")), false);
+    }
     // Reads ride the same fence.
     writeCodeFile(sam, "sam", "ok.txt", "hello\n");
     assert.equal(readCodeFile(sam, "ok.txt").content, "hello\n");
-    assert.deepEqual(listCodeFiles(sam).entries.map(e => e.name).sort(), ["link", "ok.txt", "package.json"]);
+    assert.deepEqual(listCodeFiles(sam).entries.map(e => e.name).sort(), linked ? ["link", "ok.txt", "package.json"] : ["ok.txt", "package.json"]);
     assert.throws(() => readCodeFile(sam, "../home/.sam/code.json"), /Invalid|Protected/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });

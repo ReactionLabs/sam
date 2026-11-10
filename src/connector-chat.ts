@@ -36,11 +36,11 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
  }
  if(own)allDefs.push(...ownToolsFor(root));
  // Deferred tool loading (harness item 4): the combined set (connector
- // + own) is partitioned per round. Loads persist per chat when a chat
- // session scopes them; without one they are ephemeral to the turn -
- // the own-tools loop's shape. Partitioning is unconditional since the
- // own set reached 20 (Phase E item 2): an unpartitioned no-session
- // call would send 20+ tools and trip the provider's request cap.
+ // + own) is partitioned per round. Loads persist per chat session when
+ // there is one and ride the ephemeral set when there is not. Tiering
+ // used to be session-only, but the combined set outgrew the provider's
+ // 20-tool request cap when sam_reach joined (2026-11-10), so it is
+ // unconditional now - the same discipline ownToolsChat already had.
  const sessionChatId=own?.chatId;
  const ephemeralLoaded=new Set<string>();
  const currentLoaded=()=>new Set([...(sessionChatId?loadedTools(root,sessionChatId):[]),...ephemeralLoaded]);
