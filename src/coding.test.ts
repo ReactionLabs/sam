@@ -195,7 +195,8 @@ test("sam_coding_task queues through the chat seam; visitors are refused; the pr
     const p1 = codingPrompt(listCodingTasks(sam)[0], 1, null);
     assert.match(p1, /iteration 1 of 3/);
     assert.match(p1, /never claim done over unverified writes/);
-    assert.match(p1, /Do not commit, push/);
+    assert.match(p1, /Never push or open pull requests/);
+    assert.match(p1, /commits your writes locally after each iteration/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
