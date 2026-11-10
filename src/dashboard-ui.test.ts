@@ -72,3 +72,19 @@ test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:0
   // Team (agent) messages carry the same affordance.
   assert.match(dashboardHtml,/copyButton\(\(\)=>event\.content\)/);
 });
+
+test("dashboard page: sidebar sections actually navigate (owner defect 2026-11-09)",()=>{
+  // The Skills/Missions/Schedules/Activity nav items scrolled to blocks in
+  // the right rail, which on the phone layout only exists inside the
+  // Activity view - from any other view the tap scrolled a hidden element
+  // and read as dead. showSection must switch to the containing view on
+  // narrow screens, then scroll and flash the target block.
+  assert.match(dashboardHtml,/function showSection\(id\)\{const node=el\(id\);if\(!node\)return;/);
+  assert.match(dashboardHtml,/matchMedia\('\(max-width:820px\)'\)/);
+  assert.match(dashboardHtml,/setView\('activity'\)/);
+  assert.match(dashboardHtml,/classList\.add\('flash'\)/);
+  assert.match(dashboardHtml,/\.info\.flash\{box-shadow:0 0 0 2px #e8ae65\}/);
+  // The Skills block renders readable rows, not a JSON dump.
+  assert.match(dashboardHtml,/No skills installed yet/);
+  assert.doesNotMatch(dashboardHtml,/\['missions','skills','schedules','logs'\]/);
+});
