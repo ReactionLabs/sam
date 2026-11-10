@@ -3,7 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
-import { addHeartbeatJob } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
+import { compileSchedule, scriptArgv, validateTimezone } from "./schedule.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { installSkill } from "./skill-registry.js";
@@ -73,7 +74,7 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}"); }
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}");
-  const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown };
+  const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown; schedule?: unknown; timezone?: unknown; script?: unknown };
   const profile = typeof s.profile === "string" ? s.profile : "";
   const names = knownProfileNames(root);
   if (!names.includes(profile)) {
@@ -81,7 +82,24 @@ function validateHeartbeatDetail(root: string, detail: string): void {
     throw new Error("Unknown profile \"" + profile + "\" in heartbeat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : ""));
   }
   if (typeof s.name !== "string" || !/^[a-zA-Z0-9 _-]{1,80}$/.test(s.name)) throw new Error("Invalid heartbeat name in detail");
-  if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
+  // Real cron (Phase C item 1): a detail may carry a schedule
+  // phrase (interval, wall-clock, 5-field cron, or natural
+  // language) instead of raw minutes - it is compiled at proposal
+  // time so an unreadable schedule never reaches a card. A script
+  // detail names one allowlisted no-agent command and needs no
+  // prompt; anything else keeps the original minutes + prompt
+  // contract exactly.
+  if (typeof s.script === "string" && s.script) {
+    scriptArgv(root, s.script); // throws naming the allowlist
+    if (typeof s.schedule !== "string" || !s.schedule) throw new Error("A script heartbeat detail needs a schedule");
+    compileSchedule(s.schedule);
+    if (s.timezone !== undefined) validateTimezone(String(s.timezone));
+    return;
+  }
+  if (typeof s.schedule === "string" && s.schedule) {
+    compileSchedule(s.schedule);
+    if (s.timezone !== undefined) validateTimezone(String(s.timezone));
+  } else if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
   if (typeof s.prompt !== "string" || !s.prompt.trim() || s.prompt.length > 2000) throw new Error("Invalid heartbeat prompt in detail");
 }
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
@@ -136,7 +154,11 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     finally { store.close(); }
   }
   if (a.kind === "heartbeat") {
-    const spec = JSON.parse(a.detail) as { name: string; minutes: number; profile: string; prompt: string; channelId?: string | null };
+    const spec = JSON.parse(a.detail) as { name: string; minutes: number; profile: string; prompt: string; channelId?: string | null; schedule?: string; timezone?: string; script?: string };
+    if (spec.schedule) {
+      const job = addScheduledJob(root, { name: spec.name, profile: spec.profile, schedule: spec.schedule, timezone: spec.timezone, prompt: spec.prompt, script: spec.script ?? null, channelId: spec.channelId ?? null });
+      return "Heartbeat job created (" + job.id + ")";
+    }
     const job = addHeartbeatJob(root, spec.name, Number(spec.minutes), spec.profile, spec.prompt, spec.channelId ?? null);
     return "Heartbeat job created (" + job.id + ")";
   }

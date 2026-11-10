@@ -12,6 +12,9 @@ import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
+import { compileSchedule, nextCronRun, scriptArgv, scriptCommandNames, validateTimezone } from "./schedule.js";
+import { markAttemptFailed, markDelivered, markSuppressed, pendingDeliveries, queueDelivery } from "./delivery-outbox.js";
+import { execFile } from "node:child_process";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -22,7 +25,14 @@ import { runSkillCurator } from "./skill-author.js";
 //     real chat turns under a profile, with the reply optionally delivered to a
 //     channel. A heartbeat is a chat SAM has with itself on a timer.
 // Every tick appends to .sam/heartbeats.jsonl, so the engine room is auditable.
-export interface HeartbeatJob { id:string; name:string; minutes:number; profile:string; prompt:string; channelId:string|null; enabled:boolean; lastRun:string|null }
+export interface HeartbeatJob { id:string; name:string; minutes:number; profile:string; prompt:string; channelId:string|null; enabled:boolean; lastRun:string|null;
+ // Real cron (Phase C item 1): every field below is optional and
+ // absent on legacy interval jobs, which read exactly as before.
+ // cron set = the job fires on a wall-clock schedule in timezone;
+ // schedule keeps the owner's original phrase; mode "script" runs
+ // an allowlisted no-agent command instead of a model turn;
+ // createdAt anchors a cron job's first next-run computation.
+ cron?:string|null; schedule?:string|null; timezone?:string; mode?:"agent"|"script"; script?:string|null; createdAt?:string }
 function jobsPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.json");}
 function statePath(root:string){return join(resolve(root),".sam","heartbeat-state.json");}
 function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl");}
@@ -33,15 +43,59 @@ export function heartbeatJobs(root:string):HeartbeatJob[]{
  return value as HeartbeatJob[];
 }
 function saveJobs(root:string,items:HeartbeatJob[]){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(jobsPath(root),JSON.stringify(items,null,2),{mode:0o600});}
+function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null}):HeartbeatJob{
+ if(jobNameTaken(root,input.name))throw Error("Heartbeat limit or duplicate name");
+ const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};
+ if(input.cron||input.schedule){item.cron=input.cron??null;item.schedule=input.schedule??null;item.timezone=input.timezone??"UTC";}
+ if(input.mode==="script"){item.mode="script";item.script=input.script??null;}
+ saveJobs(root,[...heartbeatJobs(root),item]);return item;
+}
+function jobNameTaken(root:string,name:string):boolean{const items=heartbeatJobs(root);return items.length>=32||items.some(j=>j.name===name);}
+function validJobName(name:string){if(!/^[a-zA-Z0-9 _-]{1,80}$/.test(name))throw Error("Invalid heartbeat name");}
+function validJobProfile(profile:string){if(!/^[a-z][a-z0-9._-]{0,63}$/.test(profile))throw Error("Invalid profile");}
 export function addHeartbeatJob(root:string,name:string,minutes:number,profile:string,prompt:string,channelId:string|null=null):HeartbeatJob{
- if(!/^[a-zA-Z0-9 _-]{1,80}$/.test(name))throw Error("Invalid heartbeat name");
+ validJobName(name);
  if(!Number.isSafeInteger(minutes)||minutes<5||minutes>10080)throw Error("Interval must be 5 to 10080 minutes");
- if(!/^[a-z][a-z0-9._-]{0,63}$/.test(profile))throw Error("Invalid profile");
+ validJobProfile(profile);
  if(!prompt.trim()||prompt.length>2000)throw Error("Invalid heartbeat prompt");
- const items=heartbeatJobs(root);
- if(items.length>=32||items.some(j=>j.name===name))throw Error("Heartbeat limit or duplicate name");
- const item:HeartbeatJob={id:randomUUID(),name,minutes,profile,prompt:prompt.trim(),channelId,enabled:true,lastRun:null};
- saveJobs(root,[...items,item]);return item;
+ return createJob(root,{name,minutes,profile,prompt:prompt.trim(),channelId});
+}
+// One scheduling surface (Phase C item 1): the schedule phrase is
+// an interval, a wall-clock time, a 5-field cron expression, or
+// natural language compiled to cron (schedule.ts). An agent job
+// carries a prompt; a script job names one allowlisted command
+// and needs no prompt - its stdout is the output.
+export function addScheduledJob(root:string,input:{name:string;profile:string;schedule:string;timezone?:string;prompt?:string;script?:string|null;channelId?:string|null}):HeartbeatJob{
+ validJobName(input.name);validJobProfile(input.profile);
+ const compiled=compileSchedule(input.schedule);
+ const timezone=validateTimezone(input.timezone??"UTC");
+ if(compiled.kind==="cron"&&!compiled.cron)throw Error("Invalid schedule");
+ if(input.script!=null&&input.script!==""){
+  scriptArgv(root,input.script); // throws naming the allowlist
+  return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:"",channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone,mode:"script",script:input.script});
+ }
+ const prompt=input.prompt??"";
+ if(!prompt.trim()||prompt.length>2000)throw Error("Invalid heartbeat prompt");
+ return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:prompt.trim(),channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone});
+}
+// When a job next fires: interval jobs keep the legacy arithmetic
+// (last run + interval, due now if never run); cron jobs fire at
+// the next wall-clock match after their last run (or creation)
+// in their own timezone.
+export function jobNextRun(job:HeartbeatJob,from:Date=new Date()):Date|null{
+ if(job.cron){
+  const anchor=job.lastRun?Date.parse(job.lastRun):(job.createdAt?Date.parse(job.createdAt):from.getTime());
+  const next=nextCronRun(job.cron,job.timezone??"UTC",new Date(anchor));
+  if(!next)return null;
+  return next.getTime()<=from.getTime()?from:next;
+ }
+ if(!job.lastRun)return from;
+ return new Date(Date.parse(job.lastRun)+job.minutes*60000);
+}
+export function jobDue(job:HeartbeatJob,now:Date=new Date()):boolean{
+ if(!job.enabled)return false;
+ const next=jobNextRun(job,now);
+ return next!==null&&next.getTime()<=now.getTime();
 }
 export function removeHeartbeatJob(root:string,id:string):boolean{
  const items=heartbeatJobs(root),rest=items.filter(j=>j.id!==id);
@@ -208,21 +262,82 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];background:{ran:string[];failed:string[];recovered:string[]}}>{
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number}> }
+// Default no-agent script runner: execFile on the allowlist argv -
+// no shell, a 60s timeout, a bounded buffer. A non-zero exit is a
+// result the caller logs, not a throw; an unknown script name or a
+// spawn failure throws (the allowlist check happens at job creation
+// too, so this is a belt-and-braces refusal).
+export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:string;code:number}>{
+ return (name:string)=>new Promise((resolvePromise,reject)=>{
+  let argv:string[];
+  try{argv=scriptArgv(root,name);}catch(e){reject(e as Error);return;}
+  execFile(argv[0],argv.slice(1),{timeout:60000,maxBuffer:256*1024,windowsHide:true},(err,stdout)=>{
+   const code=(err as (NodeJS.ErrnoException&{code?:number|string})|null)?.code;
+   if(err&&typeof code!=="number"){reject(err);return;}
+   resolvePromise({stdout:String(stdout??""),code:typeof code==="number"?code:0});
+  });
+ });
+}
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]}}>{
  const consolidation=consolidatePreferences(root);
- const jobs=heartbeatJobs(root);const now=Date.now();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];
+ const tickStart=new Date();
+ const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
+ // Durable delivery outbox (Phase C item 1): deliveries a previous
+ // tick queued but never completed (a crash between the job's
+ // reply and the channel send, a failed attempt) are redelivered
+ // FIRST, before any new work, and land marked recovered - the
+ // at-least-once leg of the ledger. Without a deliver door the
+ // pending records simply stay pending, untouched.
+ if(deps.deliver){
+  for(const pending of pendingDeliveries(root)){
+   const recovered=pending.attempts>0||Date.parse(pending.queuedAt)<tickStart.getTime();
+   try{
+    await deps.deliver(pending.channelId,pending.text);
+    markDelivered(root,pending.id,recovered);
+    deliveryResult.delivered.push(pending.jobName);
+    if(recovered)deliveryResult.recovered.push(pending.jobName);
+    appendLog(root,{type:"delivery-recovered",name:pending.jobName,profile:pending.profile,recovered});
+   }catch(e){markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));}
+  }
+ }
+ const jobs=heartbeatJobs(root);const now=new Date();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];
  // Loaded after consolidation, which saves this same state file for its
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
  let dirty=false;let stateDirty=false;
  for(const job of jobs){
-  if(!job.enabled)continue;
-  const last=job.lastRun?Date.parse(job.lastRun):0;
-  if(now-last<job.minutes*60000)continue;
-  const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
-  const reply=await deps.runTurn(chatId,job.prompt);
-  job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+  if(!jobDue(job,now))continue;
+  const isScript=job.mode==="script";
+  let reply:string;
+  if(isScript){
+   const runScript=deps.runScript??defaultRunScript(root);
+   let outcome:{stdout:string;code:number};
+   try{outcome=await runScript(job.script??"");}
+   catch(e){
+    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
+    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    continue;
+   }
+   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+   if(outcome.code!==0){
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
+    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script exited "+outcome.code);
+    continue;
+   }
+   reply=outcome.stdout.replace(/\s+$/,"").slice(0,4000);
+   if(!reply.trim()){
+    // A quiet script is an unchanged job: silence, one log line.
+    unchanged.push(job.name);
+    appendLog(root,{type:"job-unchanged",name:job.name,profile:job.profile,script:job.script});
+    continue;
+   }
+  }else{
+   const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
+   reply=await deps.runTurn(chatId,job.prompt);
+   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+  }
   const hash=heartbeatOutputHash(reply);
   const sig=heartbeatFactSignatureString(reply);
   const prior=(state.outputs??{})[job.id];
@@ -238,29 +353,37 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   changed.push(job.name);
   appendLog(root,{type:"job",name:job.name,profile:job.profile,changed:true,replyPreview:reply.slice(0,300)});
   recordActivity(root,job.profile,"heartbeat","Heartbeat '"+job.name+"' changed: "+reply.replace(/\s+/g," ").trim().slice(0,180));
-  if(job.channelId&&deps.deliver){
+  if(job.channelId){
+   // Queue FIRST in the durable outbox, then decide, then send:
+   // a crash anywhere after this line leaves a pending record the
+   // next tick redelivers instead of a delivery nobody can prove
+   // was ever owed.
+   const queued=queueDelivery(root,{jobId:job.id,jobName:job.name,profile:job.profile,channelId:job.channelId,text:"🫀 SAM heartbeat · "+job.name+"\n\n"+reply});
    // Notification worthiness (S5): the reply is already the chat
    // record; pushing it to a channel must first be worth the
    // owner's attention - duplicates, floods, and law-denied
    // topics are held, and the hold is ledgered either way.
    const verdict=assessDelivery(root,{profile:job.profile,kind:"heartbeat",text:reply});
    if(!verdict.deliver){
+    markSuppressed(root,queued.id,verdict.reason);
     appendLog(root,{type:"delivery-suppressed",name:job.name,profile:job.profile,reason:verdict.reason});
     recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
-   }else{
-    try{await deps.deliver(job.channelId,"🫀 SAM heartbeat · "+job.name+"\n\n"+reply);}catch{appendLog(root,{type:"delivery-failed",name:job.name});}
+   }else if(deps.deliver){
+    try{await deps.deliver(job.channelId,queued.text);markDelivered(root,queued.id,false);deliveryResult.delivered.push(job.name);}
+    catch(e){markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name});}
    }
   }
  }
  if(dirty)saveJobs(root,jobs);
  if(stateDirty)saveState(root,state);
+ deliveryResult.pending=pendingDeliveries(root).length;
  // Legs (P5): every tick also drains the background queue, so a task a chat
  // handed off runs within one tick on the deep background budget tier and
  // posts its result back into its chat. Drained after due jobs so a poll's
  // cheap tier never competes with the deep work.
  const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
  if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
- return {consolidation,ran,changed,unchanged,background};
+ return {consolidation,ran,changed,unchanged,deliveries:deliveryResult,background};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.
