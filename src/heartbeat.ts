@@ -16,7 +16,7 @@ import { revisitDueLoops, type LoopRevisitResult } from "./loop-revisit.js";
 import type { GoldfishRecord } from "./goldfish.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
-import { compileSchedule, nextCronRun, scriptArgv, scriptCommandNames, validateTimezone } from "./schedule.js";
+import { compileSchedule, nextCronRun, ownerTimezone, scriptArgv, scriptCommandNames, validateTimezone } from "./schedule.js";
 import { markAttemptFailed, markDelivered, markSuppressed, pendingDeliveries, queueDelivery } from "./delivery-outbox.js";
 import { execFile } from "node:child_process";
 
@@ -36,7 +36,10 @@ export interface HeartbeatJob { id:string; name:string; minutes:number; profile:
  // schedule keeps the owner's original phrase; mode "script" runs
  // an allowlisted no-agent command instead of a model turn;
  // createdAt anchors a cron job's first next-run computation.
- cron?:string|null; schedule?:string|null; timezone?:string; mode?:"agent"|"script"; script?:string|null; createdAt?:string }
+ // onceAt (Telegram reminder gaps, 2026-11-10): a one-shot job -
+ // the absolute UTC instant it fires, after which the tick that
+ // ran it removes the job (self-retiring; see runHeartbeat).
+ cron?:string|null; schedule?:string|null; timezone?:string; mode?:"agent"|"script"; script?:string|null; createdAt?:string; onceAt?:string|null }
 function jobsPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.json");}
 function statePath(root:string){return join(resolve(root),".sam","heartbeat-state.json");}
 function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl");}
@@ -47,10 +50,11 @@ export function heartbeatJobs(root:string):HeartbeatJob[]{
  return value as HeartbeatJob[];
 }
 function saveJobs(root:string,items:HeartbeatJob[]){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(jobsPath(root),JSON.stringify(items,null,2),{mode:0o600});}
-function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null}):HeartbeatJob{
+function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null;onceAt?:string|null}):HeartbeatJob{
  if(jobNameTaken(root,input.name))throw Error("Heartbeat limit or duplicate name");
  const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};
- if(input.cron||input.schedule){item.cron=input.cron??null;item.schedule=input.schedule??null;item.timezone=input.timezone??"UTC";}
+ if(input.cron||input.schedule||input.onceAt){item.cron=input.cron??null;item.schedule=input.schedule??null;item.timezone=input.timezone??ownerTimezone();}
+ if(input.onceAt)item.onceAt=input.onceAt;
  if(input.mode==="script"){item.mode="script";item.script=input.script??null;}
  saveJobs(root,[...heartbeatJobs(root),item]);return item;
 }
@@ -71,22 +75,33 @@ export function addHeartbeatJob(root:string,name:string,minutes:number,profile:s
 // and needs no prompt - its stdout is the output.
 export function addScheduledJob(root:string,input:{name:string;profile:string;schedule:string;timezone?:string;prompt?:string;script?:string|null;channelId?:string|null}):HeartbeatJob{
  validJobName(input.name);validJobProfile(input.profile);
- const compiled=compileSchedule(input.schedule);
- const timezone=validateTimezone(input.timezone??"UTC");
+ // The timezone default is the OWNER's timezone, not UTC (Telegram
+ // reminder gaps, 2026-11-10): a job the owner asked for at "8am"
+ // fires at 8am where the owner lives. An explicit timezone wins.
+ const timezone=validateTimezone(input.timezone??ownerTimezone());
+ const compiled=compileSchedule(input.schedule,timezone);
  if(compiled.kind==="cron"&&!compiled.cron)throw Error("Invalid schedule");
+ if(compiled.kind==="once"&&!compiled.onceAt)throw Error("Invalid schedule");
  if(input.script!=null&&input.script!==""){
   scriptArgv(root,input.script); // throws naming the allowlist
-  return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:"",channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone,mode:"script",script:input.script});
+  return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:"",channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone,mode:"script",script:input.script,onceAt:compiled.onceAt});
  }
  const prompt=input.prompt??"";
  if(!prompt.trim()||prompt.length>2000)throw Error("Invalid heartbeat prompt");
- return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:prompt.trim(),channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone});
+ return createJob(root,{name:input.name,minutes:compiled.minutes??0,profile:input.profile,prompt:prompt.trim(),channelId:input.channelId??null,cron:compiled.cron,schedule:input.schedule.trim(),timezone,onceAt:compiled.onceAt});
 }
 // When a job next fires: interval jobs keep the legacy arithmetic
 // (last run + interval, due now if never run); cron jobs fire at
 // the next wall-clock match after their last run (or creation)
 // in their own timezone.
 export function jobNextRun(job:HeartbeatJob,from:Date=new Date()):Date|null{
+ // A one-shot fires at its stored instant, once: before it, that
+ // instant; after it has run, never again (the running tick also
+ // removes the job - this guard is the belt to that brace).
+ if(job.onceAt){
+  if(job.lastRun)return null;
+  return new Date(job.onceAt);
+ }
  if(job.cron){
   const anchor=job.lastRun?Date.parse(job.lastRun):(job.createdAt?Date.parse(job.createdAt):from.getTime());
   const next=nextCronRun(job.cron,job.timezone??"UTC",new Date(anchor));
@@ -310,6 +325,19 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
  let dirty=false;let stateDirty=false;
+ const retired:string[]=[];
+ // One-shot retirement (Telegram reminder gaps, 2026-11-10): a
+ // one-shot job that has had its run - a delivered or quiet reply,
+ // or an isolated failure (already logged as job-failed; leaving
+ // the job in place would refire it on every tick forever) - is
+ // removed when this tick saves the jobs file, with one ledger
+ // line naming the retirement.
+ const retireIfOnce=(job:HeartbeatJob)=>{
+  if(!job.onceAt||retired.includes(job.id))return;
+  retired.push(job.id);
+  appendLog(root,{type:"job-retired",name:job.name,profile:job.profile,onceAt:job.onceAt});
+  recordActivity(root,job.profile,"heartbeat-retired","One-shot heartbeat '"+job.name+"' fired and retired");
+ };
  for(const job of jobs){
   if(!jobDue(job,now))continue;
   const isScript=job.mode==="script";
@@ -322,6 +350,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    retireIfOnce(job);
     continue;
    }
    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
@@ -329,6 +358,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script exited "+outcome.code);
+    retireIfOnce(job);
     continue;
    }
    reply=outcome.stdout.replace(/\s+$/,"").slice(0,4000);
@@ -336,6 +366,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     // A quiet script is an unchanged job: silence, one log line.
     unchanged.push(job.name);
     appendLog(root,{type:"job-unchanged",name:job.name,profile:job.profile,script:job.script});
+    retireIfOnce(job);
     continue;
    }
   }else{
@@ -354,6 +385,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    retireIfOnce(job);
     continue;
    }
    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
@@ -368,6 +400,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    // entry, no preview spam - a frozen stack stops announcing itself.
    unchanged.push(job.name);
    appendLog(root,{type:"job-unchanged",name:job.name,profile:job.profile});
+   retireIfOnce(job);
    continue;
   }
   changed.push(job.name);
@@ -393,8 +426,9 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     catch(e){markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name});}
    }
   }
+  retireIfOnce(job);
  }
- if(dirty)saveJobs(root,jobs);
+ if(dirty||retired.length)saveJobs(root,jobs.filter(j=>!retired.includes(j.id)));
  if(stateDirty)saveState(root,state);
  deliveryResult.pending=pendingDeliveries(root).length;
  // Legs (P5): every tick also drains the background queue, so a task a chat

@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Channel } from "./channels.js";
+import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
 
@@ -24,6 +24,21 @@ export function loadBridgeState(root:string):BridgeState{
  return value as BridgeState;
 }
 export function saveBridgeState(root:string,state:BridgeState){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(statePath(root),JSON.stringify(state,null,2),{mode:0o600});}
+// The channel a SAM chat lives on, if any: a chat id found in the
+// Telegram bridge state belongs to that bridge's telegram channel.
+// This is the one resolver for "which channel is this conversation
+// on" - the loop-revisit engine's channel leg rides it, and the
+// action gate rides it to inherit a heartbeat proposal's delivery
+// channel from the chat the proposal was made in. Discord and
+// webhook chats carry no chat binding, so they return null.
+export function channelForChat(root:string,chatId:string):string|null{
+ try{
+  const state=loadBridgeState(root);
+  if(!Object.values(state.chats).includes(chatId))return null;
+ }catch{return null;}
+ const telegram=channels(root).find(c=>c.kind==="telegram"&&c.enabled);
+ return telegram?telegram.id:null;
+}
 export function chunkText(text:string,limit=4000):string[]{
  const out:string[]=[];let rest=text;
  while(rest.length>limit){let cut=rest.lastIndexOf("\n",limit);if(cut<limit/2)cut=limit;out.push(rest.slice(0,cut));rest=rest.slice(cut).replace(/^\n/,"");}

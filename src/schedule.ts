@@ -18,8 +18,23 @@ import { fileURLToPath } from "node:url";
 // a 9am job stays at 9am across a DST jump, and a time inside the
 // spring-forward gap simply does not fire that day.
 
-export type ScheduleKind = "interval" | "cron";
-export interface CompiledSchedule { kind: ScheduleKind; minutes: number | null; cron: string | null }
+export type ScheduleKind = "interval" | "cron" | "once";
+export interface CompiledSchedule { kind: ScheduleKind; minutes: number | null; cron: string | null; onceAt: string | null }
+
+// The owner's timezone (Telegram reminder gaps, 2026-11-10): a
+// scheduled job the owner asked for in conversation ("remind me at
+// 8am") must mean 8am where the OWNER lives, not 8am UTC on a box
+// that happens to run UTC. The install's owner timezone is the
+// SAM_OWNER_TIMEZONE env value when it names a real IANA zone, and
+// America/New_York otherwise (Dip's timezone, and the morning
+// brief's standing default). An explicit per-job timezone always
+// wins over this default; an invalid env value falls back instead
+// of breaking every schedule compile.
+export function ownerTimezone(): string {
+  const env = process.env.SAM_OWNER_TIMEZONE;
+  if (env) { try { return validateTimezone(env); } catch { /* fall through to the default */ } }
+  return "America/New_York";
+}
 
 const FIELD_RANGES: Array<[number, number]> = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
 const MONTH_NAMES: Record<string, number> = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
@@ -157,46 +172,84 @@ function parseClock(raw: string): { hour: number; minute: number } {
 }
 
 const DOW_WORDS: Record<string, number> = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6, sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-const SCHEDULE_EXAMPLES = "try: 'every 30 minutes', 'daily at 9am', 'weekdays at 8:30am', 'every monday at 9am', 'monthly on the 1st at 9am', or a 5-field cron expression";
+const SCHEDULE_EXAMPLES = "try: 'every 30 minutes', 'daily at 9am', 'weekdays at 8:30am', 'every monday at 9am', 'monthly on the 1st at 9am', 'once at 8am tomorrow', 'once at 2026-11-11 08:00', or a 5-field cron expression";
+
+// One-shot schedules (Telegram reminder gaps, 2026-11-10): "remind
+// me at 8am today" is not a daily job - it fires ONCE at one
+// wall-clock moment in the job's timezone and then retires. The
+// accepted shapes name the moment with a date (ISO, in the job's
+// timezone) or with today / tomorrow plus a clock time. The
+// compiled shape carries the absolute UTC instant; a moment
+// already past refuses here, at compile time, so a one-shot that
+// can never fire is never stored (and never shown as a card).
+function compileOnce(text: string, timezone: string): CompiledSchedule | null {
+  let ymd: { y: number; mo: number; d: number } | null = null;
+  let clockRaw: string | null = null;
+  let m = text.match(/^once (?:at |on )?(\d{4})-(\d{2})-(\d{2})(?:[ t]+at)?[ t]+(\d{1,2}:\d{2})$/);
+  if (m) { ymd = { y: Number(m[1]), mo: Number(m[2]), d: Number(m[3]) }; clockRaw = m[4]; }
+  if (!ymd) {
+    m = text.match(/^once at (.+?) (today|tomorrow)$/) || text.match(/^once (today|tomorrow) at (.+)$/);
+    if (m) {
+      const which = m[1] === "today" || m[1] === "tomorrow" ? m[1] : m[2];
+      clockRaw = m[1] === "today" || m[1] === "tomorrow" ? m[2] : m[1];
+      const nowLocal = localParts(timezone, new Date());
+      const base = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day + (which === "tomorrow" ? 1 : 0)));
+      ymd = { y: base.getUTCFullYear(), mo: base.getUTCMonth() + 1, d: base.getUTCDate() };
+    }
+  }
+  if (!ymd || clockRaw === null) return null;
+  const c = parseClock(clockRaw);
+  const utc = localToUtc(timezone, ymd.y, ymd.mo, ymd.d, c.hour, c.minute);
+  const parts = localParts(timezone, utc);
+  if (parts.year !== ymd.y || parts.month !== ymd.mo || parts.day !== ymd.d || parts.hour !== c.hour || parts.minute !== c.minute) {
+    throw new Error("That one-shot time does not exist in " + timezone + " (it falls in a daylight-saving gap) - pick a different time");
+  }
+  if (utc.getTime() <= Date.now()) throw new Error("That one-shot time is already past in " + timezone + " - a reminder that can never fire is not stored; pick a future time");
+  return { kind: "once", minutes: null, cron: null, onceAt: utc.toISOString() };
+}
 
 // Compile one schedule phrase to the stored shape. Accepts a raw
 // 5-field cron expression verbatim (validated), interval phrases,
-// and the wall-clock phrases an owner actually says. Anything else
-// throws with the supported shapes named, so a refusal teaches.
-export function compileSchedule(input: string): CompiledSchedule {
+// one-shot phrases, and the wall-clock phrases an owner actually
+// says. Anything else throws with the supported shapes named, so a
+// refusal teaches. The timezone interprets one-shot dates and
+// today/tomorrow; it defaults to the owner's timezone.
+export function compileSchedule(input: string, timezone: string = ownerTimezone()): CompiledSchedule {
   const raw = (input ?? "").trim();
   if (!raw) throw new Error("Empty schedule - " + SCHEDULE_EXAMPLES);
   if (/^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(raw) && !/[a-z]{3,}/i.test(raw.replace(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|sun|mon|tue|wed|thu|fri|sat)\b/gi, ""))) {
-    parseCron(raw); return { kind: "cron", minutes: null, cron: raw.replace(/\s+/g, " ") };
+    parseCron(raw); return { kind: "cron", minutes: null, cron: raw.replace(/\s+/g, " "), onceAt: null };
   }
   const text = raw.toLowerCase().replace(/\s+/g, " ");
+  if (text.startsWith("once")) { const once = compileOnce(text, validateTimezone(timezone)); if (once) return once; }
   let m = text.match(/^every (\d+) (minute|minutes|min|hour|hours|hr)$/);
-  if (m) { const n = Number(m[1]) * (m[2].startsWith("h") ? 60 : 1); if (n < 5 || n > 10080) throw new Error("Interval must be 5 to 10080 minutes"); return { kind: "interval", minutes: n, cron: null }; }
+  if (m) { const n = Number(m[1]) * (m[2].startsWith("h") ? 60 : 1); if (n < 5 || n > 10080) throw new Error("Interval must be 5 to 10080 minutes"); return { kind: "interval", minutes: n, cron: null, onceAt: null }; }
   if (text === "every minute") throw new Error("Interval must be 5 to 10080 minutes");
-  if (text === "every hour") return { kind: "interval", minutes: 60, cron: null };
+  if (text === "every hour") return { kind: "interval", minutes: 60, cron: null, onceAt: null };
   m = text.match(/^(?:daily|every day)(?: at (.+))?$/) || text.match(/^at (.+?) (?:daily|every day)$/);
-  if (m) { const c = parseClock(m[1] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * *` }; }
+  if (m) { const c = parseClock(m[1] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * *`, onceAt: null }; }
   m = text.match(/^(?:weekdays|every weekday)(?: at (.+))?$/) || text.match(/^at (.+?) (?:on )?weekdays$/);
-  if (m) { const c = parseClock(m[1] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * 1-5` }; }
+  if (m) { const c = parseClock(m[1] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * 1-5`, onceAt: null }; }
   m = text.match(/^(?:weekly on|every) ([a-z]+)(?: at (.+))?$/) || text.match(/^at (.+?) (?:on|every) ([a-z]+)$/);
   if (m) {
     const dowWord = m.length === 3 ? m[1] : m[2];
     const timeRaw = m.length === 3 ? m[2] : m[1];
     const dow = DOW_WORDS[dowWord];
-    if (dow !== undefined) { const c = parseClock(timeRaw ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * ${dow}` }; }
+    if (dow !== undefined) { const c = parseClock(timeRaw ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * ${dow}`, onceAt: null }; }
   }
   m = text.match(/^monthly on the (\d{1,2})(?:st|nd|rd|th)?(?: at (.+))?$/) || text.match(/^monthly on day (\d{1,2})(?: at (.+))?$/);
-  if (m) { const dom = Number(m[1]); if (dom < 1 || dom > 31) throw new Error("Day of month must be 1 to 31"); const c = parseClock(m[2] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} ${dom} * *` }; }
+  if (m) { const dom = Number(m[1]); if (dom < 1 || dom > 31) throw new Error("Day of month must be 1 to 31"); const c = parseClock(m[2] ?? "9am"); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} ${dom} * *`, onceAt: null }; }
   m = text.match(/^at (.+)$/);
-  if (m) { const c = parseClock(m[1]); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * *` }; }
+  if (m) { const c = parseClock(m[1]); return { kind: "cron", minutes: null, cron: `${c.minute} ${c.hour} * * *`, onceAt: null }; }
   // A raw cron expression with month/weekday names lands here.
-  try { parseCron(raw); return { kind: "cron", minutes: null, cron: raw.replace(/\s+/g, " ") }; } catch { /* fall through to the teaching refusal */ }
+  try { parseCron(raw); return { kind: "cron", minutes: null, cron: raw.replace(/\s+/g, " "), onceAt: null }; } catch { /* fall through to the teaching refusal */ }
   throw new Error("Cannot read the schedule '" + input + "' - " + SCHEDULE_EXAMPLES);
 }
 
 // A one-line human description of a stored schedule, for lists and
 // the `next` verb: the phrase the owner gave, or the cron itself.
-export function describeSchedule(job: { minutes: number; cron?: string | null; schedule?: string | null; timezone?: string }): string {
+export function describeSchedule(job: { minutes: number; cron?: string | null; schedule?: string | null; timezone?: string; onceAt?: string | null }): string {
+  if (job.onceAt) return (job.schedule ?? "once") + " (once at " + job.onceAt + (job.timezone ? ", " + job.timezone : "") + ")";
   if (job.schedule) return job.schedule + (job.cron ? " (" + job.cron + (job.timezone && job.timezone !== "UTC" ? ", " + job.timezone : "") + ")" : "");
   if (job.cron) return "cron " + job.cron + (job.timezone && job.timezone !== "UTC" ? " (" + job.timezone + ")" : "");
   return "every " + job.minutes + " minutes";

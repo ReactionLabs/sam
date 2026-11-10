@@ -58,20 +58,20 @@ test("nextCronRun: weekday, monthly, and dom/dow OR semantics", () => {
 });
 
 test("compileSchedule: intervals, wall clock, natural language, raw cron", () => {
-  assert.deepEqual(compileSchedule("every 30 minutes"), { kind: "interval", minutes: 30, cron: null });
-  assert.deepEqual(compileSchedule("every 2 hours"), { kind: "interval", minutes: 120, cron: null });
-  assert.deepEqual(compileSchedule("every hour"), { kind: "interval", minutes: 60, cron: null });
+  assert.deepEqual(compileSchedule("every 30 minutes"), { kind: "interval", minutes: 30, cron: null, onceAt: null });
+  assert.deepEqual(compileSchedule("every 2 hours"), { kind: "interval", minutes: 120, cron: null, onceAt: null });
+  assert.deepEqual(compileSchedule("every hour"), { kind: "interval", minutes: 60, cron: null, onceAt: null });
   assert.throws(() => compileSchedule("every 2 minutes"), /5 to 10080/);
-  assert.deepEqual(compileSchedule("daily at 9am"), { kind: "cron", minutes: null, cron: "0 9 * * *" });
-  assert.deepEqual(compileSchedule("daily at 9:30pm"), { kind: "cron", minutes: null, cron: "30 21 * * *" });
-  assert.deepEqual(compileSchedule("daily"), { kind: "cron", minutes: null, cron: "0 9 * * *" });
-  assert.deepEqual(compileSchedule("weekdays at 8:30am"), { kind: "cron", minutes: null, cron: "30 8 * * 1-5" });
-  assert.deepEqual(compileSchedule("every monday at 9am"), { kind: "cron", minutes: null, cron: "0 9 * * 1" });
-  assert.deepEqual(compileSchedule("weekly on friday at 17:00"), { kind: "cron", minutes: null, cron: "0 17 * * 5" });
-  assert.deepEqual(compileSchedule("monthly on the 1st at 9am"), { kind: "cron", minutes: null, cron: "0 9 1 * *" });
-  assert.deepEqual(compileSchedule("at 14:00"), { kind: "cron", minutes: null, cron: "0 14 * * *" });
-  assert.deepEqual(compileSchedule("0 9 * * 1-5"), { kind: "cron", minutes: null, cron: "0 9 * * 1-5" });
-  assert.deepEqual(compileSchedule("0 9 * * mon-fri"), { kind: "cron", minutes: null, cron: "0 9 * * mon-fri" });
+  assert.deepEqual(compileSchedule("daily at 9am"), { kind: "cron", minutes: null, cron: "0 9 * * *", onceAt: null });
+  assert.deepEqual(compileSchedule("daily at 9:30pm"), { kind: "cron", minutes: null, cron: "30 21 * * *", onceAt: null });
+  assert.deepEqual(compileSchedule("daily"), { kind: "cron", minutes: null, cron: "0 9 * * *", onceAt: null });
+  assert.deepEqual(compileSchedule("weekdays at 8:30am"), { kind: "cron", minutes: null, cron: "30 8 * * 1-5", onceAt: null });
+  assert.deepEqual(compileSchedule("every monday at 9am"), { kind: "cron", minutes: null, cron: "0 9 * * 1", onceAt: null });
+  assert.deepEqual(compileSchedule("weekly on friday at 17:00"), { kind: "cron", minutes: null, cron: "0 17 * * 5", onceAt: null });
+  assert.deepEqual(compileSchedule("monthly on the 1st at 9am"), { kind: "cron", minutes: null, cron: "0 9 1 * *", onceAt: null });
+  assert.deepEqual(compileSchedule("at 14:00"), { kind: "cron", minutes: null, cron: "0 14 * * *", onceAt: null });
+  assert.deepEqual(compileSchedule("0 9 * * 1-5"), { kind: "cron", minutes: null, cron: "0 9 * * 1-5", onceAt: null });
+  assert.deepEqual(compileSchedule("0 9 * * mon-fri"), { kind: "cron", minutes: null, cron: "0 9 * * mon-fri", onceAt: null });
   assert.throws(() => compileSchedule("whenever it feels right"), /Cannot read the schedule/);
   assert.throws(() => compileSchedule("daily at teatime"), /Cannot read the time/);
 });

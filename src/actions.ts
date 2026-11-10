@@ -4,7 +4,9 @@ import { join, resolve } from "node:path";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
-import { compileSchedule, scriptArgv, validateTimezone } from "./schedule.js";
+import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
+import { channels } from "./channels.js";
+import { channelForChat } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
@@ -98,7 +100,7 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}"); }
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}");
-  const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown; schedule?: unknown; timezone?: unknown; script?: unknown };
+  const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown; schedule?: unknown; timezone?: unknown; script?: unknown; channelId?: unknown };
   const profile = typeof s.profile === "string" ? s.profile : "";
   const names = knownProfileNames(root);
   if (!names.includes(profile)) {
@@ -106,34 +108,64 @@ function validateHeartbeatDetail(root: string, detail: string): void {
     throw new Error("Unknown profile \"" + profile + "\" in heartbeat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : ""));
   }
   if (typeof s.name !== "string" || !/^[a-zA-Z0-9 _-]{1,80}$/.test(s.name)) throw new Error("Invalid heartbeat name in detail");
+  // A named delivery channel must be a real channel on this
+  // install: a job created for a channel that does not exist
+  // would deliver nowhere and read as done. Refused here, at
+  // proposal time, naming the registry - the same dead-card rule
+  // as the profile check above.
+  if (s.channelId !== undefined && s.channelId !== null && s.channelId !== "") {
+    if (typeof s.channelId !== "string") throw new Error("Invalid channelId in heartbeat detail");
+    const known = channels(root);
+    if (!known.some(c => c.id === s.channelId)) throw new Error("Unknown channel \"" + s.channelId + "\" in heartbeat detail. Valid channels: " + (known.length ? known.map(c => c.name + " (" + c.id + ")").join(", ") : "none registered"));
+  }
   // Real cron (Phase C item 1): a detail may carry a schedule
-  // phrase (interval, wall-clock, 5-field cron, or natural
-  // language) instead of raw minutes - it is compiled at proposal
-  // time so an unreadable schedule never reaches a card. A script
-  // detail names one allowlisted no-agent command and needs no
-  // prompt; anything else keeps the original minutes + prompt
-  // contract exactly.
+  // phrase (interval, wall-clock, 5-field cron, natural language,
+  // or a one-shot "once at ...") instead of raw minutes - it is
+  // compiled at proposal time so an unreadable schedule never
+  // reaches a card. Compilation rides the job's own timezone (the
+  // detail's, or the owner's default), because a one-shot's date
+  // only means anything in that zone. A script detail names one
+  // allowlisted no-agent command and needs no prompt; anything
+  // else keeps the original minutes + prompt contract exactly.
+  const tz = s.timezone !== undefined ? validateTimezone(String(s.timezone)) : ownerTimezone();
   if (typeof s.script === "string" && s.script) {
     scriptArgv(root, s.script); // throws naming the allowlist
     if (typeof s.schedule !== "string" || !s.schedule) throw new Error("A script heartbeat detail needs a schedule");
-    compileSchedule(s.schedule);
-    if (s.timezone !== undefined) validateTimezone(String(s.timezone));
+    compileSchedule(s.schedule, tz);
     return;
   }
   if (typeof s.schedule === "string" && s.schedule) {
-    compileSchedule(s.schedule);
-    if (s.timezone !== undefined) validateTimezone(String(s.timezone));
+    compileSchedule(s.schedule, tz);
   } else if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
   if (typeof s.prompt !== "string" || !s.prompt.trim() || s.prompt.length > 2000) throw new Error("Invalid heartbeat prompt in detail");
 }
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
-  const detail = (input.detail ?? "").trim();
+  let detail = (input.detail ?? "").trim();
   if (!title || title.length > 200) throw new Error("Invalid action title");
   if (!detail || detail.length > 4000) throw new Error("Invalid action detail");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
+  // Channel inheritance (Telegram reminder gaps, 2026-11-10): a
+  // heartbeat proposed from inside a channel-bound chat (the
+  // owner asked on Telegram) inherits that channel as the job's
+  // delivery target, so the reminder pings the owner back on the
+  // surface they asked from instead of landing silently in a
+  // dashboard heartbeat chat. An explicit channelId in the detail
+  // always wins; a chat that lives on no channel inherits
+  // nothing. The inherited id is written into the stored detail,
+  // so the card the owner approves already shows where the job
+  // will deliver.
+  if (input.kind === "heartbeat" && input.chatId) {
+    try {
+      const spec = JSON.parse(detail) as { channelId?: unknown };
+      if (spec.channelId === undefined || spec.channelId === null || spec.channelId === "") {
+        const inherited = channelForChat(root, input.chatId);
+        if (inherited) detail = JSON.stringify({ ...spec, channelId: inherited });
+      }
+    } catch { /* validateHeartbeatDetail already proved the detail parses */ }
+  }
   // Skill authoring (Phase B item 3): the draft is validated at
   // proposal time - shape, secret scan, and the ownership rule (a
   // patch may only target a sam-authored skill) - so the owner is

@@ -3,8 +3,7 @@ import { adoptLoopChat, closeLoop, dueLoops, rescheduleLoop, updateLoopAnswer, t
 import { heartbeatFactSignatureString, heartbeatOutputHash, heartbeatOutputsEquivalent } from "./heartbeat.js";
 import { assessDelivery } from "./worthiness.js";
 import { markAttemptFailed, markDelivered, markSuppressed, queueDelivery } from "./delivery-outbox.js";
-import { channels } from "./channels.js";
-import { loadBridgeState } from "./telegram.js";
+import { channelForChat } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 
 // SECOND ANSWERS revisit engine (Dip ruling 2026-11-09 17:51: SAM
@@ -97,19 +96,15 @@ export function parseRevisitReply(reply: string, priorAnswer: string): RevisitVe
   return { verdict: "changed", text };
 }
 
-// The channel a loop's chat lives on, if any: a SAM chat id found
-// in the Telegram bridge state belongs to a telegram channel.
-// deliverToChannel fans out to the channel's known chats, the
-// same semantics heartbeat job deliveries already have. Discord
-// and webhook chats carry no chat binding, so they return null
-// and the update lands in the chat record only.
+// The channel a loop's chat lives on, if any: channelForChat in
+// telegram.ts is the one resolver (a SAM chat id found in the
+// Telegram bridge state belongs to that bridge's telegram
+// channel). deliverToChannel fans out to the channel's known
+// chats, the same semantics heartbeat job deliveries already
+// have. Discord and webhook chats carry no chat binding, so they
+// return null and the update lands in the chat record only.
 export function channelForLoopChat(root: string, chatId: string): string | null {
-  try {
-    const state = loadBridgeState(root);
-    if (!Object.values(state.chats).includes(chatId)) return null;
-  } catch { return null; }
-  const telegram = channels(root).find(c => c.kind === "telegram" && c.enabled);
-  return telegram ? telegram.id : null;
+  return channelForChat(root, chatId);
 }
 
 function ensureCheckChat(root: string, loop: OpenLoop): string {
