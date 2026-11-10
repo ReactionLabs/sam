@@ -151,12 +151,12 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     if(req.method==="POST"&&branchMatch){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
     }
-    const editChat=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/(rename|pin|profile)$"));
+    const editChat=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/(rename|pin|profile|archive)$"));
     if(req.method==="POST"&&editChat){
       try{const body=await post();const db=new ChatStore(workspace);try{
         let profileOk=true;
         if(editChat[2]==="profile"){const a=body.agent;if(a!==null&&a!=="sam"&&!(typeof a==="string"&&chatStoreAgents(workspace).some(x=>x.name===a)))profileOk=false;}
-        const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):editChat[2]==="pin"?(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned)):(profileOk&&db.setAgent(editChat[1],body.agent==="sam"?null:(body.agent as string|null)));
+        const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):editChat[2]==="pin"?(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned)):editChat[2]==="archive"?(typeof body.archived==="boolean"&&db.archive(editChat[1],body.archived)):(profileOk&&db.setAgent(editChat[1],body.agent==="sam"?null:(body.agent as string|null)));
         if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
       }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
     }
@@ -232,7 +232,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         let missions:unknown;
         try{missions=store.list().slice(0,100).map(m=>({code:m.code,status:m.status,objective:m.objective}));}finally{store.close();}
         res.setHeader("Content-Type","application/json");
-        const chatStore=new ChatStore(workspace);let chats:unknown;try{chats=chatStore.list();}finally{chatStore.close();}
+        const chatStore=new ChatStore(workspace);let chats:unknown;let archivedChats:unknown;try{const act=new Map(chatStore.lastActivity().map(a=>[a.chat_id,a] as const));const enrich=(c:{id:string})=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0});chats=chatStore.list().map(enrich);archivedChats=chatStore.list({includeArchived:true}).filter(c=>c.archived).map(enrich);}finally{chatStore.close();}
         const audit=join(workspace,".sam","execution-audit.jsonl");
         let logs:string[]=[];
         if(existsSync(audit)){
@@ -240,7 +240,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),compactions:listCompactions(workspace),pairing:pairingStatus(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,archivedChats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),compactions:listCompactions(workspace),pairing:pairingStatus(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

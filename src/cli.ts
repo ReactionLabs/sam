@@ -57,7 +57,7 @@ import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
-import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats } from "./chat-manage.js";
+import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, saveNote } from "./notes.js";
@@ -377,6 +377,8 @@ chats.command("pin").argument("<id>").option("--profile <name>","Acting profile 
 chats.command("unpin").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(pinManagedChat(program.opts().workspace,o.profile??"sam",id,false)));
 chats.command("branch").argument("<id>").argument("<title>").option("--profile <name>","Acting profile (default sam)").action((id:string,title:string,o:{profile?:string})=>output(branchManagedChat(program.opts().workspace,o.profile??"sam",id,title)));
 chats.command("archive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(archiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
+chats.command("unarchive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(unarchiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
+chats.command("activity").description("Every chat with its last-message time and message count, newest activity first").action(()=>{const db=new ChatStore(program.opts().workspace);try{const act=new Map(db.lastActivity().map(a=>[a.chat_id,a] as const));output(db.list({includeArchived:true}).map(c=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0})).sort((x,y)=>String(y.lastMessageAt??"").localeCompare(String(x.lastMessageAt??""))));}finally{db.close();}});
 chats.command("search").argument("<query>").option("--profile <name>","Acting profile (default sam)").action((query:string,o:{profile?:string})=>output(searchManagedChats(program.opts().workspace,o.profile??"sam",query)));
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));

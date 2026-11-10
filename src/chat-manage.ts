@@ -81,6 +81,10 @@ export function archiveManagedChat(root: string, actor: string, chatId: string):
   return withStore(root, store => { requireManaged(root, actor, store, chatId); store.archive(chatId, true); return store.get(chatId) as ChatRecord; });
 }
 
+export function unarchiveManagedChat(root: string, actor: string, chatId: string): ChatRecord {
+  return withStore(root, store => { requireManaged(root, actor, store, chatId); store.archive(chatId, false); return store.get(chatId) as ChatRecord; });
+}
+
 export interface ChatSearchHit { chatId: string; title: string; role: string; snippet: string; created_at: string }
 
 export function searchManagedChats(root: string, actor: string, query: string, limit = 20): ChatSearchHit[] {

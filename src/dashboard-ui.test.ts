@@ -73,6 +73,22 @@ test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:0
   assert.match(dashboardHtml,/copyButton\(\(\)=>event\.content\)/);
 });
 
+test("dashboard page: chat rail shows unread dots, last-message times, and an archived view",()=>{
+  // Unread state is per-browser (localStorage), baselined on first
+  // sight so old chats do not all flare at once; opening a chat
+  // marks it seen; each row carries its last-message time.
+  assert.match(dashboardHtml,/samSeenChats/);
+  assert.match(dashboardHtml,/markSeen\(id\)/);
+  assert.match(dashboardHtml,/udot/);
+  assert.match(dashboardHtml,/relWhen\(c\.lastMessageAt\)/);
+  // Cleanup lives in the chat options menu: archive for live
+  // chats, unarchive for archived ones, behind the Archived
+  // toggle - never a delete.
+  assert.match(dashboardHtml,/chat\.archived\?'Unarchive':'Archive'/);
+  assert.match(dashboardHtml,/archtoggle/);
+  assert.match(dashboardHtml,/lastArchivedItems/);
+});
+
 test("dashboard page: sidebar sections actually navigate (owner defect 2026-11-09)",()=>{
   // The Skills/Missions/Schedules/Activity nav items scrolled to blocks in
   // the right rail, which on the phone layout only exists inside the

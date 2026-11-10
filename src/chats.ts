@@ -104,6 +104,9 @@ export class ChatStore {
     return (this.db.prepare("SELECT * FROM chats WHERE id=?").get(id) as ChatRecord|undefined)??null;
   }
   list(opts?:{includeArchived?:boolean}):ChatRecord[]{return this.db.prepare("SELECT * FROM chats"+(opts?.includeArchived?"":" WHERE archived=0")+" ORDER BY pinned DESC,updated_at DESC LIMIT 200").all() as ChatRecord[];}
+  lastActivity():Array<{chat_id:string;last_message_at:string;messages:number}>{
+    return this.db.prepare("SELECT chat_id, MAX(created_at) AS last_message_at, COUNT(*) AS messages FROM chat_messages GROUP BY chat_id").all() as Array<{chat_id:string;last_message_at:string;messages:number}>;
+  }
   searchMessages(query:string,chatIds:string[],limit=20):Array<{chat_id:string;role:string;content:string;created_at:string}>{
     if(!query.trim()||!chatIds.length)return [];
     const like="%"+query.replace(/[%_\\]/g,"\\$&")+"%";

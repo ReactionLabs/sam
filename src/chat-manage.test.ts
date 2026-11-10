@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
-import { archiveManagedChat, branchManagedChat, createManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats } from "./chat-manage.js";
+import { archiveManagedChat, branchManagedChat, createManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { executeOwnTool } from "./own-tools.js";
 
 function scratch(): string {
@@ -68,6 +68,28 @@ test("chat management: create, pin, branch, archive, search stay inside the fenc
     archiveManagedChat(root, "sam", core.id);
     assert.equal(listManagedChats(root, "sam").some(c => c.id === core.id), false);
     assert.equal(listManagedChats(root, "sam", { includeArchived: true }).some(c => c.id === core.id), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("chat management: last activity reports newest message and count; unarchive restores", () => {
+  const root = scratch();
+  try {
+    const store = new ChatStore(root);
+    const a = store.create("Busy");
+    const b = store.create("Quiet");
+    store.add(a.id, "user", "one");
+    store.add(a.id, "assistant", "two");
+    store.add(b.id, "user", "only");
+    const act = new Map(store.lastActivity().map(x => [x.chat_id, x]));
+    assert.equal(act.get(a.id)?.messages, 2);
+    assert.equal(act.get(b.id)?.messages, 1);
+    assert.ok((act.get(a.id)?.last_message_at ?? "") >= (act.get(b.id)?.last_message_at ?? ""));
+    store.close();
+    archiveManagedChat(root, "sam", a.id);
+    assert.equal(listManagedChats(root, "sam").some(c => c.id === a.id), false);
+    const back = unarchiveManagedChat(root, "sam", a.id);
+    assert.ok(!back.archived);
+    assert.equal(listManagedChats(root, "sam").some(c => c.id === a.id), true);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
