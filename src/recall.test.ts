@@ -76,7 +76,11 @@ test("recall wiring: a chat turn carries the block, a heartbeat turn does not", 
     assert.match(chatSystems, /how many coins you see/);
     await runChatTurn(root, beat.id, "standing job prompt", { route: "heartbeat" });
     const beatSystems = bodies[1].messages.filter(m => m.role === "system").map(m => m.content).join("\n");
-    assert.doesNotMatch(beatSystems, /What you already know/);
+    // The block itself (directive + episode content) is absent on the
+    // heartbeat route; the loops' one-line pointer to the section may
+    // still appear, so the assertions target the block's own text.
+    assert.doesNotMatch(beatSystems, /ANSWER FROM THIS FIRST/);
+    assert.doesNotMatch(beatSystems, /how many coins you see/);
   } finally {
     globalThis.fetch = oldFetch;
     for (const key of Object.keys(process.env)) if (!(key in savedEnv)) delete process.env[key];
