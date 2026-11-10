@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { recordActivity } from "./activity.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
@@ -22,7 +22,10 @@ import { recordChange, recordVerification } from "./verification.js";
  * ledgered (.sam/code-writes.jsonl, with a capped unified diff readable
  * back through `code writes`), writes one activity line, and enters
  * the verify-on-stop ledger as an unverified change - a code write is
- * not "done" until a fresh build/test verdict lands (C2 below).
+ * not "done" until a fresh build/test verdict lands (C2 below). Each
+ * write also records a goldfish change artifact (.sam/changes/), so
+ * the C5 fresh-context reviewer can review coding-loop diffs exactly
+ * as it reviews edit-applies (Phase D item 4).
  *
  * C2: verify hands are a fixed in-code allowlist of commands in the
  * code root - the project's own package.json build/test/lint scripts,
@@ -238,6 +241,21 @@ function writeCodeFileInternal(root: string, actor: string, rel: string, content
   };
   mkdirSync(join(resolve(root), ".sam"), { recursive: true, mode: 0o700 });
   appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
+  // Change artifact for the goldfish verifier (Phase D item 4, C5):
+  // the before/after pair keyed by the after-hash, the file-edits
+  // shape, so a fresh-context reviewer can reconstruct exactly what
+  // this write did in the code root without any conversation. The
+  // first writer of a given after-hash owns the artifact (identical
+  // content hashes identically); the verifier refuses a path
+  // mismatch rather than reviewing the wrong file.
+  const changesDir = join(resolve(root), ".sam", "changes");
+  mkdirSync(changesDir, { recursive: true, mode: 0o700 });
+  const artifact = join(changesDir, record.afterHash + ".json");
+  if (!existsSync(artifact)) {
+    const fd = openSync(artifact, "wx", 0o600);
+    try { writeFileSync(fd, JSON.stringify({ path: rel, before, after: content, at: record.at }), "utf8"); }
+    finally { closeSync(fd); }
+  }
   recordActivity(root, actor, "code-write", (created ? "Wrote " : "Edited ") + rel + " in the code root (+" + added + "/-" + removed + " lines)");
   // Verify-on-stop: the write enters the ledger as an unverified change;
   // only a fresh C2 build/test verdict can settle it.

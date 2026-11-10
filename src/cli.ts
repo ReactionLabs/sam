@@ -14,7 +14,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { verificationGate, verificationStatus } from "./verification.js";
-import { goldfishStatus, runGoldfishReview, sessionGate } from "./goldfish.js";
+import { defaultCodingReviewer, goldfishStatus, runGoldfishReview, sessionGate } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
@@ -102,6 +102,12 @@ function withTasks<T>(fn:(tasks:TaskScheduler,missions:MissionStore)=>T):T {
   return withDb((db,missions)=>fn(new TaskScheduler(db),missions));
 }
 function output(data:unknown):void { console.log(program.opts().json?JSON.stringify(data,null,2):typeof data==="string"?data:JSON.stringify(data,null,2)); }
+// C5 self-review wiring for the production coding drains (heartbeat
+// tick + coding drain): the real goldfish reviewer from the model
+// env, or a refusing stub when no model is configured - a coding
+// task then closes blocked naming the missing reviewer, never
+// done-unreviewed.
+function codingReviewer(root:string){ const reviewer=defaultCodingReviewer(root); if(reviewer) return (task:{spec:string})=>reviewer(task.spec); return async()=>{ throw new Error("Self-review is not configured on this install (no model endpoint/key for the goldfish reviewer)"); }; }
 program.command("init").description("Initialize local mission workspace").action(()=>{
   const dir=join(resolve(program.opts().workspace),".sam");mkdirSync(dir,{recursive:true});
   const db=store();db.close();output("SAM initialized at "+dir);
@@ -277,7 +283,7 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
     },
     async(ch,body)=>postDiscord(ch,body));
   };
-  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver}));
+  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver,reviewCoding:codingReviewer(root)}));
  });
 const bgCmd=program.command("background").description("Background work (legs): tasks a chat handed off to run async and post back into the chat");
 bgCmd.command("list").option("--chat <id>","Only this chat").action((o:{chat?:string})=>output(listBackgroundTasks(program.opts().workspace).filter(t=>!o.chat||t.chatId===o.chat)));
@@ -286,7 +292,7 @@ bgCmd.command("drain").description("Run queued background tasks now, on the deep
 const codingCmd=program.command("coding").description("The coding loop (Phase D item 3, coder C3): queued coding tasks that plan, edit, verify, and iterate in the background, posting a summary + diff into their chat; done only when the verification ledger confirms the changes");
 codingCmd.command("list").option("--chat <id>","Only this chat").description("List coding tasks, newest last").action((o:{chat?:string})=>output(listCodingTasks(program.opts().workspace).filter(t=>!o.chat||t.chatId===o.chat)));
 codingCmd.command("queue").requiredOption("--chat <id>","Chat the task reports back into").requiredOption("--spec <text>","The self-contained coding spec").option("--actor <name>","Acting profile","sam").option("--max-iterations <n>","Iteration cap (1-5, default 3)").description("Queue a coding task: refuses until the operator designates a code root (code set-root)").action((o:{chat:string;spec:string;actor:string;maxIterations?:string})=>output(queueCodingTask(program.opts().workspace,{actor:o.actor,chatId:o.chat,spec:o.spec,maxIterations:o.maxIterations?parseInt(o.maxIterations,10):undefined})));
-codingCmd.command("drain").description("Run queued coding tasks now, on the deep background budget tier").action(async()=>{const root=program.opts().workspace as string;output(await drainCodingTasks(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"})}));});
+codingCmd.command("drain").description("Run queued coding tasks now, on the deep background budget tier; verified work is goldfish-reviewed (C5) before it can close done").action(async()=>{const root=program.opts().workspace as string;output(await drainCodingTasks(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),review:codingReviewer(root)}));});
 const bkCmd=program.command("backup").description("Reliability (P9): nightly state backups of the whole .sam state, with manifest verify and a restore drill that proves the copy boots");
 bkCmd.command("create").description("Snapshot the whole .sam state (SQLite DBs via VACUUM INTO, manifest with sha256 per file) into a tarball").option("--dest <dir>","Backup directory (default: <workspace>/backups)").option("--keep <n>","Keep the newest N archives","7").action((o:{dest?:string;keep:string})=>{const root=program.opts().workspace as string;output(createBackup(root,o.dest??join(resolve(root),"backups"),Number(o.keep)));});
 bkCmd.command("list").description("List backup archives, oldest first").option("--dest <dir>","Backup directory (default: <workspace>/backups)").action((o:{dest?:string})=>{const root=program.opts().workspace as string;output(listBackups(o.dest??join(resolve(root),"backups")));});

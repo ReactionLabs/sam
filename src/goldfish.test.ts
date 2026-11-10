@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildGoldfishPrompt, goldfishStatus, runGoldfishReview, sessionGate } from "./goldfish.js";
+import { setCodeRoot, writeCodeFile } from "./code.js";
 import { loadPatternCatalog } from "./pattern-catalog.js";
 import { applyEdit, proposeEdit } from "./file-edits.js";
 import { recordVerification } from "./verification.js";
@@ -144,4 +145,41 @@ test("goldfish: refuses when the live source moved on, and when the catalog is m
     rmSync(bare, { recursive: true, force: true });
     rmSync(emptyApp, { recursive: true, force: true });
   }
+});
+
+test("goldfish C5: a C1 code write is reviewable - artifact recorded, live check reads the code root", async () => {
+  const base = mkdtempSync(join(tmpdir(), "sam-goldfish-code-"));
+  const sam = join(base, "home");
+  const proj = join(base, "proj");
+  mkdirSync(sam, { recursive: true });
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(sam, "pattern-catalog.md"), CATALOG);
+  try {
+    setCodeRoot(sam, proj);
+    const written = writeCodeFile(sam, "trading", "src/hello.ts", "export const hi = 'hello';\n");
+    assert.ok(existsSync(join(sam, ".sam", "changes", written.afterHash + ".json")), "the write recorded a goldfish change artifact");
+    verifyAll(sam);
+    let seenPrompt = "";
+    const record = await runGoldfishReview(sam, "Create the greeting export", "test-model", fakeProvider(PASS_JSON, p => { seenPrompt = p; }));
+    assert.equal(record.verdict, "PASS");
+    assert.match(seenPrompt, /src\/hello\.ts/);
+    assert.match(seenPrompt, /export const hi/);
+    assert.equal(goldfishStatus(sam).state, "pass");
+    assert.equal(sessionGate(sam).outcome, "done");
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("goldfish C5: a code-root source that moved on after the write refuses the review", async () => {
+  const base = mkdtempSync(join(tmpdir(), "sam-goldfish-code-"));
+  const sam = join(base, "home");
+  const proj = join(base, "proj");
+  mkdirSync(sam, { recursive: true });
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(sam, "pattern-catalog.md"), CATALOG);
+  try {
+    setCodeRoot(sam, proj);
+    writeCodeFile(sam, "trading", "src/hello.ts", "export const hi = 'hello';\n");
+    writeFileSync(join(proj, "src/hello.ts"), "export const hi = 'tampered';\n");
+    await assert.rejects(runGoldfishReview(sam, "Create the greeting export", "test-model", fakeProvider(PASS_JSON)), /no longer matches/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
 });

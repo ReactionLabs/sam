@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { readEditableFile } from "./file-edits.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { loadPatternCatalog, type PatternCatalog } from "./pattern-catalog.js";
 import { listChanges, verificationGate, verificationStatus, type PendingChange } from "./verification.js";
+import { codeRoot } from "./code.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
 
 /**
@@ -25,6 +27,11 @@ import type { EditModel } from "./model-edit.js";
  * The Pattern Catalog is a required input (Dip addendum 2026-11-09):
  * no catalog, no review. Findings name catalog hits by ID, and the
  * schema refuses a patternId the loaded catalog does not contain.
+ *
+ * Phase D item 4 (C5 self-review) rides this same reviewer: the
+ * coding loop runs it over a task's diff once the work verifies,
+ * and a BLOCK - or a review that cannot run - keeps the task from
+ * closing done. There is no second reviewer.
  */
 
 export interface GoldfishFinding { severity: "BLOCKER" | "WARNING" | "INFO"; detail: string; evidence: string; patternId: string | null }
@@ -58,6 +65,25 @@ function readRecords(root: string): GoldfishRecord[] {
     } catch { /* torn line ignored */ }
   }
   return records;
+}
+
+/** The live source a recorded change is checked against at review
+ *  time. Edit-applies live in the SAM home (readEditableFile's
+ *  confined read); C1 code writes (Phase D item 4) live in the
+ *  designated code root, so their check resolves there instead -
+ *  contained, symlink-refusing, and capped at the C1 write cap.
+ *  Without this branch a coding-loop change could never be
+ *  reviewed: its file simply is not in the SAM home. */
+function liveSourceForChange(root: string, change: PendingChange): string {
+  if (change.source !== "code-write") return readEditableFile(root, change.path);
+  const base = codeRoot(root);
+  if (!base) throw new Error("No code root is designated; the live source for " + change.path + " cannot be checked and review is refused");
+  const target = resolve(base, change.path);
+  const back = relative(base, target);
+  if (back === ".." || back.startsWith(".." + sep) || isAbsolute(back)) throw new Error("Recorded code path escapes the code root: " + change.path + "; review refused");
+  const stat = lstatSync(target);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 32_000) throw new Error("Live source for " + change.path + " is not a safe text file; review refused");
+  return readFileSync(target, "utf8");
 }
 
 interface ChangeArtifact { path: string; before: string; after: string; at: string }
@@ -142,7 +168,7 @@ export async function runGoldfishReview(root: string, spec: string, model: strin
     const artifact = readArtifact(root, change.replacementHash);
     if (artifact.path !== change.path) throw new Error("Change artifact path mismatch for " + change.path);
     if (latestByPath.get(change.path)?.replacementHash === change.replacementHash) {
-      const live = readEditableFile(root, change.path);
+      const live = liveSourceForChange(root, change);
       if (sha(live) !== change.replacementHash) throw new Error("Live source no longer matches the recorded change for " + change.path + "; review refused");
     }
     const rendered = unifiedDiff(change.path, lineDiff(artifact.before, artifact.after));
@@ -170,6 +196,23 @@ export async function runGoldfishReview(root: string, spec: string, model: strin
   };
   appendFileSync(recordsPath(root), JSON.stringify(record) + "\n", { encoding: "utf8", flag: "a" });
   return record;
+}
+
+/** The production reviewer for the coding loop (Phase D item 4,
+ *  C5): builds the provider from the same model env the goldfish
+ *  CLI uses (SAM_GOLDFISH_MODEL wins over SAM_MODEL), or returns
+ *  null when no model is configured - the caller then wires a
+ *  reviewer that refuses, so a coding task on an unconfigured
+ *  install closes blocked, never done-unreviewed. The task spec
+ *  is sliced to the review's spec cap. */
+export function defaultCodingReviewer(root: string, env: NodeJS.ProcessEnv = process.env): ((spec: string) => Promise<GoldfishRecord>) | null {
+  const selected = env.SAM_MODEL_PROVIDER ?? "";
+  const endpoint = env.SAM_MODEL_ENDPOINT ?? (selected === "minimax" ? "https://api.minimax.io/v1/chat/completions" : undefined);
+  const model = env.SAM_GOLDFISH_MODEL ?? env.SAM_MODEL;
+  const key = env.SAM_MODEL_API_KEY ?? (selected === "minimax" ? env.MINIMAX_API_KEY : undefined);
+  if (!endpoint || !model || !key) return null;
+  const provider = new OpenAICompatibleProvider(endpoint, key, 90_000);
+  return (spec: string) => runGoldfishReview(root, spec.slice(0, 2000), model, provider);
 }
 
 export function goldfishStatus(root: string): GoldfishStatus {

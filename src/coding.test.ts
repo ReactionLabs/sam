@@ -198,3 +198,94 @@ test("sam_coding_task queues through the chat seam; visitors are refused; the pr
     assert.match(p1, /Do not commit, push/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
+
+// ---- C5 self-review (Phase D item 4): verified is not done until
+// the goldfish passes the diff. The review dep stands in for
+// runGoldfishReview; the loop's contract with it is what is tested.
+
+function reviewRecord(verdict: "PASS" | "BLOCK", summary: string, detail = "Validate first, spend the artifact last.") {
+  return {
+    at: new Date().toISOString(), spec: "spec", model: "test-model", changeCount: 1, changeHashes: [], malformed: false,
+    verdict, summary,
+    findings: verdict === "BLOCK" ? [{ severity: "BLOCKER" as const, detail, evidence: "- spend(code); + validate(code);", patternId: "LOCAL-3" }] : [],
+  };
+}
+
+test("C5: a verified task closes done only after the review PASSes; the summary names the review", async () => {
+  const { base, sam, proj, chatId } = fixture();
+  try {
+    setCodeRoot(sam, proj);
+    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Create src/hello.ts exporting a greeting" });
+    const runTurn = stubTurn(sam, () => { writeCodeFile(sam, "trading", "src/hello.ts", "export const hi = 'hello';\n"); verifyPass(sam); });
+    let reviewedSpec = "";
+    const out = await drainCodingTasks(sam, { runTurn, review: async (t) => { reviewedSpec = t.spec; return reviewRecord("PASS", "No concerns."); } });
+    assert.deepEqual(out.ran, [task.id]);
+    assert.match(reviewedSpec, /greeting/);
+    const done = listCodingTasks(sam)[0];
+    assert.equal(done.status, "done");
+    assert.equal(done.review, "PASS: No concerns.");
+    const texts = chatTexts(sam, chatId);
+    assert.match(texts[texts.length - 1], /Self-review: PASS: No concerns\./);
+    assert.ok(readActivity(sam).some(a => a.kind === "coding-review"));
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("C5: a BLOCK is data - its findings ride the next prompt, and a later PASS closes done", async () => {
+  const { base, sam, proj, chatId } = fixture();
+  try {
+    setCodeRoot(sam, proj);
+    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Fix the greeting export", maxIterations: 3 });
+    const prompts: string[] = [];
+    const runTurn = stubTurn(sam, (iteration) => {
+      if (iteration === 1) { writeCodeFile(sam, "trading", "src/hello.ts", "export const hi = 'helo';\n"); verifyPass(sam); }
+      else { editCodeFile(sam, "trading", "src/hello.ts", "'helo'", "'hello'"); verifyPass(sam); }
+    }, prompts);
+    let reviews = 0;
+    const out = await drainCodingTasks(sam, { runTurn, review: async () => { reviews += 1; return reviews === 1 ? reviewRecord("BLOCK", "One blocker.") : reviewRecord("PASS", "Fixed."); } });
+    assert.deepEqual(out.ran, [task.id]);
+    const done = listCodingTasks(sam)[0];
+    assert.equal(done.status, "done");
+    assert.equal(done.iterations, 2);
+    assert.equal(done.review, "PASS: Fixed.");
+    assert.match(prompts[1], /BLOCKED the verified diff/);
+    assert.match(prompts[1], /LOCAL-3/);
+    assert.match(prompts[1], /Validate first/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("C5: exhausting iterations under a BLOCK closes blocked, never done, with the block named", async () => {
+  const { base, sam, proj, chatId } = fixture();
+  try {
+    setCodeRoot(sam, proj);
+    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Write something the reviewer hates", maxIterations: 2 });
+    const runTurn = stubTurn(sam, (iteration) => { writeCodeFile(sam, "trading", "src/draft" + iteration + ".ts", "export const x = " + iteration + ";\n"); verifyPass(sam); });
+    const out = await drainCodingTasks(sam, { runTurn, review: async () => reviewRecord("BLOCK", "Still blocked.") });
+    assert.deepEqual(out.ran, []);
+    assert.deepEqual(out.blocked, [task.id]);
+    const blocked = listCodingTasks(sam)[0];
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.verification, "verified");
+    assert.match(blocked.review ?? "", /^BLOCK: Still blocked\./);
+    assert.match(blocked.result ?? "", /review BLOCK/);
+    const texts = chatTexts(sam, chatId);
+    assert.match(texts[texts.length - 1], /Coding task blocked \(not done\)/);
+    assert.match(texts[texts.length - 1], /Self-review: BLOCK/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("C5: a review that cannot run closes blocked naming the reason - verified alone is not done", async () => {
+  const { base, sam, proj, chatId } = fixture();
+  try {
+    setCodeRoot(sam, proj);
+    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Create src/hello.ts exporting a greeting" });
+    const runTurn = stubTurn(sam, () => { writeCodeFile(sam, "trading", "src/hello.ts", "export const hi = 'hello';\n"); verifyPass(sam); });
+    const out = await drainCodingTasks(sam, { runTurn, review: async () => { throw new Error("Pattern Catalog not found"); } });
+    assert.deepEqual(out.ran, []);
+    assert.deepEqual(out.blocked, [task.id]);
+    const blocked = listCodingTasks(sam)[0];
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.verification, "verified");
+    assert.match(blocked.review ?? "", /unavailable: Pattern Catalog not found/);
+    assert.match(blocked.result ?? "", /self-review could not run/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
