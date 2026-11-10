@@ -15,6 +15,7 @@ import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
+import { buildRecallBlock } from "./recall.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -99,12 +100,20 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   // notes), volatile last (visitor note + standing law) so law stays
   // the override layer over everything a standing file says.
   const standing=standingPromptParts(root,profileName);
+  // Recall that lands (S1): for a live chat turn, the profile's
+  // recent episodes and the records relevant to this message are
+  // already in the prompt - SAM opens with what it knows instead of
+  // spending the turn hunting for it. Never for visitors (their
+  // words are not the owner's world) and never on heartbeat or
+  // background routes (standing prompts, not a returning owner).
+  let recallBlock="";
+  if(!visitor&&route==="chat"){try{recallBlock=buildRecallBlock(root,{actor:profileName,message:content});}catch{/* recall never breaks a turn */}}
   const systemContent=composeSystemPrompt({
     base:CAPABILITY_STATEMENT+"\n"+DASHBOARD_NOTE,
     style:PLAIN_STYLE_INSTRUCTION,
     stable:standing.stable,
     role:active?"Adopt the role of agent "+active.name+": "+active.instructions:"",
-    context:standing.context,
+    context:[standing.context,recallBlock].filter(Boolean).join("\n"),
     volatile:visitorNote,
     law:lawBlock,
   });
