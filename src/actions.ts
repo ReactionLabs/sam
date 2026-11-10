@@ -11,6 +11,7 @@ import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
+import { pushBranch, validateGitPushDetail } from "./git-work.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -19,10 +20,16 @@ import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, t
 // skill SAM authored itself (Phase B item 3), or (P12, on the
 // owner's own program order) save an outbound DRAFT the owner then sends
 // themselves - drafting writes only to SAM's own store, there is no send path.
+// One further kind rides on the owner's own coder-program order (C4,
+// Phase D item 5): "git-push" pushes ONE sam/<task> branch from the
+// designated code root to that repository's own origin - the landing
+// act for coding-loop work, validated at proposal time so a card that
+// cannot execute is never shown, consequential so smart mode can
+// never auto-approve it, and with no force flag and no PR creation.
 // No external sends, no service control, no money, no trading - widening this
 // list is an owner decision, never a model decision. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -40,7 +47,7 @@ export interface ActionProposal {
   risk: ProposalRisk | null;
   decidedBy: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
@@ -124,6 +131,12 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // patch may only target a sam-authored skill) - so the owner is
   // never shown a card that cannot execute.
   if (input.kind === "skill-author") validateSkillAuthorDetail(root, detail);
+  // Git discipline (Phase D item 5, C4): a push proposal is validated
+  // at proposal time - the detail must name a sam/<task> branch that
+  // exists in the designated code root's repository, with an origin
+  // remote - so the owner is never shown a card that cannot execute,
+  // and no other branch (main included) can ever be proposed.
+  if (input.kind === "git-push") validateGitPushDetail(root, detail);
   // The hardline never-list (Phase D item 1) binds at PROPOSAL time,
   // in every approval mode: a command-form payload (rm -rf /, a fork
   // bomb, mkfs, dd onto a device, a URL piped to a root shell) is
@@ -217,6 +230,16 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
   if ((a.decidedBy ?? "").startsWith("auto:")) {
     const flagged = await scanSkillRef(a.detail);
     if (flagged.length) throw new SkillScanHold(flagged);
+  }
+  if (a.kind === "git-push") {
+    // C4 landing: push the one named sam/<task> branch to the code
+    // root repository's origin. Validation runs again inside
+    // pushBranch, so a record written around the proposal-time
+    // checks still cannot push anything else. No force, no PR -
+    // the PR stays the owner's click.
+    const { branch } = validateGitPushDetail(root, a.detail);
+    const pushed = await pushBranch(root, branch);
+    return "Pushed branch " + pushed.branch + " to origin (" + pushed.sha.slice(0, 12) + ") - no pull request was opened; that stays the owner's act";
   }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
