@@ -1,131 +1,113 @@
 # S.A.M. | Secret Agent Man
 
-**A local-first commander for an AI agent workforce.**
+**A local-first personal agent that lives on your own machine and works only for you.**
 
-SAM is an experimental, CLI-first system for turning a goal into a coordinated mission: plan tasks, assign capable operatives, track progress, preserve context, and require human approval for risky actions. The long-term vision includes model-provider adapters, arbitrary MCP servers, coding agents, browser/computer-use workers, hierarchical teams (including agents supervising other agents), and CLI or Telegram control.
+SAM is a running service, not a demo. One install serves its owner: it
+remembers what it learns, follows standing law the owner sets, does timed
+work on heartbeats, and proposes anything consequential for approval before
+it acts. A scoped copy of SAM (a "mini" in the registry; to its person it is
+simply their SAM) can serve one person or client with only that person's
+profile, data source, law, and chats, invisible to every other mini. That is
+the shape client chatbots ship in.
 
-**Built in public through hourly development sprints.** ChatGPT runs a scheduled SAM build cycle approximately once per hour, reviewing the repository, open PRs, and CI before attempting one focused improvement. Each sprint reports actual commits, tests, blockers, and the next assignment. These are scheduled development attempts, **not** SAM independently programming itself; an hourly sprint does not guarantee a commit, a completed feature, or passing tests.
+The code is public on purpose. The moat is the running sovereign service,
+the wiring, and the clients, not the source. Nothing secret lives in this
+repo: only `.env.example` is tracked, and real credentials live in the
+install's own env files.
 
-**Current reality:** SAM is an early-stage TypeScript/Node.js prototype, not a working autonomous workforce. Its mission, task, memory, routing, lease, approval, configuration, MCP authorization policy, and local daemon foundations exist, and it can execute one deterministic offline echo task and persist verified evidence on a fenced lease. It has a provider-neutral text conversation contract, deterministic fake-provider CLI, and opt-in live OpenAI-compatible text chat via `chat --live` and interactive `talk --live`. A user has verified live MiniMax chat from Windows. Live conversations inject SAM's built-in identity and optional workspace `SOUL.md`, but chat transcripts are not persistent. SAM does not yet execute MCP tools, let the model use computer tools, or perform real agent work. An explicit CLI-only read-only directory inventory is available for manual inspection; it is not a security sandbox. End-to-end model-driven delegation, general MCP execution, computer use, and Telegram control are still future work.
+## The live turn
 
-**Not tied to Second Shift.** Second Shift is a possible early MCP integration, not a requirement. SAM is designed to be provider-agnostic and integration-agnostic.
+Every surface (dashboard chat, per-mini web door, heartbeat job, background
+task) runs the same turn, `runChatTurn`. What it can do today:
 
-## Current sprint: model output hygiene (PR pending, unmerged)
+- **Profiles.** Named agents, each with its own instructions, standing
+  files (persona, owner brief, ops notes, assembled in prompt tiers), model
+  pin, and one pinned MCP connector. Per-route model tiers (cheap polls,
+  main chat, deep background) resolve under an explicit pin.
+- **Memory and law.** Preferences and standing law are captured from the
+  owner's own words, scoped per profile, and injected into every turn; a
+  correction becomes a proposed law through the approval gate instead of
+  washing past. Episodic summaries record what happened in each profile's
+  chats each day. Memory search is scope-fenced: one profile never sees
+  another's records.
+- **SAM's own tools in chat.** Scoped memory search/list, confined
+  workspace list/read (secrets, env files, keys, and binaries refused),
+  skill list/read, public skill search, background handoffs, and action
+  proposals. Tool budgets tier by route and exhaust gracefully: SAM answers
+  from partial results instead of dying mid-turn.
+- **One approval gate.** Actions (memory note, standing law, heartbeat
+  job, a post into an own chat, a draft, a skill install) execute only
+  after the owner approves, in the dashboard or by CLI. In-chat approval
+  cards decide in place and stay in the thread's history.
+- **Skills.** Installed skills are catalogued in the system prompt (names
+  and descriptions only); when a task matches one, SAM reads and follows
+  it unprompted and says which skill it is using. New skills install from
+  the public directory behind the same approval gate.
+- **Connectors.** Read-only MCP tool sets behind a default-deny policy,
+  pinned per profile. A profile with a connector still carries SAM's own
+  tools under one shared budget.
+- **Heartbeats.** Timed jobs per profile whose output is diffed against
+  the last run (normalized text plus an extracted fact signature): silence
+  when nothing changed, delivery plus an activity entry when it did.
+- **Background work.** A chat can hand off a long task; it runs async on
+  the deep tier and posts its result back into the same chat.
+- **Long chats.** Past a size trigger, older turns flush to memory first,
+  then fold into a stored summary; the chat never dies at a message cap.
+- **Doors.** A hosted chat page per mini with its own expiring key
+  (hash stored, shown once, rotatable), pairing codes for channel auth
+  (single-use, one-hour, lockout on probing), an injection screen and
+  abuse caps on visitor traffic, and a visitor mode where a customer's
+  words never become memory or law.
+- **Drafts, never sends.** Outbound text is a stored draft the owner sends
+  themselves. There is deliberately no send function. Per-contact
+  permission notes can forbid drafting outright.
+- **Owner console.** The dashboard shows minis, law (with revoke),
+  approvals and their history, per-profile activity, model routing and
+  token spend, drafts and contacts, and the background queue.
 
-This branch adds filtering of embedded `<think>...</think>` text in OpenAI-compatible model responses, rejects unterminated/reasoning-only replies, and makes invalid memory-kind errors actionable. Automated test coverage was added but has **not yet been run in this GitHub-only build environment**. Run `npm run build && npm test` on Windows before merging. This does **not** connect the model to SQLite memory or implement skills.
+## Surfaces
 
-**Next implementation:** bounded model-to-memory tool bridge, then local `SKILL.md` discovery from `.agents/skills/` with permissioned invocation. See [build scoreboard](docs/SCOREBOARD.md).
+- **Dashboard**: the phone-first chat UI and owner console, served on the
+  install's own host (on the reference install, through a Tailscale door).
+- **Web doors**: one chat page per mini, keyed and rate-limited.
+- **CLI**: every capability exists as a complete scriptable operation
+  first (`sam chats`, `sam actions`, `sam agents`, `sam minis`,
+  `sam channels`, `sam background`, `sam backup`, `sam usage`, and more);
+  surfaces ride on the CLI, never the other way round.
+- **Channels**: a Telegram bridge in pairing mode (go-live waits on the
+  owner's bot token), a webhook trigger, and Discord posting.
 
-## Experimental opt-in memory recall (unmerged feature branch)
+## State and reliability
 
-`node dist/cli.js talk --live --with-memory` sends up to ten recent workspace SQLite memory records (each truncated to 500 characters, total bounded to 6000 characters) to the configured model as explicitly untrusted context. This requires deliberate opt-in because memory content is sent to the model provider. It reads existing records across CLI restarts, but does **not** let the model search, write, edit, or archive memory. It does not persist conversation transcripts. Tests and live behavior must be verified before merge.
+All state lives under the install's `.sam/` directory: SQLite stores for
+chats, preferences, and memory/missions, JSON stores and append-only
+ledgers (activity, heartbeats, usage, verification, reviews) for the rest.
+A nightly backup snapshots the whole state (SQLite via `VACUUM INTO`, so
+a copy is transactionally consistent) and a scripted drill proves the
+copy boots before it is trusted.
 
-During `talk --live`, `/memory <query>` performs a local read-only SQLite FTS search and prints up to ten bounded records. It makes no model request and does not automatically insert results into model context. This is a stepping stone toward actual model tool calls, not an autonomous search tool.
+## Fences (by design, not by omission)
 
-## Experimental native model-to-memory tool (unmerged)
-
-Run `node dist/cli.js talk --live --memory-tools` to allow the configured OpenAI-compatible model to request **read-only** `memory_search` against local SQLite. This explicitly sends relevant returned records to the model provider and may incur a second API request. At most three read-only memory searches per user turn are allowed; unsupported tool names and invalid arguments are rejected. Console audit lines report requested/completed/failed calls. Model-initiated writes, filesystem access, commands, skill execution, and durable tool audit logs are not implemented. Provider compatibility, Windows build, tests, and live behavior require verification before merge.
-
-## Experimental scoped workspace read tools (unmerged)
-
-Run `node dist/cli.js talk --live --workspace-tools` to opt in to model-selected `list_directory`, `read_file`, `search_files` and `memory_search`. The workspace is the CLI's configured `--workspace` root. File reads are capped at 32KB, search is shallow and bounded, and hidden paths, .env, .git, .sam, node_modules, key files and symlinks are blocked. Tool results are untrusted content and may be sent to the configured model provider. No writes, command execution or Git modifications are granted. Windows and live model verification pending.
-
-## Local dashboard and scheduling (experimental PR branch)
-
-Run `node dist/cli.js dashboard` to start a read-only HTTP dashboard on 127.0.0.1:4317. The terminal prints a randomized local URL. Within `talk --live`, type `/dashboard` to start the same server without leaving chat. Open the printed URL in your browser. The dashboard displays missions, discovered skills, locally stored schedules and a 10-second UI status refresh.
-
-Use `node dist/cli.js schedule add "check repository" --every 60` to store an interval definition, and `node dist/cli.js schedule list` to inspect it. **These schedules are not yet executed.** The dashboard heartbeat is a UI status poll, not an autonomous mission scheduler. A durable single-owner scheduler, real cron expressions, background agent heartbeat and authenticated dashboard controls are upcoming work. Do not expose the dashboard port outside loopback.
-
-Verified on the preceding skill-tools branch: 88 passing tests and live model invocation of `list_skills`. The empty installed-skills list means no local SKILL.md was found. This dashboard branch requires a new build and test run.
-
-## Chat-first local dashboard (experimental)
-
-The `sam dashboard` command serves a three-column local mission-control UI. Open the randomized URL printed in the terminal, create a conversation with **New chat**, and send messages in the center panel. Each chat has a separate durable history in `.sam/chats.db`. The dashboard uses the configured `SAM_MODEL` and OpenAI-compatible provider (or MiniMax provider settings) to answer; requests may incur charges. One model reply per chat can be in flight at a time.
-
-**Scope:** this is text-only model conversation. Browser chat does not yet call workspace tools, run missions, spawn agents, stream model tokens, or install skills. The right panel shows existing mission, skill, schedule, and audit snapshots. The server binds only to 127.0.0.1 and uses a randomized URL token. Keep the URL private. This is not multi-user authentication or an OS sandbox.
-
-## Follow the build
-
-- [Open pull requests](https://github.com/ReactionLabs/sam/pulls) for work in progress and review.
-- [Commit history](https://github.com/ReactionLabs/sam/commits/main/) for changes merged into the default branch.
-- [GitHub Actions](https://github.com/ReactionLabs/sam/actions) for available automated checks.
-
-> Public source can be viewed, cloned, and forked. Never commit API keys, tokens, or client credentials.
+- No external sends, no money movement, no trading, ever, from SAM itself.
+- The action executor allowlist is internal only; widening it class by
+  class is an owner ruling each time.
+- Connectors are read-only and default-deny.
+- Visitor text is untrusted: screened at the door, never captured as
+  memory, law, or fact.
+- Secrets never enter the repo, the logs, or a chat.
 
 ## Quick start
 
 ```bash
 npm install
 npm run build
-node dist/cli.js init
-node dist/cli.js mission create "Audit this repository"
-node dist/cli.js mission list
-node dist/cli.js status
-node dist/cli.js chat "hello" # offline fake provider, no network
-# For an offline test: create a mission, add a task, transition through
-# PLANNING, READY, RUNNING, then run task run-offline <mission-code>.
-# Inspect its durable evidence with task result <task-id>.
+node dist/cli.js --workspace /path/to/home dashboard
+node dist/cli.js --workspace /path/to/home overview
 ```
 
-All state lives in one SQLite database at `.sam/missions.db` in the
-workspace (override the workspace with `--workspace <path>`; add `--json`
-for machine-readable output).
-
-## Next major milestone: SAM completes one real task on the owner's computer
-
-**Status: NOT YET IMPLEMENTED.** This is the next product milestone, not a claim of current computer control.
-
-**Demonstration:** The owner authorizes one disposable local project folder and asks SAM to inspect it, diagnose a deliberately failing test, propose a fix, request approval for any write or command, execute only the approved operation in an isolated environment, rerun the test, and show the actual diff and results. The owner can deny or cancel at any point.
-
-**Acceptance criteria:**
-
-1. Explicit workspace grant: no ambient filesystem browsing. Reject path traversal, symlink escapes, and sensitive files.
-2. Read-only inspection works first and returns grounded filenames and file contents with bounded output.
-3. Any write, shell command, or coding-agent CLI invocation requires an authenticated, action-bound owner approval. No prompt text can grant permission.
-4. Commands run under a real restricted boundary, not just a working-directory setting; enforce timeouts, output limits, cancellation, and no inherited secrets.
-5. Optionally delegate an approved coding task to a configurable CLI such as Claude Code or Codex; no dependency on any single model or paid provider.
-6. Record requests, approvals, tool actions, outcomes, and test evidence in an audit trail. Report failures without claiming success.
-7. Windows Node 22/24 automated tests cover unauthorized paths, denied commands, stale approvals, cancellation, and a successful disposable-folder end-to-end task.
-
-**Build order:** authorized read-only file tools -> owner-authenticated approval boundary -> sandboxed command runner -> coding CLI adapter -> end-to-end supervised task.
-
-**Definition of done:** A fresh user can reproduce the demo locally from documented setup instructions, see the tests pass, and inspect an honest audit log. Until then, SAM can converse but cannot operate the owner's computer.
-
-## Manual read-only directory inventory (experimental)\n\n`node dist/cli.js inspect-local --root ./sample-project` lists up to 100 immediate entries of an explicitly selected folder, with `--dir src` for a relative subfolder. Hidden and sensitive-looking entries are marked blocked; symlinks are never followed. No file contents are read or sent to a model. This is a local diagnostic command only, **not a secure sandbox or a permission grant to SAM**. A privileged local user can invoke other programs independently. Filesystem races and OS-level confinement must be addressed before model-driven file tools are enabled.\n\n## What is in this build
-
-- **Missions** (`mission create|list|inspect|transition`): a 12-state
-  mission state machine with an append-only event history, persisted in
-  SQLite (WAL).
-- **Offline execution** (`task run-offline|result`): one deterministic local echo task per invocation, with request-bound SHA-256 evidence and transactional SQLite persistence. This is a test adapter, not a model or tool runner. The CLI requires a RUNNING mission and a valid scheduler lease. No automatic retries or network calls.
-- **Tasks** (`task add|list`): dependency-aware task planning per mission.
-  The scheduler core also provides fenced worker leases (generation +
-  expiry + heartbeat) so a crashed worker's task can be recovered safely.
-- **Memory** (`memory add|list|search|archive`): durable records with
-  source provenance and SHA-256 hashes, FTS5 search, soft archive.
-  Memory is evidence, never an instruction with authority over policy.
-  See `docs/hermes-lessons.md`.
-- **Operatives** (`operative register|list|state|heartbeat|candidates`):
-  a capability registry with heartbeat freshness and capacity-aware
-  routing. Declarations are never credentials.
-- **Assignments** (`assignment claim|active|renew|finish`): durable,
-  exclusive, crash-recoverable leases binding an operative to a task.
-  A lease is capacity reservation, not execution permission.
-- **Approvals** (`approval request|list|inspect`): an action-bound,
-  expiring, one-shot approval ledger. The CLI deliberately has **no**
-  decide or consume command: deciding requires an owner-authenticated
-  boundary that is not built yet. See `docs/approval-boundary.md`.
-- **Daemon** (`daemon serve|status|stop`): a single-instance, local-only
-  IPC daemon over a workspace Unix socket.
-- **Configuration** (`config show`): environment configuration for the
-  future MiniMax model adapter and Second Shift MCP connection
-  (see `.env.example`). Remote endpoints must be HTTPS, URLs may not
-  carry credentials, and the CLI reports secrets only as present or
-  absent, never their values. `doctor` reports model/MCP readiness.
-- **MCP policy** (`mcp authorize`): a local dry-run of the deny-by-default
-  authorization boundary for a future MCP executor. Exact-match,
-  owner-approved read-only allowlist only: no wildcards, no prefix
-  matching, untrusted servers and duplicate tool names are denied.
-  The command makes no network connection. See `docs/mcp-security.md`.
+Model configuration comes from env (`SAM_MODEL`, an OpenAI-compatible
+endpoint and key, optional `SAM_MODEL_CHEAP` / `SAM_MODEL_DEEP` tier pins);
+see `.env.example`.
 
 ## Verify
 
@@ -134,92 +116,23 @@ npm run build
 npm test
 ```
 
-The test suite covers the state machine, the task scheduler, memory,
-operatives, assignment leases, approvals, the daemon, and an integrated
-CLI walk that runs a mission, task, memory record, operative, assignment
-lease, and approval request through one workspace database across
-separate processes.
+The suite (240+ tests) covers the turn, tools, gates, doors, heartbeats,
+compaction, backups, and a guard that compiles the dashboard page's inline
+script, so a dead page cannot pass.
 
-## Model conversation foundation
+## Legacy stack
 
-The `chat` command exercises a provider-neutral text-only contract using a deterministic fake provider. It makes **no model API calls**, uses no credentials, and does not execute tools. The interface is groundwork for real provider adapters and future mission integration, not a working AI chat product.
+An older commander stack (missions, operatives, assignment leases, a
+second approvals ledger, stored-but-unexecuted schedules) still ships
+behind the CLI. The live turn imports none of it. Under the UNIFICATION
+program it faces a retire-or-adopt call, one piece at a time, with the
+live turn as the only entry criterion; the actions gate above is the one
+approval door going forward.
 
-## Not implemented yet
+## Follow the build
 
-- Real model adapters (including MiniMax) and actual operative execution
-- An authenticated MCP client/executor (configuration and the
-  deny-by-default authorization policy are in; no transport is
-  connected and the policy is not yet integrated into one)
-- Owner-authenticated approval decisions
-- Memory curation, deduplication, and automatic skill extraction
+- [Open pull requests](https://github.com/ReactionLabs/sam/pulls)
+- [Commit history](https://github.com/ReactionLabs/sam/commits/main/)
 
-### Experimental live model chat (PR #20 only, not on main)
-
-By default `sam chat "hello"` uses a deterministic fake provider and makes **no network request**.
-An explicitly opted-in `--live` command supports an OpenAI-compatible chat-completions endpoint.
-It sends one prompt to the configured model service, which **may incur charges**. No key is saved by SAM.
-On PowerShell, set `SAM_MODEL_ENDPOINT` to the provider's HTTPS URL ending in
-`/chat/completions`, set `SAM_MODEL_API_KEY` locally, and set `SAM_MODEL` to its model ID.
-Then run `node dist/cli.js chat "Hello" --live`.
-For local model servers, loopback HTTP is permitted and the API key may be blank.
-No streaming, multi-turn persistence, tools, agent planning, or autonomous execution yet.
-Do not commit keys, and never use `--live` until you intentionally accept the provider's terms and costs.
-
-### MiniMax terminal sprint (experimental PR branch only)
-
-These commands require the unmerged model conversation PR. In Windows PowerShell,
-check out `feat/model-conversation-contract`, then run `npm install` and
-`npm run build`. The default `main` branch does not include live chat.
-
-```powershell
-$env:SAM_MODEL_PROVIDER = "minimax"
-$env:SAM_MODEL = "MiniMax-M2"
-$env:MINIMAX_API_KEY = [System.Net.NetworkCredential]::new("", (Read-Host "MiniMax API key" -AsSecureString)).Password
-node dist/cli.js talk --live
-```
-
-Use the exact model ID enabled on your MiniMax developer account if different.
-The key stays in this PowerShell process environment, not in a repository file
-or command-history literal. Close the terminal or run
-`Remove-Item Env:MINIMAX_API_KEY` afterward. Environment variables may still
-be accessible to local processes running under your account.
-
-`talk --live` starts a multi-turn conversation, keeps up to 40 messages in
-memory, and exits on `/exit`. Every turn sends conversation content to the
-configured provider and may incur charges. There is no tool access, persistent
-transcript, autonomous execution, or spending limit yet. Never paste your key
-into chat or a GitHub issue.
-
-## Experimental SAM identity (unmerged feature branch)
-
-Live `chat --live` and `talk --live` inject a system identity describing SAM's actual abilities and limitations. Optionally create `SOUL.md` in the selected workspace to add local personality instructions (up to 16,000 characters). Do not put API keys or credentials in `SOUL.md`. This does not enable file access, tool execution, persistent chat history, or autonomous agents. The CLI reads this file itself; the model cannot browse your computer.
-
-The scheduled development cycle runs approximately hourly. Each run may produce a tested PR update, but does not guarantee a commit. Unmerged feature branches are not features on `main`.
-
-## Durable agent-loop journal (experimental)
-
-Live `talk --live --workspace-tools` and `--memory-tools` now record each user goal, tool events, round/call counts, and final outcome in workspace-local SQLite. `sam loop inspect <id>` inspects a known loop ID; `sam loop recover` explicitly marks orphaned running loops as interrupted without replaying tools. This is **checkpointing, not automatic resume**. The current loop remains limited to four tool rounds and eight tool calls; the journal is not a grant to execute commands or install skills. New tests and Windows live verification pending.
-
-
-### Experimental multi-agent research team
-
-Run a bounded, explicitly authorized three-turn model workflow in an existing chat:
-
-```powershell
-node dist/cli.js chats list
-node dist/cli.js team run --chat YOUR_CHAT_ID --objective "Compare two approaches to local agent orchestration" --live
-node dist/cli.js dashboard
-```
-
-Research, QA and SAM each make a separate model request. Their attributed messages are persisted to the chat's team-event stream and appear in the dashboard after refresh. Configure `SAM_MODEL` and `SAM_MODEL_ENDPOINT`/`SAM_MODEL_API_KEY` (or the existing MiniMax provider environment). This costs up to three model requests per invocation. This initial workflow has no browsing, tool execution, agent spawning, background scheduling, or automated fact verification. It is not a substitute for sourced research.
-
-### Evidence-backed research (experimental)
-
-Use `--inspect-workspace` to read a fixed allowlist of small, non-secret local source files via SAM's existing read-only workspace tool policy. Use `--web` to request up to five HTTPS Brave Search results; requires a Brave Search API subscription key in `SAM_WEB_SEARCH_API_KEY`.
-
-```powershell
-$env:SAM_WEB_SEARCH_API_KEY = "YOUR_BRAVE_SEARCH_API_KEY"
-node dist/cli.js team run --chat YOUR_CHAT_ID --objective "Inspect SAM's architecture and compare it to current agent runtime patterns" --live --inspect-workspace --web
-```
-
-Both research and QA receive retrieved evidence and must cite file paths or source URLs. Web snippets are untrusted and may be inaccurate; this version does not fetch or verify full web pages. Workspace inspection is limited to a fixed list of project files. Each invocation uses three model calls plus one paid or quota-limited web search request. The dashboard displays recorded evidence activity after refresh.
+> Public source can be viewed, cloned, and forked. Never commit API keys,
+> tokens, or client credentials.

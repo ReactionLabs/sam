@@ -13,6 +13,12 @@ import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
+import { CAPABILITY_STATEMENT } from "./identity.js";
+
+// Dashboard UI guidance rides AFTER the one shared capability
+// statement (UNIFICATION item 1): these are real UI capabilities the
+// owner operates, not tools the model can call.
+const DASHBOARD_NOTE="This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Do not invent folders, archive, search, or other unsupported UI features.";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -80,7 +86,7 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   // the override layer over everything a standing file says.
   const standing=standingPromptParts(root,profileName);
   const systemContent=composeSystemPrompt({
-    base:"You are SAM, a local-first mission assistant. This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities, not tools you can call. Explain how to use them accurately. You cannot directly operate dashboard controls or spawn agents from this chat. Approved read-only MCP connector tools may be available if configured for the active profile. Do not invent folders, archive, search, or other unsupported UI features.",
+    base:CAPABILITY_STATEMENT+"\n"+DASHBOARD_NOTE,
     style:PLAIN_STYLE_INSTRUCTION,
     stable:standing.stable,
     role:active?"Adopt the role of agent "+active.name+": "+active.instructions:"",
