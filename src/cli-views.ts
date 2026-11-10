@@ -19,6 +19,7 @@ import { authoredSkills, curatorFindings } from "./skill-author.js";
 import { deliverySummary } from "./delivery-outbox.js";
 import { listBindings, type Binding } from "./bindings.js";
 import { skillAllowlists } from "./skills.js";
+import { loadApprovalPolicy, type ApprovalPolicy } from "./approval-policy.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -59,6 +60,7 @@ export function statusSnapshot(root: string): {
   skills: { authored: number; curatorFindings: number };
   bindings: Binding[];
   skillAllowlists: Record<string, string[]>;
+  approvals: ApprovalPolicy;
 } {
   return {
     at: new Date().toISOString(),
@@ -81,5 +83,6 @@ export function statusSnapshot(root: string): {
     skills: { authored: authoredSkills(root).length, curatorFindings: curatorFindings(root).length },
     bindings: listBindings(root),
     skillAllowlists: skillAllowlists(root),
+    approvals: loadApprovalPolicy(root),
   };
 }

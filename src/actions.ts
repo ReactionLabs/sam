@@ -10,6 +10,7 @@ import { recordActivity } from "./activity.js";
 import { installSkill } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
+import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -31,13 +32,21 @@ export interface ActionProposal {
   // memory record it supersedes. On approval the new note saves AND
   // that record is archived, so recall stops surfacing the stale text.
   supersedes: string | null;
+  // Approvals engine (Phase D item 1): the deterministic risk class
+  // stamped at proposal time, and who decided - "owner", or the
+  // auto via ("auto:smart" / "auto:off") when the install's approval
+  // mode executed it without a card decision. Legacy records read
+  // as null for both.
+  risk: ProposalRisk | null;
+  decidedBy: string | null;
 }
 const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author"];
+export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
   if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null, supersedes: a.supersedes ?? null })) : []; }
+  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null, supersedes: a.supersedes ?? null, risk: a.risk ?? null, decidedBy: a.decidedBy ?? null })) : []; }
   catch { return []; }
 }
 function saveActions(root: string, items: ActionProposal[]): void {
@@ -115,11 +124,24 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // patch may only target a sam-authored skill) - so the owner is
   // never shown a card that cannot execute.
   if (input.kind === "skill-author") validateSkillAuthorDetail(root, detail);
+  // The hardline never-list (Phase D item 1) binds at PROPOSAL time,
+  // in every approval mode: a command-form payload (rm -rf /, a fork
+  // bomb, mkfs, dd onto a device, a URL piped to a root shell) is
+  // refused outright and never becomes an approval card an owner
+  // could rubber-stamp. The refusal is ledgered once; the payload
+  // itself is not stored.
+  const neverHit = scanNeverList(title + "\n" + detail);
+  if (neverHit) {
+    recordActivity(root, input.actor, "never-list", "Refused a " + input.kind + " proposal (" + neverHit.id + "): " + title.slice(0, 120));
+    throw new Error("Refused by the never-list: this proposal contains " + neverHit.label + ". That can never be proposed or executed in any approval mode; reword it as prose if you only meant to discuss it.");
+  }
   const item: ActionProposal = {
     id: randomUUID(), actor: input.actor, kind: input.kind as ActionKind, title, detail,
     status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null,
     chatId: input.chatId ?? null,
     supersedes: input.kind === "note" ? (input.supersedes ?? null) : null,
+    risk: classifyProposal(input.kind, input.kind === "note" ? (input.supersedes ?? null) : null).risk,
+    decidedBy: null,
   };
   const items = listActions(root); items.push(item); saveActions(root, items);
   recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);
@@ -190,16 +212,30 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
   return "Installed skill(s): " + summary.installed.map(i => i.name).join(", ") + (summary.skipped.length ? " (skipped: " + summary.skipped.join("; ") + ")" : "");
 }
-export async function decideAction(root: string, id: string, approve: boolean): Promise<ActionProposal> {
-  const items = listActions(root);
-  const a = items.find(x => x.id === id);
-  if (!a) throw new Error("Unknown action");
-  if (a.status !== "pending") throw new Error("Action already decided");
+// One decision path for every decider: the owner (dashboard / CLI)
+// and the approvals engine's auto modes. `by` is "owner" or the auto
+// via stamp ("auto:smart" / "auto:off"); it lands on the record as
+// decidedBy and shapes the ledger lines, so an auto-execution is
+// never mistaken for an owner's tap after the fact.
+async function applyDecision(root: string, items: ActionProposal[], a: ActionProposal, approve: boolean, by: string): Promise<ActionProposal> {
+  const decider = by === "owner" ? "owner" : a.actor;
   a.decidedAt = new Date().toISOString();
+  a.decidedBy = by;
   if (!approve) {
-    a.status = "rejected"; a.result = "Rejected by owner";
+    a.status = "rejected"; a.result = by === "owner" ? "Rejected by owner" : "Rejected by " + by;
     saveActions(root, items);
-    recordActivity(root, "owner", "rejected", a.kind + ": " + a.title);
+    recordActivity(root, decider, "rejected", a.kind + ": " + a.title);
+    return a;
+  }
+  // The never-list binds again at DECISION time: a record written
+  // before the list existed (or written around the gate) can never
+  // execute a hardline payload, whoever or whatever approves it.
+  const neverHit = scanNeverList(a.title + "\n" + a.detail);
+  if (neverHit) {
+    a.status = "failed";
+    a.result = "Refused by the never-list at decision time (" + neverHit.id + "): " + neverHit.label + " can never execute in any approval mode";
+    saveActions(root, items);
+    recordActivity(root, decider, "never-list", "Blocked execution of " + a.kind + " " + a.id + " (" + neverHit.id + "): " + a.title.slice(0, 120));
     return a;
   }
   try { a.result = await execute(root, a); a.status = "done"; }
@@ -225,20 +261,54 @@ export async function decideAction(root: string, id: string, approve: boolean): 
       } catch { /* detail was not JSON; the failure result stands as-is */ }
     }
     saveActions(root, items);
-    recordActivity(root, "owner", "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
+    recordActivity(root, decider, "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
     if (reproposal) {
-      const existing = listActions(root).find(x => x.status === "pending" && x.kind === "heartbeat" && x.actor === a.actor && x.detail === reproposal!.detail);
-      const np = existing ?? proposeAction(root, { actor: a.actor, kind: a.kind, title: a.title, detail: reproposal.detail, chatId: a.chatId });
-      const fresh = listActions(root); const self = fresh.find(x => x.id === a.id);
-      if (self) {
-        self.result = (self.result ?? "") + " Corrected re-proposal pending approval: " + np.id + " (profile " + reproposal.fix + ")";
-        saveActions(root, fresh); a.result = self.result;
-      }
-      if (!existing) recordActivity(root, "owner", "reproposal", "Corrected re-proposal for failed " + a.kind + ": " + a.title + " -> profile " + reproposal.fix);
+      try {
+        const existing = listActions(root).find(x => x.status === "pending" && x.kind === "heartbeat" && x.actor === a.actor && x.detail === reproposal!.detail);
+        const np = existing ?? proposeAction(root, { actor: a.actor, kind: a.kind, title: a.title, detail: reproposal.detail, chatId: a.chatId });
+        const fresh = listActions(root); const self = fresh.find(x => x.id === a.id);
+        if (self) {
+          self.result = (self.result ?? "") + " Corrected re-proposal pending approval: " + np.id + " (profile " + reproposal.fix + ")";
+          saveActions(root, fresh); a.result = self.result;
+        }
+        if (!existing) recordActivity(root, decider, "reproposal", "Corrected re-proposal for failed " + a.kind + ": " + a.title + " -> profile " + reproposal.fix);
+      } catch { /* a re-proposal that itself refuses (e.g. the never-list) leaves the failure result standing */ }
     }
     return a;
   }
   saveActions(root, items);
-  recordActivity(root, "owner", a.status === "done" ? "approved" : "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
+  recordActivity(root, decider, by === "owner" ? "approved" : "auto-approved", a.kind + ": " + a.title + " - " + (a.result ?? "") + (by === "owner" ? "" : " [" + by + "]"));
   return a;
+}
+
+export async function decideAction(root: string, id: string, approve: boolean): Promise<ActionProposal> {
+  const items = listActions(root);
+  const a = items.find(x => x.id === id);
+  if (!a) throw new Error("Unknown action");
+  if (a.status !== "pending") throw new Error("Action already decided");
+  return applyDecision(root, items, a, approve, "owner");
+}
+
+// Approvals engine settle (Phase D item 1): execute every pending
+// proposal the install's approval mode auto-approves, through the
+// same decision path the owner uses. In the default manual mode
+// this is a no-op by construction. Settle points are the surfaces
+// that create proposals inside a live interaction (the chat tool
+// layer, the CLI propose verb) plus the operator's `actions settle`
+// verb; a proposal the mode does not cover stays pending for the
+// owner, exactly as before.
+export async function settleAutoApprovals(root: string, onlyId?: string): Promise<ActionProposal[]> {
+  const policy = loadApprovalPolicy(root);
+  if (policy.mode === "manual") return [];
+  const settled: ActionProposal[] = [];
+  const candidates = listActions(root).filter(x => x.status === "pending" && (!onlyId || x.id === onlyId));
+  for (const candidate of candidates) {
+    const auto = approvalAutoVia(policy, candidate.kind, candidate.supersedes);
+    if (!auto) continue;
+    const items = listActions(root);
+    const fresh = items.find(x => x.id === candidate.id);
+    if (!fresh || fresh.status !== "pending") continue;
+    settled.push(await applyDecision(root, items, fresh, true, auto.via));
+  }
+  return settled;
 }
