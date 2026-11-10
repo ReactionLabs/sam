@@ -14,6 +14,7 @@ import { pairingStatus, type PairingChannelStatus } from "./pairing.js";
 import { goldfishStatus, type GoldfishState } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { openLoopCount } from "./loops.js";
+import { readDeliveryLedger } from "./worthiness.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -49,6 +50,7 @@ export function statusSnapshot(root: string): {
   pairing: PairingChannelStatus[];
   sessionCaps: { maxTurns: number; maxTokens: number; cappedToday: string[] };
   loops: { open: number };
+  deliveries: { delivered: number; suppressed: number };
 } {
   return {
     at: new Date().toISOString(),
@@ -66,5 +68,6 @@ export function statusSnapshot(root: string): {
     pairing: pairingStatus(root),
     sessionCaps: (() => { const caps = sessionCaps(); return { maxTurns: caps.maxTurns, maxTokens: caps.maxTokens, cappedToday: sessionUsageToday(root).filter(s => s.capped).map(s => s.chatId) }; })(),
     loops: { open: openLoopCount(root) },
+    deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
   };
 }

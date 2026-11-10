@@ -10,6 +10,7 @@ import { loadBridgeState } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
+import { assessDelivery } from "./worthiness.js";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -229,7 +230,17 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   appendLog(root,{type:"job",name:job.name,profile:job.profile,changed:true,replyPreview:reply.slice(0,300)});
   recordActivity(root,job.profile,"heartbeat","Heartbeat '"+job.name+"' changed: "+reply.replace(/\s+/g," ").trim().slice(0,180));
   if(job.channelId&&deps.deliver){
-   try{await deps.deliver(job.channelId,"🫀 SAM heartbeat · "+job.name+"\n\n"+reply);}catch{appendLog(root,{type:"delivery-failed",name:job.name});}
+   // Notification worthiness (S5): the reply is already the chat
+   // record; pushing it to a channel must first be worth the
+   // owner's attention - duplicates, floods, and law-denied
+   // topics are held, and the hold is ledgered either way.
+   const verdict=assessDelivery(root,{profile:job.profile,kind:"heartbeat",text:reply});
+   if(!verdict.deliver){
+    appendLog(root,{type:"delivery-suppressed",name:job.name,profile:job.profile,reason:verdict.reason});
+    recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
+   }else{
+    try{await deps.deliver(job.channelId,"🫀 SAM heartbeat · "+job.name+"\n\n"+reply);}catch{appendLog(root,{type:"delivery-failed",name:job.name});}
+   }
   }
  }
  if(dirty)saveJobs(root,jobs);

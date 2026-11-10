@@ -58,6 +58,7 @@ import { activityView, actionsView, chatView, turnActions, statusSnapshot } from
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats } from "./chat-manage.js";
+import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, saveNote } from "./notes.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
@@ -232,6 +233,8 @@ const loopCmd=program.command("loops").description("Open loops: questions whose 
 loopCmd.command("list").option("--profile <name>","Only this profile").option("--all","Include closed loops").action((o:{profile?:string;all?:boolean})=>output(listLoops(program.opts().workspace,{profile:o.profile,status:o.all?undefined:"open"})));
 loopCmd.command("open").argument("<profile>").argument("<question>").argument("<watchFor>").option("--answer <text>","The answer given").option("--hours <n>","Hours until the next look").action((profile:string,question:string,watchFor:string,o:{answer?:string;hours?:string})=>output(openLoop(program.opts().workspace,{profile,question,answer:o.answer??"",watchFor,dueInHours:o.hours?Number(o.hours):undefined})));
 loopCmd.command("close").argument("<id>").action((id:string)=>output({closed:closeLoop(program.opts().workspace,id)}));
+const delCmd=program.command("deliveries").description("Notification worthiness ledger: every proactive delivery SAM sent or held, with the reason (S5)");
+delCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(readDeliveryLedger(program.opts().workspace,100).filter(e=>!o.profile||e.profile===o.profile)));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
 hbCmd.command("add").argument("<name>").argument("<minutes>").argument("<profile>").argument("<prompt>").option("--channel <id>","Deliver replies to this channel id").action((name:string,minutes:string,profile:string,prompt:string,o:{channel?:string})=>output(addHeartbeatJob(program.opts().workspace,name,Number(minutes),profile,prompt,o.channel??null)));
 hbCmd.command("list").action(()=>output(heartbeatJobs(program.opts().workspace)));
