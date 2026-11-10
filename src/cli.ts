@@ -62,6 +62,8 @@ import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
+import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
+import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
@@ -726,16 +728,44 @@ approval.command("inspect").argument("<id>").action((id:string)=>{
 });
 
 
-const config=program.command("config").description("Environment configuration and readiness (never prints secret values)");
+const config=program.command("config").description("Configuration: bare `sam config` opens the guided wizard in a terminal (sections over the model-routing, channels, and key stores); show/detect/sections/verify/setup are the scriptable doors (never prints secret values)");
+// The wizard under the banner: the S.A.M. splash first (the spin-up is a
+// welcome screen, Dip 2026-11-10), then the sectioned flow on readline.
+async function runWizardCli(root:string,section?:string):Promise<void>{
+  process.stdout.write(samBanner({profile:"sam",model:process.env.SAM_MODEL,workspace:root,color:!!process.stdout.isTTY,cols:process.stdout.columns??0}));
+  const rl=createInterface({input:stdin,output:stdout});
+  try{ await runConfigWizard(root,{print:(line:string)=>console.log(line),ask:(q:string)=>rl.question(q)},{section}); }
+  finally{ rl.close(); }
+}
+function printSections(root:string,section?:string):void{
+  const all=configSections(root);
+  const picked=section?all.filter(s=>s.id===section):all;
+  if(section&&!picked.length)throw new Error("Unknown config section \""+section+"\". Sections: "+CONFIG_SECTIONS.join(", "));
+  if(program.opts().json){output({sections:picked,setup:readSetupRecord(root)});return;}
+  for(const s of picked){console.log("== "+s.title+" ("+s.state+") ==");for(const line of s.lines)console.log("  "+line);}
+  const rec=readSetupRecord(root);
+  console.log(rec?("Verified setup: "+rec.model+" via "+rec.provider+" at "+rec.verifiedAt):"Verified setup: none recorded yet - `sam config setup --live` verifies and records it.");
+}
+config.action(async()=>{
+  const root=resolve(program.opts().workspace);
+  if(program.opts().json){output({detection:detectSetup(root),sections:configSections(root),setup:readSetupRecord(root)});return;}
+  if(process.stdout.isTTY){await runWizardCli(root);return;}
+  printSections(root);
+});
 config.command("show").description("Show the parsed configuration with secrets reduced to present/absent").action(()=>{
   const cfg=parseSamConfig(process.env); const ready=configReadiness(cfg);
   output({
     modelProvider:cfg.modelProvider, model:cfg.model, cheapModel:cfg.cheapModel, deepModel:cfg.deepModel, models:modelRoutingTable(), minimaxBaseUrl:cfg.minimaxBaseUrl,
     minimaxApiKey:cfg.minimaxApiKey?"present":"absent",
     secondShiftMcpUrl:cfg.secondShiftMcpUrl, secondShiftMcpToken:cfg.secondShiftMcpToken?"present":"absent",
-    logLevel:cfg.logLevel, modelReady:ready.modelReady, mcpReady:ready.mcpReady
+    logLevel:cfg.logLevel, modelReady:ready.modelReady, mcpReady:ready.mcpReady, setup:readSetupRecord(resolve(program.opts().workspace))
   });
 });
+config.command("detect").description("First-run detection: what this install already has (model + key in env, channel and connector credentials, the coding engine, the senses reader) and the exact next steps for what is missing; values are never printed").action(()=>output(detectSetup(resolve(program.opts().workspace))));
+config.command("sections").description("The wizard's sections as data: model, channels, keys, engine & senses - each with its state and lines").option("--section <name>","Only this section").action((o:{section?:string})=>printSections(resolve(program.opts().workspace),o.section));
+config.command("verify").description("Verify the configured model with ONE real completion through the existing provider; saves nothing").requiredOption("--live","Explicitly allow one model API request (may incur charges)").action(async()=>{const v=await verifyModel();output(v);if(!v.ok)process.exitCode=1;});
+config.command("setup").description("First-run detect -> verify -> save: one real completion, and only on success the verified baseline is recorded (.sam/setup.json + a setup-verified ledger line); a failure saves nothing").requiredOption("--live","Explicitly allow one model API request (may incur charges)").action(async()=>{const root=resolve(program.opts().workspace);const{verify,saved}=await verifyAndSaveSetup(root);output({detection:detectSetup(root),verify,saved});if(!saved)process.exitCode=1;});
+config.command("wizard").description("The interactive config wizard under the banner: model pins, channel adds, key states, engine status - saves ride the stores the runtime reads").option("--section <name>","Jump straight to one section").action(async(o:{section?:string})=>{await runWizardCli(resolve(program.opts().workspace),o.section);});
 
 const mcp=program.command("mcp").description("MCP authorization policy (dry-run only; no server connection is made)");
 mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-default policy for one tool name, locally")

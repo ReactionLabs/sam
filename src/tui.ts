@@ -13,6 +13,7 @@ import { ChatStore } from "./chats.js";
 import { runChatTurn } from "./agent-turn.js";
 import { lastSkillByChat } from "./skill-use.js";
 import { samBanner } from "./banner.js";
+import { detectSetup } from "./config-wizard.js";
 import { renderImageFile } from "./term-image.js";
 
 const CYAN = "\x1b[38;2;34;211;238m";
@@ -48,9 +49,38 @@ export async function runTui(root: string, opts: { profile?: string; bannerOnly?
   const paint = (code: string, text: string) => (color ? code + text + RESET : text);
   const banner = () => samBanner({ profile, model: process.env.SAM_MODEL, workspace: root, color, cols: cols() });
 
-  if (opts.bannerOnly || !process.stdin.isTTY) {
+  if (opts.bannerOnly) {
     process.stdout.write(banner());
-    if (!opts.bannerOnly) process.stdout.write(paint(DIM, "The TUI needs an interactive terminal; that was just the splash. Run `sam tui` in your terminal to talk.") + "\n");
+    return;
+  }
+
+  // First run (CLI dressing item 1): if detection says the model is not
+  // configured, the splash leads to setup, not to a chat whose first
+  // message dies on "Model not configured". Print what was detected and
+  // the exact setup path, then stop under the banner.
+  let firstRun = false;
+  let detectionLines: string[] = [];
+  try {
+    const d = detectSetup(root);
+    firstRun = d.firstRun;
+    if (firstRun) {
+      detectionLines = [
+        "SAM is not set up yet on this install - no working model connection was detected.",
+        "  model: " + (d.model ?? "(not set)") + " · api key: " + d.apiKey + " · endpoint: " + (d.endpoint ?? "(none resolved)"),
+        ...d.nextSteps.map(s => "  - " + s),
+        "Run `sam config` to open the setup wizard, or `sam config setup --live` to verify the model and record the setup.",
+      ];
+    }
+  } catch { /* a detection failure never blocks the splash */ }
+  if (firstRun) {
+    process.stdout.write(banner());
+    for (const line of detectionLines) process.stdout.write(paint(DIM, line) + "\n");
+    return;
+  }
+
+  if (!process.stdin.isTTY) {
+    process.stdout.write(banner());
+    process.stdout.write(paint(DIM, "The TUI needs an interactive terminal; that was just the splash. Run `sam tui` in your terminal to talk.") + "\n");
     return;
   }
 
