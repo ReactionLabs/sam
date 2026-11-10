@@ -28,9 +28,17 @@ export function budgetStubContent(executed: string[], maxCalls: number): string 
     note: "You have used all " + maxCalls + " tool calls for this turn (" + (executed.join(", ") || "none") + "). No more tools will run. Answer now from the results already gathered, and say plainly which checks you could not finish.",
   });
 }
-export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number): string {
+export type TurnEndReason = "calls" | "steps";
+export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
+  if (reason === "steps") return "Turn step limit reached: " + executed.length + " calls used (" + (executed.join(", ") || "none") + ") - the call budget (" + maxCalls + ") was NOT reached" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
   return "Tool budget exhausted: " + executed.length + "/" + maxCalls + " calls used (" + (executed.join(", ") || "none") + ")" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
 }
-export function budgetFallbackAnswer(executed: string[], skipped: string[], maxCalls: number): string {
+export function budgetFallbackAnswer(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
+  // The ending must be named honestly (owner defect 2026-11-10: a turn
+  // that ran out of ROUNDS with 1 of 6 calls used reported "I reached
+  // the tool budget"). "calls" means the call cap really was hit;
+  // "steps" means the rounds ran out or the model kept asking for
+  // tools in the tool-free synthesis step.
+  if (reason === "steps") return "I ran out of steps for this turn (" + executed.length + " calls made" + (executed.length ? ": " + executed.join(", ") : "") + ") before I could finish, so this answer is incomplete. " + (skipped.length ? "These checks did not run: " + skipped.join(", ") + ". " : "") + "Ask me to continue, or hand the rest to the background, and I will pick it up from there.";
   return "I reached the tool budget for this turn (" + executed.length + " of " + maxCalls + " calls used" + (executed.length ? ": " + executed.join(", ") : "") + ") before I could finish, so this answer is incomplete. " + (skipped.length ? "These checks did not run: " + skipped.join(", ") + ". " : "") + "Ask me to continue, or hand the rest to the background, and I will pick it up from there.";
 }

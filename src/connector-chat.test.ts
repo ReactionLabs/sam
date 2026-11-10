@@ -178,7 +178,7 @@ test("connector chat survives a synthesis step that still requests tools", async
     };
     const provider = new OpenAICompatibleProvider("https://model.example/v1/chat/completions", "model-test-key");
     const result = await connectorChat(root, provider, "test-model", [{ role: "user", content: "Who am I?" }], undefined, { actor: "sam" }, { rounds: 1, maxCalls: 6 });
-    assert.match(result, /tool budget/i, "a tool-hungry synthesis must resolve to a partial answer, not throw");
+    assert.match(result, /ran out of steps/i, "a tool-hungry synthesis resolves to a partial answer naming the true ending (steps, not the unspent call budget), not a throw");
   } finally {
     globalThis.fetch = oldFetch;
     if (oldKey === undefined) delete process.env.SAM_MCP_TOKEN_TEST; else process.env.SAM_MCP_TOKEN_TEST = oldKey;

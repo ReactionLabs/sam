@@ -3,6 +3,32 @@ import { validateConversation } from "./model-conversation.js";
 import { WORKSPACE_TOOLS } from "./workspace-tools.js";
 import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 
+/** MiniMax-class models sometimes leak their tool-call machinery into
+ * the visible content as markup (<tool_call> spans, <invoke> spans,
+ * <|tool_call|> tokens, stray think tags, the ]<]minimax token). The
+ * prose around a leak is a real answer; failing the whole turn over
+ * the leak killed owner turns in the wild (2026-11-10, twice in one
+ * conversation). Strip the machinery, keep the prose. Callers still
+ * fail when nothing usable remains. */
+export function stripModelMarkup(text: string): string {
+  const out = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, "")
+    .replace(/<invoke\b[\s\S]*?<\/invoke>/gi, "")
+    .replace(/<tool_call>[\s\S]*$/i, "")
+    .replace(/<invoke\b[\s\S]*$/i, "")
+    .replace(/<\/?think>|<\|tool_call\|>|<\/?tool_call>/gi, "")
+    .replace(/\]\s*<\]\s*minimax/gi, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  // Debris is not prose: a residue with no letter, digit, or emoji in
+  // it ("[>" - the fragment of a leak that survived its own span) is
+  // machinery remains, and returning it as an answer is worse than
+  // the retry an empty result gets. (Live proof, 2026-11-10: the
+  // first post-fix turn answered "[>".)
+  if (out && !/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(out)) return "";
+  return out;
+}
 export interface TokenUsage { promptTokens: number; completionTokens: number; totalTokens: number }
 /** Extract a provider usage object (OpenAI-shaped) from a response payload. */
 export function parseTokenUsage(payload: unknown): TokenUsage | null {
@@ -103,11 +129,8 @@ export class OpenAICompatibleProvider implements ModelProvider {
       if (typeof turn.content === "string") {
         if (/<think>/i.test(turn.content) && !/<\/think>/i.test(turn.content))
           throw new Error("Model returned unterminated reasoning content");
-        const visible = turn.content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+        const visible = stripModelMarkup(turn.content);
         if (!visible && !turn.tool_calls?.length) throw new Error("Model returned no safe visible content");
-        if (/<\/?think>/i.test(visible)) throw new Error("Model returned unsafe reasoning content");
-        if (/(?:<\|tool_call\|>|<\|invoke\b|\]\s*<\]\s*minimax|<tool_call>|<invoke\b|<\/invoke>)/i.test(visible))
-          throw new Error("Model returned raw tool markup instead of a final answer");
         turn.content = visible || null;
       }
       return turn;
@@ -125,8 +148,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
     // call, so one fresh attempt is safe; a second empty is a
     // real failure and surfaces as before (owner defect
     // 2026-11-10: a bare "Empty model response" killed the turn).
-    try{return await this.connectorTurnOnce(model,messages,tools);}
-    catch(e){if(e instanceof Error&&(e.message==="Empty model response"||e.message==="Unsafe model output"))return await this.connectorTurnOnce(model,messages,tools);throw e;}
+    // Leaks and empties arrive in streaks (2026-11-10: one retry was
+    // not enough and the raw error reached the owner), so the fresh
+    // attempt budget is three total. Nothing has executed for any of
+    // these calls, so every retry is safe.
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try { return await this.connectorTurnOnce(model, messages, tools); }
+      catch (e) { if (e instanceof Error && (e.message === "Empty model response" || e.message === "Unsafe model output")) { lastError = e; continue; } throw e; }
+    }
+    throw lastError;
   }
   private async connectorTurnOnce(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
@@ -143,8 +174,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
       this.reportUsage(data, model);
       const msg=data.choices?.[0]?.message;
       if(!msg)throw Error("Invalid model response");
-      const content=typeof msg.content==="string"?msg.content.replace(new RegExp("<think>[\\s\\S]*?</think>","gi"),"").trim():null;
-      if(content&&new RegExp("<\\/?think>|<\\|tool_call\\|>|<tool_call>","i").test(content))throw Error("Unsafe model output");
+      const rawContent=typeof msg.content==="string"?msg.content:null;
+      const content=rawContent===null?null:stripModelMarkup(rawContent);
+      if(rawContent&&!content&&!(Array.isArray(msg.tool_calls)&&msg.tool_calls.length))throw Error("Unsafe model output");
       const raw=msg.tool_calls;
       if(raw!==undefined&&!Array.isArray(raw))throw Error("Invalid tool calls");
       if(Array.isArray(raw)&&raw.length>4)throw Error("Too many tool calls");
