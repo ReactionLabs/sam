@@ -26,6 +26,8 @@ test("the one capability statement describes the live turn truthfully", () => {
     /content-scanned first and a flagged skill/,
     /waits for the owner instead of installing/,
     /read-only tools/,
+    /read the owner's Gmail and Calendar, read-only/,
+    /never a scoped profile/,
     /drafts are stored records the owner sends/,
   ]) assert.match(CAPABILITY_STATEMENT,truth);
   // The retired description claimed the opposite of all of it.
