@@ -12,6 +12,7 @@ import type { ChatCompaction } from "./chats.js";
 import { verificationStatus, type VerificationStatus } from "./verification.js";
 import { pairingStatus, type PairingChannelStatus } from "./pairing.js";
 import { goldfishStatus, type GoldfishState } from "./goldfish.js";
+import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -45,6 +46,7 @@ export function statusSnapshot(root: string): {
   verification: VerificationStatus;
   goldfish: { state: GoldfishState; verdict: string | null; uncoveredChanges: number };
   pairing: PairingChannelStatus[];
+  sessionCaps: { maxTurns: number; maxTokens: number; cappedToday: string[] };
 } {
   return {
     at: new Date().toISOString(),
@@ -60,5 +62,6 @@ export function statusSnapshot(root: string): {
     verification: verificationStatus(root),
     goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
     pairing: pairingStatus(root),
+    sessionCaps: (() => { const caps = sessionCaps(); return { maxTurns: caps.maxTurns, maxTokens: caps.maxTokens, cappedToday: sessionUsageToday(root).filter(s => s.capped).map(s => s.chatId) }; })(),
   };
 }

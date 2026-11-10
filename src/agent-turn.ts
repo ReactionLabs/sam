@@ -14,6 +14,7 @@ import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
+import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -49,7 +50,20 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   const model=resolved.model;
   if(!model)throw Error("Model not configured");
   const tier=tierForRoute(route);
-  provider.onUsage=(usage,usedModel)=>{recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
+  let turnTokens=0;
+  provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
+  // Session caps (harness item 3): a chat that has spent today's
+  // turn or token cap closes this turn gracefully with NO model
+  // call. The exchange still persists, so the owner sees the pause
+  // in the chat itself; the day's first trip writes one ledger line.
+  const capStatus=sessionCapStatus(root,chatId);
+  if(capStatus.capped){
+    const capText=sessionCapReply(capStatus);
+    try{const db=new ChatStore(root);try{db.add(chatId,"user",content);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
+    if(noteCapTrip(root,chatId,route,capStatus.reason??"turns"))
+      recordActivity(root,profileName,"session-cap","Session cap reached in chat "+chatId.slice(0,8)+": "+capStatus.turnsUsed+" turns, "+capStatus.tokensUsed+" tokens today ("+(capStatus.reason??"turns")+" cap)");
+    return capText;
+  }
   const db=new ChatStore(root);let history;
   // No history limit anymore (Phase A item 2): a long chat compacts
   // below instead of dying at 100 messages.
@@ -108,6 +122,7 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
     ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content}];
   let reply:string;
+  try{
   if(active?.connector_id){
     const pinned=connectors(root).find(c=>c.id===active.connector_id);
     if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
@@ -119,7 +134,14 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId},budget);
     else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget);
   }
+  }catch(error){
+    // A turn that dies mid-flight still spent what it spent; the
+    // session ledger records it so the caps see the true total.
+    recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+    throw error;
+  }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
+  recordSessionTurn(root,{chatId,route,tokens:turnTokens});
   recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8));
   return reply;
 }
