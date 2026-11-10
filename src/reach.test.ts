@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { listReachChannels, resetReachCache, runReach } from "./reach.js";
@@ -9,27 +9,23 @@ import { listReachChannels, resetReachCache, runReach } from "./reach.js";
 // declaration, one search with items, one declared error, and echoes
 // nothing else. SAM_AGENT_REACH_BIN points the seam at it.
 function stubBin(root: string): string {
-  const path = join(root, "agent-reach-stub");
-  writeFileSync(path, `#!/bin/sh
-if [ "$1" = "channels" ]; then
-  echo '{"channels":[{"id":"web","actions":["search","read"]},{"id":"v2ex","actions":["hot","read"]}]}'
-  exit 0
-fi
-if [ "$1" = "web" ] && [ "$2" = "search" ]; then
-  echo '{"ok":true,"items":[{"title":"Big story","url":"https://example.com/a","author":"Wire","published_at":"2026-11-10","text":"Something happened."},{"title":"Second","url":"https://example.com/b","text":"More."}]}'
-  exit 0
-fi
-if [ "$1" = "web" ] && [ "$2" = "read" ]; then
-  echo '{"ok":false,"error":{"code":"NEED_LOGIN","message":"login required","hint":"the user logs in themselves"}}'
-  exit 0
-fi
-if [ "$1" = "v2ex" ] && [ "$2" = "hot" ]; then
-  echo '{"ok":true,"items":[{"title":"Hot topic","url":"https://v2ex.example/t/1","text":"Discussed."}]}'
-  exit 0
-fi
-echo '{"ok":false,"error":{"code":"BAD_INPUT","message":"unhandled"}}'
+  // A Node script, not a shell stub: Windows has no shebang execution,
+  // and reach.ts runs a .js shim through the current node everywhere.
+  const path = join(root, "agent-reach-stub.js");
+  writeFileSync(path, `
+const a = process.argv.slice(2);
+if (a[0] === "channels") {
+  console.log(JSON.stringify({ channels: [{ id: "web", actions: ["search", "read"] }, { id: "v2ex", actions: ["hot", "read"] }] }));
+} else if (a[0] === "web" && a[1] === "search") {
+  console.log(JSON.stringify({ ok: true, items: [{ title: "Big story", url: "https://example.com/a", author: "Wire", published_at: "2026-11-10", text: "Something happened." }, { title: "Second", url: "https://example.com/b", text: "More." }] }));
+} else if (a[0] === "web" && a[1] === "read") {
+  console.log(JSON.stringify({ ok: false, error: { code: "NEED_LOGIN", message: "login required", hint: "the user logs in themselves" } }));
+} else if (a[0] === "v2ex" && a[1] === "hot") {
+  console.log(JSON.stringify({ ok: true, items: [{ title: "Hot topic", url: "https://v2ex.example/t/1", text: "Discussed." }] }));
+} else {
+  console.log(JSON.stringify({ ok: false, error: { code: "BAD_INPUT", message: "unhandled" } }));
+}
 `);
-  chmodSync(path, 0o755);
   return path;
 }
 

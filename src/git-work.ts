@@ -89,14 +89,24 @@ function gitSync(base: string, args: string[], timeoutMs = 15_000): { ok: boolea
  *  the code root is not one. A repo rooted at a PARENT directory
  *  does not count: branch discipline applies to the designated
  *  tree, never to some larger tree that happens to contain it. */
+/** Canonical form for path EQUALITY checks: both sides realpath'd (so
+ *  symlinks, junctions, 8.3 names, and casing all collapse), the \\?\
+ *  long-path prefix stripped, and case folded on Windows where the
+ *  filesystem is case-insensitive. Linux keeps its exact compare. */
+export function canonicalPath(p: string): string {
+  let out = p;
+  try { out = realpathSync(p); } catch { out = resolve(p); }
+  out = out.replace(/^\\\\\?\\/, "");
+  return process.platform === "win32" ? out.toLowerCase() : out;
+}
+
 export function gitRepoRoot(root: string): string | null {
   const base = codeRoot(root);
   if (!base) return null;
   const probe = gitSync(base, ["rev-parse", "--show-toplevel"]);
   if (!probe.ok) return null;
   try {
-    const top = realpathSync(resolve(probe.out.trim()));
-    return top === base ? base : null;
+    return canonicalPath(probe.out.trim()) === canonicalPath(base) ? base : null;
   } catch { return null; }
 }
 

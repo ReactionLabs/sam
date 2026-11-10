@@ -48,7 +48,12 @@ interface BinRun {
 
 function runBin(bin: string, argv: string[], timeoutMs: number): Promise<BinRun> {
   return new Promise((resolveRun) => {
-    execFile(bin, argv, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    // A .js shim runs through the current node: the portable form for
+    // pointing SAM_AGENT_REACH_BIN at a script (and the only form a
+    // test stub can take on Windows, which has no shebang execution).
+    const file = bin.toLowerCase().endsWith(".js") ? process.execPath : bin;
+    const args = file === bin ? argv : [bin, ...argv];
+    execFile(file, args, { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
       if (err) {
         const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
         if (e.code === "ENOENT") { resolveRun({ stdout: "", timedOut: false, spawnError: "NOT_INSTALLED" }); return; }
