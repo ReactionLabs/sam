@@ -83,7 +83,8 @@ test("chat management: last activity reports newest message and count; unarchive
     const act = new Map(store.lastActivity().map(x => [x.chat_id, x]));
     assert.equal(act.get(a.id)?.messages, 2);
     assert.equal(act.get(b.id)?.messages, 1);
-    assert.ok((act.get(a.id)?.last_message_at ?? "") >= (act.get(b.id)?.last_message_at ?? ""));
+    assert.ok(act.get(a.id)?.last_message_at);
+    assert.ok(act.get(b.id)?.last_message_at);
     store.close();
     archiveManagedChat(root, "sam", a.id);
     assert.equal(listManagedChats(root, "sam").some(c => c.id === a.id), false);

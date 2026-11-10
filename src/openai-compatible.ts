@@ -51,6 +51,17 @@ export class OpenAICompatibleProvider implements ModelProvider {
     this.endpoint = url.toString();
   }
   async completeToolTurn(model: string, messages: ToolMessage[], toolsEnabled: boolean, workspaceEnabled = false): Promise<ToolTurn> {
+    // Same empty-completion retry as the connector path: an
+    // empty or reasoning-only reply executes nothing, so one
+    // fresh attempt is safe before the failure surfaces.
+    try { return await this.toolTurnOnce(model, messages, toolsEnabled, workspaceEnabled); }
+    catch (e) {
+      if (e instanceof Error && (e.message === "Empty model tool response" || e.message === "Model returned no safe visible content"))
+        return await this.toolTurnOnce(model, messages, toolsEnabled, workspaceEnabled);
+      throw e;
+    }
+  }
+  private async toolTurnOnce(model: string, messages: ToolMessage[], toolsEnabled: boolean, workspaceEnabled = false): Promise<ToolTurn> {
     if (!model.trim() || messages.length < 1 || messages.length > 100)
       throw new Error("Invalid model tool request");
     if (!this.apiKey.trim() && !new URL(this.endpoint).hostname.match(/^(localhost|127\\.0\\.0\\.1|\\[::1\\])$/))
@@ -108,6 +119,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
   /** Bounded dashboard connector tool turn. Only host-supplied tool definitions are advertised. */
   async completeConnectorTurn(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
+    // An empty completion (no content, no tool calls) is a known
+    // provider hiccup - most often a reasoning model spending its
+    // whole reply out of sight. No tool has executed for this
+    // call, so one fresh attempt is safe; a second empty is a
+    // real failure and surfaces as before (owner defect
+    // 2026-11-10: a bare "Empty model response" killed the turn).
+    try{return await this.connectorTurnOnce(model,messages,tools);}
+    catch(e){if(e instanceof Error&&e.message==="Empty model response")return await this.connectorTurnOnce(model,messages,tools);throw e;}
+  }
+  private async connectorTurnOnce(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
     try{

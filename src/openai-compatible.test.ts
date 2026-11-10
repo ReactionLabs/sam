@@ -28,6 +28,47 @@ test("opt-in model transport sends messages and validates response on loopback",
   } finally { server.close(); await once(server, "close"); }
 });
 
+test("provider retries an empty completion once, then surfaces it (owner defect 2026-11-10)", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => {
+    hits++;
+    res.setHeader("Content-Type", "application/json");
+    // First attempt: a completion with neither content nor tool
+    // calls (the reasoning model spent its reply out of sight).
+    // Second attempt answers normally.
+    if (hits === 1) res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "" } }] }));
+    else res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Recovered answer" } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []);
+    assert.equal(turn.content, "Recovered answer");
+    assert.equal(hits, 2);
+  } finally { server.close(); await once(server, "close"); }
+});
+
+test("provider gives up after two empty completions", async () => {
+  let hits = 0;
+  const server = createServer((_req, res) => {
+    hits++;
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: "" } }] }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    await assert.rejects(provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []), /Empty model response/);
+    assert.equal(hits, 2);
+  } finally { server.close(); await once(server, "close"); }
+});
+
 test("model transport rejects insecure remote endpoints and missing credentials", async () => {
   assert.throws(() => new OpenAICompatibleProvider("http://example.com/v1/chat/completions", "key"));
   assert.throws(() => new OpenAICompatibleProvider("https://user:secret@example.com/v1/chat/completions", "key"));
