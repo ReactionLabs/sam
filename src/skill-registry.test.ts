@@ -36,7 +36,7 @@ function jsonRes(body: unknown): Response { return new Response(JSON.stringify(b
 before(() => {
   globalThis.fetch = (async (input: unknown) => {
     const url = String(input);
-    if (url.includes("skills.sh/api/search")) return jsonRes({ skills: [{ id: "acme/widgets/alpha-skill", source: "acme/widgets", skillId: "alpha-skill", name: "alpha-skill", installs: 42 }] });
+    if (url.includes("skills.sh/api/search")) return jsonRes({ skills: [{ id: "acme/widgets/alpha-skill", source: "acme/widgets", skillId: "alpha-skill", name: "alpha-skill", installs: 42 }, { id: "skills.volces.com/smart-summarizer", source: "skills.volces.com", skillId: "smart-summarizer", name: "smart-summarizer", installs: 38 }] });
     if (url.includes("api.github.com/repos/acme/widgets/git/trees")) return jsonRes(TREE);
     if (url.includes("api.github.com/repos/acme/flagged/git/trees")) return jsonRes(FLAG_TREE);
     const flagPrefix = "https://raw.githubusercontent.com/acme/flagged/HEAD/";
@@ -50,11 +50,17 @@ after(() => { globalThis.fetch = realFetch; });
 
 function ws(): string { return mkdtempSync(join(tmpdir(), "sam-skills-")); }
 
-test("registry search maps the skills.sh results", async () => {
+test("registry search maps the skills.sh results and stamps a verbatim installRef only for GitHub sources", async () => {
   const results = await searchSkillRegistry("alpha");
-  assert.equal(results.length, 1);
+  assert.equal(results.length, 2);
   assert.equal(results[0].source, "acme/widgets");
   assert.equal(results[0].installs, 42);
+  assert.equal(results[0].installRef, "acme/widgets@alpha-skill");
+  assert.equal(results[1].installRef, null);
+});
+
+test("a dotted non-GitHub owner is refused at ref parsing, not at a 404", async () => {
+  await assert.rejects(() => installSkill(ws(), "skills.volces.com/smart-summarizer", { actor: "sam" }), /not a GitHub owner/);
 });
 
 test("install fetches one skill by name, validates, confines extras, and records provenance", async () => {

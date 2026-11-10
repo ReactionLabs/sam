@@ -10,7 +10,7 @@ import { recordActivity } from "./activity.js";
 // untrusted reference and never executes their content; installing one is a
 // change to what SAM knows, so in chat it rides the approval gate, and on the
 // CLI it is the operator's own act. Every install is provenance-recorded.
-export interface RegistrySkill { id: string; source: string; skillId: string; name: string; installs: number }
+export interface RegistrySkill { id: string; source: string; skillId: string; name: string; installs: number; installRef: string | null }
 export interface InstalledSkill { name: string; source: string; ref: string; files: number; installedAt: string; actor: string }
 const apiBase = () => process.env.SKILLS_API_URL ?? "https://skills.sh";
 const ghApi = () => process.env.SKILLS_GITHUB_API_URL ?? "https://api.github.com";
@@ -35,15 +35,27 @@ export async function searchSkillRegistry(query: string, limit = 10): Promise<Re
   const n = Math.min(25, Math.max(1, Math.floor(limit) || 10));
   const data = await getJson(apiBase() + "/api/search?q=" + encodeURIComponent(q) + "&limit=" + n);
   const rows = Array.isArray(data.skills) ? data.skills as Array<Record<string, unknown>> : [];
-  return rows.map(r => ({
-    id: String(r.id ?? ""), source: String(r.source ?? ""), skillId: String(r.skillId ?? ""),
-    name: String(r.name ?? ""), installs: typeof r.installs === "number" ? r.installs : 0,
-  })).filter(r => r.source && r.name);
+  return rows.map(r => {
+    const source = String(r.source ?? ""); const skillId = String(r.skillId ?? "");
+    // The install route is GitHub-only, so a result gets a ready-made
+    // installRef only when its source is a GitHub owner/repo (GitHub
+    // owners never contain a dot; a dotted source like
+    // skills.volces.com is hosted elsewhere). Composing a ref from
+    // the row id instead produced owner "skills.volces.com" and a
+    // GitHub 404 - the model now copies installRef verbatim, or
+    // picks a different result when it is null.
+    const installRef = skillId && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/.test(source) ? source + "@" + skillId : null;
+    return {
+      id: String(r.id ?? ""), source, skillId,
+      name: String(r.name ?? ""), installs: typeof r.installs === "number" ? r.installs : 0, installRef,
+    };
+  }).filter(r => r.source && r.name);
 }
 
 export function parseSkillRef(ref: string): { owner: string; repo: string; skill?: string } {
   const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:[@/]([A-Za-z0-9_.-]+))?$/.exec(ref.trim());
   if (!m) throw new Error("Skill reference must look like owner/repo or owner/repo@skill-name");
+  if (m[1].includes(".")) throw new Error("Skill reference owner \"" + m[1] + "\" is not a GitHub owner (GitHub names never contain a dot) - this skill is hosted outside GitHub and cannot be installed through the registry route; pick a search result with an installRef");
   return { owner: m[1], repo: m[2], skill: m[3] };
 }
 
