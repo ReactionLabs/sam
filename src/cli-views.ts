@@ -10,6 +10,7 @@ import { standingSummary } from "./standing-files.js";
 import { listCompactions } from "./compaction.js";
 import type { ChatCompaction } from "./chats.js";
 import { verificationStatus, type VerificationStatus } from "./verification.js";
+import { pairingStatus, type PairingChannelStatus } from "./pairing.js";
 import { goldfishStatus, type GoldfishState } from "./goldfish.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
@@ -43,6 +44,7 @@ export function statusSnapshot(root: string): {
   compactions: ChatCompaction[];
   verification: VerificationStatus;
   goldfish: { state: GoldfishState; verdict: string | null; uncoveredChanges: number };
+  pairing: PairingChannelStatus[];
 } {
   return {
     at: new Date().toISOString(),
@@ -57,5 +59,6 @@ export function statusSnapshot(root: string): {
     compactions: listCompactions(root),
     verification: verificationStatus(root),
     goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
+    pairing: pairingStatus(root),
   };
 }

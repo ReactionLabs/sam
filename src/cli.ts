@@ -21,6 +21,7 @@ import { heartbeatJobs, addHeartbeatJob, removeHeartbeatJob, runHeartbeat, deliv
 import { listBackgroundTasks, queueBackgroundTask, drainBackgroundTasks } from "./background.js";
 import { runChatTurn } from "./agent-turn.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
+import { findChannel, issuePairingCode, pairingStatus, redeemPairingCode } from "./pairing.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
 import { serveWebhookChannel } from "./webhook.js";
 import { postDiscord } from "./discord.js";
@@ -177,6 +178,9 @@ channelCmd.command("add-discord").argument("<name>").argument("<profile>").argum
 channelCmd.command("add-webhook").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"webhook",name,profile,tokenEnv)));
 channelCmd.command("list").action(()=>output(channels(program.opts().workspace)));
 channelCmd.command("owners").argument("<id>").argument("<ids>").action((id:string,ids:string)=>output(setChannelOwners(program.opts().workspace,id,ids.split(",").map(x=>Number(x.trim())))));
+channelCmd.command("pair").argument("<idOrName>").description("Issue a pairing code for a telegram channel (Phase A item 3): 8 characters, shown once, hash stored, expires in 1 hour, single use; issuing retires the previous live code").action((idOrName:string)=>output(issuePairingCode(program.opts().workspace,idOrName)));
+channelCmd.command("pairs").description("Pairing state per telegram channel: live code + expiry, owner count, recent failed attempts, lockout").action(()=>output(pairingStatus(program.opts().workspace)));
+channelCmd.command("redeem").argument("<idOrName>").argument("<code>").argument("<userId>").description("Redeem a pairing code for a telegram user id (the same door the bot uses; for operator testing and recovery)").action((idOrName:string,code:string,userId:string)=>{const root=program.opts().workspace as string;output(redeemPairingCode(root,findChannel(root,idOrName).id,code,Number(userId)));});
 channelCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeChannel(program.opts().workspace,id)}));
 program.command("telegram-bridge").description("Run the Telegram channel bridge (long-polling, owner allowlisted)")
  .option("--channel <name>","Channel name (default: first enabled telegram channel)")

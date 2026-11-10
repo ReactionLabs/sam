@@ -1,12 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Channel } from "./channels.js";
+import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 
 // Telegram bridge: long-polls the bot API (no public webhook needed, so it works
 // from a NAT/tailnet box), maps each allowed Telegram chat to a SAM chat bound to
 // the channel's profile, and relays messages both ways. Anyone not on the owner
-// list is ignored silently; their id is recorded as a pairing candidate so the
-// operator can recognize and approve the owner later.
+// list is ignored silently; their id is recorded as a pairing candidate for
+// visibility, and a pairing code (pairing.ts, Phase A item 3) is the door in:
+// send the code, join the owner list, no hand-copied numeric ids.
 export interface SamClient {
  ensureChat(title:string,profile:string):Promise<string>;
  postMessage(chatId:string,content:string):Promise<string>;
@@ -27,13 +29,30 @@ export function chunkText(text:string,limit=4000):string[]{
  if(rest)out.push(rest);
  return out.length?out:[""];
 }
-export async function handleTelegramUpdate(deps:{channel:Channel;sam:SamClient;send:(chatId:number,text:string)=>Promise<void>;state:BridgeState},update:TelegramUpdate):Promise<void>{
+export async function handleTelegramUpdate(deps:{channel:Channel;sam:SamClient;send:(chatId:number,text:string)=>Promise<void>;state:BridgeState;root?:string},update:TelegramUpdate):Promise<void>{
  const msg=update.message;
  deps.state.offset=Math.max(deps.state.offset,update.update_id+1);
  if(!msg||typeof msg.text!=="string"||!msg.text.trim())return;
  const fromId=msg.from?.id;
  if(!fromId||!deps.channel.ownerIds.includes(fromId)){
   deps.state.pairingCandidate={id:fromId??0,username:msg.from?.username,first_name:msg.from?.first_name,at:new Date().toISOString()};
+  // Pairing (Phase A item 3): a non-owner whose message is a pairing code
+  // (or "pair <code>") redeems it and joins the owner list. Owners are
+  // checked FIRST, above, so an owner's code-shaped chat message is never
+  // consumed as a code. A failed attempt gets silence, never an oracle -
+  // the attempt is counted toward the channel lockout inside redeem.
+  if(fromId&&deps.root){
+   const attempt=pairingAttemptCode(msg.text);
+   if(attempt){
+    try{
+     const result=redeemPairingCode(deps.root,deps.channel.id,attempt,fromId);
+     if(result.ok){
+      deps.channel.ownerIds=result.channel.ownerIds;
+      await deps.send(msg.chat.id,"Paired - you are on the owner list for this SAM channel now. Send any message to start talking.");
+     }
+    }catch{/* a pairing error never kills the bridge and never talks to strangers */}
+   }
+  }
   return;
  }
  const key=String(msg.chat.id);
@@ -104,7 +123,7 @@ export async function runTelegramBridge(opts:{root:string;channel:Channel;sam:Sa
   let updates:TelegramUpdate[]=[];
   try{updates=await opts.api.getUpdates(state.offset,timeout);}catch{await new Promise(r=>setTimeout(r,3000));continue;}
   for(const update of updates){
-   try{await handleTelegramUpdate({channel:opts.channel,sam:opts.sam,send:(id,text)=>opts.api.sendMessage(id,text),state},update);}catch{/* one bad update never kills the bridge */}
+   try{await handleTelegramUpdate({channel:opts.channel,sam:opts.sam,send:(id,text)=>opts.api.sendMessage(id,text),state,root:opts.root},update);}catch{/* one bad update never kills the bridge */}
    saveBridgeState(opts.root,state);
   }
  }
