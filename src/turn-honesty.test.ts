@@ -64,6 +64,17 @@ test("leak-only completions still surface after the third attempt", async () => 
   });
 });
 
+test("a batched completion above the old 4-call cap parses whole (owner defect 2026-11-10)", async () => {
+  const calls = (n: number) => Array.from({ length: n }, (_v, i) => ({ id: "c" + i, type: "function", function: { name: "sam_memory_list", arguments: "{}" } }));
+  await withServer((_hit, res) => res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: calls(6) } }] })), async (provider) => {
+    const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "archive the others" }], []);
+    assert.equal(turn.calls.length, 6);
+  });
+  await withServer((_hit, res) => res.end(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: calls(13) } }] })), async (provider) => {
+    await assert.rejects(() => provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []), /Too many tool calls/);
+  });
+});
+
 test("a turn that runs out of steps says steps, not tool budget", async () => {
   const root = mkdtempSync(join(tmpdir(), "sam-steps-"));
   try {

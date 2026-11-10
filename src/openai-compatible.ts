@@ -179,7 +179,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
       if(rawContent&&!content&&!(Array.isArray(msg.tool_calls)&&msg.tool_calls.length))throw Error("Unsafe model output");
       const raw=msg.tool_calls;
       if(raw!==undefined&&!Array.isArray(raw))throw Error("Invalid tool calls");
-      if(Array.isArray(raw)&&raw.length>4)throw Error("Too many tool calls");
+      // The cap is a sanity bound, not a workflow limit: SAM's own
+      // guidance tells the model to batch independent calls in one
+      // step, and a batch ask ("archive the other chats") legitimately
+      // emits more than four. The old cap of 4 killed exactly that
+      // turn with a raw error (owner defect 2026-11-10). The loops'
+      // call budgets stub whatever overflows, gracefully.
+      if(Array.isArray(raw)&&raw.length>12)throw Error("Too many tool calls");
       const calls:Array<{id:string;name:string;args:Record<string,unknown>}>=[];
       for(const call of (raw??[]) as Array<{id?:unknown;type?:unknown;function?:{name?:unknown;arguments?:unknown}}>){
         if(typeof call.id!=="string"||call.id.length>128||call.type!=="function"||typeof call.function?.name!=="string"||typeof call.function.arguments!=="string"||call.function.arguments.length>4000)throw Error("Invalid tool call");
