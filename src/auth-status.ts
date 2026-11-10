@@ -5,6 +5,7 @@ import { modelRoutingTable, resolveModelForRoute, type ModelSource, type ModelTi
 import { parseSamConfig } from "./config.js";
 import { modelEndpoint, modelApiKey, readSetupRecord, defaultCompleter, type Completer } from "./config-wizard.js";
 import { engineBinary } from "./engine.js";
+import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { recordActivity } from "./activity.js";
 
@@ -60,7 +61,7 @@ export interface AuthStatus {
   setupVerified: { model: string; verifiedAt: string; current: boolean } | null;
   routes: AuthTarget[];
   profiles: AuthTarget[];
-  engine: { route: "cli-reuse"; installed: boolean; binary: string | null };
+  engine: { route: "cli-reuse"; installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null };
   senses: { installed: boolean; binary: string | null };
   lastProbeAt: string | null;
   healthy: boolean;
@@ -133,7 +134,7 @@ export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): 
     setupVerified: setup ? { model: setup.model, verifiedAt: setup.verifiedAt, current: !!chat && setup.model === chat.model } : null,
     routes: routeRows,
     profiles: profileRows,
-    engine: { route: "cli-reuse", installed: !!engineBinary(env), binary: engineBinary(env) },
+    engine: (() => { const c = engineConnectStatus(root, env); return { route: "cli-reuse" as const, installed: !!engineBinary(env), binary: engineBinary(env), connected: c.connected, stale: c.stale, connection: c.connection }; })(),
     senses: sensesStatus(env),
     lastProbeAt: store?.at ?? null,
     healthy: authCheckOk({ routes: routeRows }),

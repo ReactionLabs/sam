@@ -6,6 +6,7 @@ import { connectors } from "./connectors.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { modelRoutingTable } from "./model-routing.js";
 import { engineBinary } from "./engine.js";
+import { connectEngine, engineConnectStatus, type EngineAuthRunner, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { recordActivity } from "./activity.js";
@@ -45,7 +46,7 @@ export interface SetupDetection {
   channels: Array<{ name: string; kind: string; profile: string; tokenEnv: string; credential: "present" | "absent"; owners: number; enabled: boolean }>;
   connectors: Array<{ name: string; enabled: boolean; credential: "present" | "absent" }>;
   keys: KeyState[];
-  engine: { installed: boolean; binary: string | null };
+  engine: { installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null };
   senses: { installed: boolean; binary: string | null };
   nextSteps: string[];
 }
@@ -107,6 +108,7 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
   if (!modelEndpoint(env)) nextSteps.push("Set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT so SAM knows where the model lives.");
   if (model && modelApiKey(env) && modelEndpoint(env)) nextSteps.push("Run `sam config setup --live` to verify the model with one real completion and record the verified setup.");
   if (!engineBin) nextSteps.push("Optional: install Claude Code on this machine to enable the managed coding engine (an operator install; SAM only detects it).");
+  else if (!engineConnectStatus(root, env).connected) nextSteps.push("Optional: connect Claude Code as the coding-engine route with `sam engine connect` (CLI reuse - SAM verifies the CLI's login and stores only a route marker, never its tokens).");
   if (!senses.installed) nextSteps.push("Optional: install and authorize the senses reader (gog) to give the core profile its Gmail and Calendar senses.");
   return {
     firstRun: !turnReady,
@@ -121,7 +123,7 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
     channels: chans.map(c => ({ name: c.name, kind: c.kind, profile: c.profile, tokenEnv: c.tokenEnv, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const, owners: c.ownerIds.length, enabled: c.enabled })),
     connectors: conns.map(c => ({ name: c.name, enabled: c.enabled, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const })),
     keys,
-    engine: { installed: !!engineBin, binary: engineBin },
+    engine: (() => { const c = engineConnectStatus(root, env); return { installed: !!engineBin, binary: engineBin, connected: c.connected, stale: c.stale, connection: c.connection }; })(),
     senses: { installed: senses.installed, binary: senses.binary },
     nextSteps,
   };
@@ -144,6 +146,13 @@ export function configSections(root: string, env: NodeJS.ProcessEnv = process.en
   keyLines.push("SAM stores only env-var names, never key values; set a missing key in the install's environment, then re-run verify.");
   const engineLines = [
     "coding engine (Claude Code): " + (d.engine.installed ? "installed (" + d.engine.binary + ")" : "not installed - installing it is the operator's act"),
+    "engine connection (CLI reuse): " + (d.engine.connected
+      ? "connected" + (d.engine.connection ? " since " + d.engine.connection.connectedAt + (d.engine.connection.authMethod ? " via " + d.engine.connection.authMethod : "") : "") + " - SAM stores only a route marker, never the CLI's tokens"
+      : d.engine.stale
+        ? "a connection is recorded but its binary is no longer the one detected - re-run `sam engine connect` to re-verify it"
+        : d.engine.installed
+          ? "not connected - run `sam engine connect` (or this section) to verify the CLI's login and record the route"
+          : "not connected - no engine to connect yet"),
     "senses reader (gog): " + (d.senses.installed ? "installed (" + d.senses.binary + ")" : "not installed - the core profile's Gmail/Calendar senses stay dark until it is installed and authorized"),
   ];
   return [
@@ -229,7 +238,7 @@ export interface WizardIo {
 // The wizard runner, with injectable IO so the whole flow is testable
 // without a terminal. Saves ride the real stores; a refusal from a
 // store is shown with its reason and the wizard continues.
-export async function runConfigWizard(root: string, io: WizardIo, opts: { section?: string; env?: NodeJS.ProcessEnv } = {}): Promise<void> {
+export async function runConfigWizard(root: string, io: WizardIo, opts: { section?: string; env?: NodeJS.ProcessEnv; engineAuthRunner?: EngineAuthRunner } = {}): Promise<void> {
   const env = opts.env ?? process.env;
   const sections = configSections(root, env);
   const wanted = opts.section ? sections.filter(s => s.id === opts.section) : sections;
@@ -242,7 +251,7 @@ export async function runConfigWizard(root: string, io: WizardIo, opts: { sectio
   if (opts.section) {
     const s = wanted[0];
     show(s);
-    await wizardSection(root, io, s.id, env);
+    await wizardSection(root, io, s.id, env, opts.engineAuthRunner);
     return;
   }
   for (const s of sections) show(s);
@@ -252,11 +261,11 @@ export async function runConfigWizard(root: string, io: WizardIo, opts: { sectio
     if (!CONFIG_SECTIONS.includes(pick as ConfigSectionId)) { io.print("Sections: " + CONFIG_SECTIONS.join(", ")); continue; }
     const fresh = configSections(root, env).find(s => s.id === pick)!;
     show(fresh);
-    await wizardSection(root, io, pick as ConfigSectionId, env);
+    await wizardSection(root, io, pick as ConfigSectionId, env, opts.engineAuthRunner);
   }
 }
 
-async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, env: NodeJS.ProcessEnv): Promise<void> {
+async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, env: NodeJS.ProcessEnv, engineAuthRunner?: EngineAuthRunner): Promise<void> {
   if (id === "model") {
     const d = detectSetup(root, env);
     io.print("The main model comes from SAM_MODEL in the environment; this wizard saves per-profile pins, which the runtime reads on every turn.");
@@ -300,5 +309,24 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
     io.print("SAM never stores key values. Set a missing key in this install's environment (export it, or the service env file), then run `sam config verify --live`.");
     return;
   }
-  io.print("Engine and senses are detected, not configured here: installing Claude Code or the gog reader is the operator's act on this machine; SAM picks them up automatically once present.");
+  // engine: the senses reader stays detect-and-report (installing and
+  // authorizing gog is the operator's act), but the coding engine now
+  // has a connect step (CLI dressing item 3): verify the host CLI's
+  // login and record the route marker. SAM never takes custody of
+  // the login itself.
+  const status = engineConnectStatus(root, env);
+  if (!status.installed) {
+    io.print("Claude Code is not installed on this machine, so there is no engine to connect. Installing it (and signing in with `claude auth login`) is the operator's act; SAM picks it up automatically once present. The gog senses reader is likewise detected, not configured here.");
+    return;
+  }
+  if (status.connected) {
+    io.print("Claude Code is already connected as the coding-engine route (CLI reuse, connected " + (status.connection?.connectedAt ?? "") + "). To re-verify it, run `sam engine connect`; to disconnect SAM's route marker, run `sam engine disconnect` (that never touches the CLI's own login).");
+    return;
+  }
+  const go = (await io.ask("Connect Claude Code as the coding-engine route now? This runs `claude auth status` and, only if the CLI reports a signed-in login, records a route marker - SAM never reads or stores the CLI's tokens. [y/N]: ")).trim().toLowerCase();
+  if (go !== "y" && go !== "yes") return;
+  try {
+    const result = engineAuthRunner ? await connectEngine(root, env, engineAuthRunner) : await connectEngine(root, env);
+    io.print(result.connected ? "Connected: Claude Code is the coding-engine route via CLI reuse (marker recorded; no credentials held by SAM)." : "Not connected: " + result.probe.reason);
+  } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); }
 }

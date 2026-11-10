@@ -23,6 +23,7 @@ import { loadApprovalPolicy, type ApprovalPolicy } from "./approval-policy.js";
 import { codeSummary } from "./code.js";
 import { codingSummary, type CodingTask } from "./coding.js";
 import { engineStatus, type EngineTask } from "./engine.js";
+import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { briefStatus } from "./brief.js";
 import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
@@ -70,7 +71,7 @@ export function statusSnapshot(root: string): {
   approvals: ApprovalPolicy;
   code: { root: string | null; writes: number; commands: string[] };
   coding: { root: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: CodingTask[] };
-  engine: { installed: boolean; binary: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[] };
+  engine: { installed: boolean; binary: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[]; connection: { route: "cli-reuse"; connected: boolean; stale: boolean; record: EngineConnection | null } };
   senses: { installed: boolean; binary: string | null; coreOnly: true; senses: string[] };
   brief: { installed: boolean; job: unknown; script: string };
   setup: SetupRecord | null;
@@ -100,7 +101,7 @@ export function statusSnapshot(root: string): {
     approvals: loadApprovalPolicy(root),
     code: codeSummary(root),
     coding: codingSummary(root),
-    engine: engineStatus(root),
+    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, connected: c.connected, stale: c.stale, record: c.connection } }; })(),
     senses: sensesStatus(),
     brief: briefStatus(root),
     setup: readSetupRecord(root),
