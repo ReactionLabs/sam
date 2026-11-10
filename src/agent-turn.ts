@@ -107,7 +107,7 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   // words are not the owner's world) and never on heartbeat or
   // background routes (standing prompts, not a returning owner).
   let recallBlock="";
-  if(!visitor&&route==="chat"){try{recallBlock=buildRecallBlock(root,{actor:profileName,message:content});}catch{/* recall never breaks a turn */}}
+  if(!visitor&&route==="chat"){try{recallBlock=buildRecallBlock(root,{actor:profileName,message:content,sessionStart:!history.some(m=>m.role==="assistant")});}catch{/* recall never breaks a turn */}}
   const systemContent=composeSystemPrompt({
     base:CAPABILITY_STATEMENT+"\n"+DASHBOARD_NOTE,
     style:PLAIN_STYLE_INSTRUCTION,

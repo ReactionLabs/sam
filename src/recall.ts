@@ -1,6 +1,7 @@
 import { join, resolve } from "node:path";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 import { visibleScopes } from "./links.js";
+import { listLoops } from "./loops.js";
 
 /**
  * Recall that lands (Smarter-and-Smoother pass S1, Dip mandate
@@ -48,12 +49,28 @@ function line(record: MemoryRecord, clip: number): string {
   return "- [" + date + "] " + text;
 }
 
-export function buildRecallBlock(root: string, opts: { actor: string; message: string }): string {
+export function buildRecallBlock(root: string, opts: { actor: string; message: string; sessionStart?: boolean }): string {
   const scopes = visibleScopes(root, opts.actor);
   if (!scopes.length) return "";
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
     const sections: string[] = [];
+    // Continuity across sessions (S2): at a session's first turn,
+    // where things stand rides in unbriefed - the profile's open
+    // loops and its most recent decisions - so a new session opens
+    // on known ground instead of a cold start.
+    if (opts.sessionStart) {
+      const standing: string[] = [];
+      const loops = listLoops(root, { profile: opts.actor, status: "open" })
+        .sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 3);
+      for (const l of loops) standing.push("- Open loop (look again " + l.dueAt.slice(0, 10) + "): " + l.question.replace(/\s+/g, " ").slice(0, 180) + " - watching for: " + l.watchFor.replace(/\s+/g, " ").slice(0, 140));
+      const decisions = store.list(undefined, scopes)
+        .filter(r => r.kind === "decision")
+        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+        .slice(0, 3);
+      for (const d of decisions) standing.push(line(d, 240).replace("- [", "- Decision ["));
+      if (standing.length) sections.push("Where things stand:\n" + standing.join("\n"));
+    }
     const episodes = store.list(undefined, scopes)
       .filter(r => r.source.startsWith("episode:"))
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))

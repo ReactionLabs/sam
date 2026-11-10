@@ -56,6 +56,7 @@ import { listContacts, getContact, upsertContact, removeContact } from "./contac
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
+import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, saveNote } from "./notes.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
@@ -226,6 +227,10 @@ noteCmd.command("save").argument("<content>").option("--profile <name>","Acting 
 noteCmd.command("classify").argument("<content>").option("--supersedes <id>","Record id the note would correct").action((content:string,o:{supersedes?:string})=>output(classifyNote(content,{supersedes:o.supersedes??null})));
 const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
 epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
+const loopCmd=program.command("loops").description("Open loops: questions whose answers may change, carried into the next session under 'Where things stand'");
+loopCmd.command("list").option("--profile <name>","Only this profile").option("--all","Include closed loops").action((o:{profile?:string;all?:boolean})=>output(listLoops(program.opts().workspace,{profile:o.profile,status:o.all?undefined:"open"})));
+loopCmd.command("open").argument("<profile>").argument("<question>").argument("<watchFor>").option("--answer <text>","The answer given").option("--hours <n>","Hours until the next look").action((profile:string,question:string,watchFor:string,o:{answer?:string;hours?:string})=>output(openLoop(program.opts().workspace,{profile,question,answer:o.answer??"",watchFor,dueInHours:o.hours?Number(o.hours):undefined})));
+loopCmd.command("close").argument("<id>").action((id:string)=>output({closed:closeLoop(program.opts().workspace,id)}));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
 hbCmd.command("add").argument("<name>").argument("<minutes>").argument("<profile>").argument("<prompt>").option("--channel <id>","Deliver replies to this channel id").action((name:string,minutes:string,profile:string,prompt:string,o:{channel?:string})=>output(addHeartbeatJob(program.opts().workspace,name,Number(minutes),profile,prompt,o.channel??null)));
 hbCmd.command("list").action(()=>output(heartbeatJobs(program.opts().workspace)));
