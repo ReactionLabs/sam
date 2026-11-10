@@ -36,7 +36,9 @@ import { ChatStore } from "./chats.js";
 import { runResearchTeam } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
-import { discoverSkills, findSkill, searchSkills, readSkill } from "./skills.js";
+import { discoverSkills, findSkill, searchSkills, readSkill, setSkillAllowlist, skillAllowlist, skillsForProfile } from "./skills.js";
+import { listBindings, removeBinding, resolveBindingProfile, setBinding } from "./bindings.js";
+import { knownProfileNames } from "./actions.js";
 import { searchSkillRegistry, installSkill, installedSkills, removeInstalledSkill } from "./skill-registry.js";
 import { authoredSkills, curatorFindings, proposeAuthoredSkill, runSkillCurator, writeAuthoredSkill } from "./skill-author.js";
 import { createInterface } from "node:readline/promises";
@@ -192,6 +194,10 @@ channelCmd.command("pair").argument("<idOrName>").description("Issue a pairing c
 channelCmd.command("pairs").description("Pairing state per telegram channel: live code + expiry, owner count, recent failed attempts, lockout").action(()=>output(pairingStatus(program.opts().workspace)));
 channelCmd.command("redeem").argument("<idOrName>").argument("<code>").argument("<userId>").description("Redeem a pairing code for a telegram user id (the same door the bot uses; for operator testing and recovery)").action((idOrName:string,code:string,userId:string)=>{const root=program.opts().workspace as string;output(redeemPairingCode(root,findChannel(root,idOrName).id,code,Number(userId)));});
 channelCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeChannel(program.opts().workspace,id)}));
+channelCmd.command("bind").argument("<idOrName>").requiredOption("--profile <name>","Profile this binding routes to").option("--peer <id>","Sender id on the channel (omit for a channel-wide binding)").description("Set a deterministic binding (Phase C item 3): (channel, peer) routes to a profile; most specific wins - a peer binding beats a channel-wide binding beats the channel's own profile").action((idOrName:string,o:{profile:string;peer?:string})=>{const root=program.opts().workspace as string;const known=knownProfileNames(root);if(!known.includes(o.profile))throw new Error("Unknown profile: "+o.profile+". Known profiles: "+known.join(", "));output(setBinding(root,{channelId:findChannel(root,idOrName).id,peer:o.peer??null,profile:o.profile}));});
+channelCmd.command("bindings").description("All deterministic bindings, with the channel each belongs to").action(()=>{const root=program.opts().workspace as string;const byId=new Map(channels(root).map(c=>[c.id,c.name]));output(listBindings(root).map(b=>({...b,channel:byId.get(b.channelId)??b.channelId})));});
+channelCmd.command("unbind").argument("<id>").description("Remove one binding by its id (channels bindings lists them)").action((id:string)=>output({removed:removeBinding(program.opts().workspace,id)}));
+channelCmd.command("resolve").argument("<idOrName>").option("--peer <id>","Sender id to resolve for").description("Show which profile a message on this channel would land on, and which rule decided it").action((idOrName:string,o:{peer?:string})=>{const root=program.opts().workspace as string;const channel=findChannel(root,idOrName);output({channel:channel.name,...resolveBindingProfile(root,channel,o.peer??null)});});
 program.command("telegram-bridge").description("Run the Telegram channel bridge (long-polling, owner allowlisted)")
  .option("--channel <name>","Channel name (default: first enabled telegram channel)")
  .option("--dashboard-url <url>","SAM dashboard base URL",process.env.SAM_DASHBOARD_URL??"http://127.0.0.1:4317")
@@ -374,7 +380,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
   const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
   console.log("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port);
-  await serveWebhookChannel({channel,sam,secret,port:Number(o.port)});
+  await serveWebhookChannel({channel,sam,secret,port:Number(o.port),root});
  });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
 chats.command("new").argument("<title>").option("--profile <name>","Bind the chat to a profile").action((title:string,o:{profile?:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title,o.profile&&o.profile!=="sam"?o.profile:null));}finally{db.close();}});
@@ -420,6 +426,9 @@ skills.command("propose").argument("<name>").requiredOption("--description <text
 skills.command("authored").description("Skills SAM authored itself, with provenance and version").action(()=>output(authoredSkills(program.opts().workspace)));
 skills.command("curator").description("Skill curator (Phase B item 3): run the deterministic library pass now - duplicate, shadowed, orphaned, and unmatchable skills, each with a suggested patch; the same pass runs inside every heartbeat consolidation").action(()=>{const r=runSkillCurator(program.opts().workspace);output({findings:r.findings,changed:r.changed});});
 skills.command("curator-findings").description("The curator findings from the last pass, without re-running it").action(()=>output(curatorFindings(program.opts().workspace)));
+skills.command("allowlist").argument("<profile>").description("Show one profile's skill allowlist (Phase C item 3): null means unrestricted - the profile holds every installed skill").action((profile:string)=>{const root=program.opts().workspace as string;output({profile,allowlist:skillAllowlist(root,profile),effective:skillsForProfile(root,profile).map(s=>s.name)});});
+skills.command("allow").argument("<profile>").argument("<names...>").description("Set one profile's skill allowlist (Phase C item 3): the profile's catalog, sam_list_skills, and sam_read_skill see only these skills; names must be installed skills").action((profile:string,names:string[])=>{const root=program.opts().workspace as string;const known=knownProfileNames(root);if(!known.includes(profile))throw new Error("Unknown profile: "+profile+". Known profiles: "+known.join(", "));output({profile,allowlist:setSkillAllowlist(root,profile,names)});});
+skills.command("allow-clear").argument("<profile>").description("Clear one profile's skill allowlist (back to unrestricted)").action((profile:string)=>output({profile,allowlist:setSkillAllowlist(program.opts().workspace,profile,null)}));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}

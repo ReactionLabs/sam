@@ -17,6 +17,8 @@ import { openLoopCount } from "./loops.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { authoredSkills, curatorFindings } from "./skill-author.js";
 import { deliverySummary } from "./delivery-outbox.js";
+import { listBindings, type Binding } from "./bindings.js";
+import { skillAllowlists } from "./skills.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -55,6 +57,8 @@ export function statusSnapshot(root: string): {
   deliveries: { delivered: number; suppressed: number };
   deliveryOutbox: { pending: number; delivered: number; suppressed: number; failed: number; recovered: number };
   skills: { authored: number; curatorFindings: number };
+  bindings: Binding[];
+  skillAllowlists: Record<string, string[]>;
 } {
   return {
     at: new Date().toISOString(),
@@ -75,5 +79,7 @@ export function statusSnapshot(root: string): {
     deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
     deliveryOutbox: deliverySummary(root),
     skills: { authored: authoredSkills(root).length, curatorFindings: curatorFindings(root).length },
+    bindings: listBindings(root),
+    skillAllowlists: skillAllowlists(root),
   };
 }

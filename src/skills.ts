@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
+import { recordActivity } from "./activity.js";
 
 export interface SkillEntry {
   name: string;
@@ -112,6 +113,63 @@ export function searchSkills(workspace: string, query: string): SkillEntry[] {
     const haystack = (skill.name + " " + skill.description).toLowerCase();
     return terms.every(term => haystack.includes(term));
   });
+}
+
+// Per-profile skill allowlists (Plan Phase C item 3): the installed library
+// is global, but what a profile may USE is scoped. .sam/skill-allowlists.json
+// maps a profile to the skill names it may hold; a profile with NO entry is
+// unrestricted (the pre-allowlist behavior, so existing installs change
+// nothing until the owner sets one), and an entry - even an empty one -
+// means the profile sees, catalogues, and reads only the named skills.
+// Enforcement lives at the reader (skillsForProfile / readSkillForProfile),
+// which every chat surface rides, so no surface can leak around the list.
+// The operator/CLI surfaces (skills list/read) stay global on purpose: the
+// owner manages the whole library; profiles live inside their list.
+function allowlistPath(workspace: string): string { return join(resolve(workspace), ".sam", "skill-allowlists.json"); }
+const profilePattern = /^[a-z][a-z0-9._-]{0,63}$/;
+export function skillAllowlists(workspace: string): Record<string, string[]> {
+  if (!existsSync(allowlistPath(workspace))) return {};
+  const value: unknown = JSON.parse(readFileSync(allowlistPath(workspace), "utf8"));
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid skill allowlists store");
+  return value as Record<string, string[]>;
+}
+export function skillAllowlist(workspace: string, profile: string): string[] | null {
+  const all = skillAllowlists(workspace);
+  return Object.prototype.hasOwnProperty.call(all, profile) ? [...all[profile]] : null;
+}
+export function setSkillAllowlist(workspace: string, profile: string, names: string[] | null): string[] | null {
+  if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
+  const all = skillAllowlists(workspace);
+  if (names === null) {
+    delete all[profile];
+    mkdirSync(join(resolve(workspace), ".sam"), { recursive: true });
+    writeFileSync(allowlistPath(workspace), JSON.stringify(all, null, 2), { mode: 0o600 });
+    recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist cleared for profile " + profile + " (unrestricted)");
+    return null;
+  }
+  const known = discoverSkills(workspace).map(s => s.name);
+  const clean = [...new Set(names.map(n => n.trim()).filter(Boolean))];
+  const unknown = clean.filter(n => !known.includes(n));
+  if (unknown.length) throw new Error("Unknown skill(s): " + unknown.join(", ") + ". Installed skills: " + (known.length ? known.join(", ") : "(none)"));
+  all[profile] = clean;
+  mkdirSync(join(resolve(workspace), ".sam"), { recursive: true });
+  writeFileSync(allowlistPath(workspace), JSON.stringify(all, null, 2), { mode: 0o600 });
+  recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist set for profile " + profile + ": " + (clean.length ? clean.join(", ") : "(none - no skills)"));
+  return [...clean];
+}
+/** The skills one profile may hold: the whole library, or its allowlist. */
+export function skillsForProfile(workspace: string, profile: string): SkillEntry[] {
+  const allow = skillAllowlist(workspace, profile);
+  const all = discoverSkills(workspace);
+  return allow === null ? all : all.filter(s => allow.includes(s.name));
+}
+/** readSkill fenced by the profile's allowlist: a skill outside the list
+ * refuses with its real reason, exactly like a skill that is not installed,
+ * so the model can report the fence instead of guessing around it. */
+export function readSkillForProfile(workspace: string, profile: string, name: string): { name: string; description: string; untrusted: true; instructions: string } {
+  const allow = skillAllowlist(workspace, profile);
+  if (allow !== null && !allow.includes(name)) throw new Error("Skill not on profile " + profile + "'s allowlist: " + name);
+  return readSkill(workspace, name);
 }
 
 /** Load a validated installed skill as untrusted reference material, never execute it. */

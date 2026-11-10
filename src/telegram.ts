@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
+import { resolveBindingProfile } from "./bindings.js";
 
 // Telegram bridge: long-polls the bot API (no public webhook needed, so it works
 // from a NAT/tailnet box), maps each allowed Telegram chat to a SAM chat bound to
@@ -55,10 +56,16 @@ export async function handleTelegramUpdate(deps:{channel:Channel;sam:SamClient;s
   }
   return;
  }
- const key=String(msg.chat.id);
+ // Deterministic bindings (Phase C item 3): the sender's id is the peer;
+ // a peer binding beats a channel-wide binding beats the channel's own
+ // profile. No root (older test harnesses) means the channel profile,
+ // exactly as before. A routed profile gets its own chat key so two
+ // profiles sharing one telegram chat never share a SAM chat.
+ const profile=deps.root?resolveBindingProfile(deps.root,deps.channel,fromId).profile:deps.channel.profile;
+ const key=profile===deps.channel.profile?String(msg.chat.id):String(msg.chat.id)+":"+profile;
  let chatId=deps.state.chats[key];
  if(!chatId){
-  chatId=await deps.sam.ensureChat("Telegram · "+deps.channel.profile,deps.channel.profile);
+  chatId=await deps.sam.ensureChat("Telegram · "+profile,profile);
   deps.state.chats[key]=chatId;
  }
  const reply=await deps.sam.postMessage(chatId,msg.text.trim());

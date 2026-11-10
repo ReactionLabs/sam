@@ -279,7 +279,7 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]}}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]}}>{
  const consolidation=consolidatePreferences(root);
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
@@ -301,7 +301,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    }catch(e){markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));}
   }
  }
- const jobs=heartbeatJobs(root);const now=new Date();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];
+ const jobs=heartbeatJobs(root);const now=new Date();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];const failed:string[]=[];
  // Loaded after consolidation, which saves this same state file for its
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
@@ -315,13 +315,14 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    let outcome:{stdout:string;code:number};
    try{outcome=await runScript(job.script??"");}
    catch(e){
-    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
     continue;
    }
    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
    if(outcome.code!==0){
+    failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script exited "+outcome.code);
     continue;
@@ -334,8 +335,23 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     continue;
    }
   }else{
-   const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
-   reply=await deps.runTurn(chatId,job.prompt);
+   // Job-failure isolation (gap found 2026-11-10, Phase C item 1 live
+   // review): one job's failed turn must not fail the whole tick. The
+   // script path already isolates; the agent path now does the same -
+   // a thrown turn logs job-failed with the reason, writes one activity
+   // line, advances lastRun (the schedule moves on; the failure is the
+   // news, recorded once), and the tick continues to the remaining
+   // jobs and the background drain instead of wedging every later job
+   // on the same failing turn at every tick.
+   try{
+    const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
+    reply=await deps.runTurn(chatId,job.prompt);
+   }catch(e){
+    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
+    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    continue;
+   }
    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
   }
   const hash=heartbeatOutputHash(reply);
@@ -383,7 +399,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // cheap tier never competes with the deep work.
  const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
  if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
- return {consolidation,ran,changed,unchanged,deliveries:deliveryResult,background};
+ return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.
@@ -393,6 +409,9 @@ export async function deliverToChannel(root:string,channelId:string,text:string,
  if(channel.kind==="discord"){await postDiscordFn(channel,text);return;}
  if(channel.kind==="telegram"){
   const state=loadBridgeState(root);
-  for(const key of Object.keys(state.chats))await sendTelegram(Number(key),text);
+  // Chat keys are telegram chat ids, optionally suffixed ":<profile>"
+  // when a binding routed that chat to another profile (Phase C item 3);
+  // the numeric id is always the part before the suffix.
+  for(const key of Object.keys(state.chats))await sendTelegram(Number(key.split(":")[0]),text);
  }
 }
