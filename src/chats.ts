@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { join,resolve } from "node:path";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
-export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number }
+export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string }
 export interface ChatCompaction { chat_id:string; covered:number; summary:string; updated_at:string }
@@ -28,6 +28,7 @@ export class ChatStore {
     // Visitor chats (P12): the person talking is a customer, not the owner.
     // Their text never becomes preference, law, or confirmed fact.
     if(!cols.some(c=>c.name==="visitor"))this.db.exec("ALTER TABLE chats ADD COLUMN visitor INTEGER NOT NULL DEFAULT 0 CHECK(visitor IN (0,1))");
+    if(!cols.some(c=>c.name==="archived"))this.db.exec("ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))");
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
@@ -95,7 +96,19 @@ export class ChatStore {
     if(typeof pinned!=="boolean")throw new Error("Invalid pin state");
     return this.db.prepare("UPDATE chats SET pinned=? WHERE id=?").run(pinned?1:0,id).changes===1;
   }
-  list():ChatRecord[]{return this.db.prepare("SELECT * FROM chats ORDER BY pinned DESC,updated_at DESC LIMIT 200").all() as ChatRecord[];}
+  archive(id:string,archived:boolean):boolean{
+    if(typeof archived!=="boolean")throw new Error("Invalid archive state");
+    return this.db.prepare("UPDATE chats SET archived=? WHERE id=?").run(archived?1:0,id).changes===1;
+  }
+  get(id:string):ChatRecord|null{
+    return (this.db.prepare("SELECT * FROM chats WHERE id=?").get(id) as ChatRecord|undefined)??null;
+  }
+  list(opts?:{includeArchived?:boolean}):ChatRecord[]{return this.db.prepare("SELECT * FROM chats"+(opts?.includeArchived?"":" WHERE archived=0")+" ORDER BY pinned DESC,updated_at DESC LIMIT 200").all() as ChatRecord[];}
+  searchMessages(query:string,chatIds:string[],limit=20):Array<{chat_id:string;role:string;content:string;created_at:string}>{
+    if(!query.trim()||!chatIds.length)return [];
+    const like="%"+query.replace(/[%_\\]/g,"\\$&")+"%";
+    return this.db.prepare("SELECT chat_id,role,content,created_at FROM chat_messages WHERE chat_id IN ("+chatIds.map(()=>"?").join(",")+") AND content LIKE ? ESCAPE '\\' ORDER BY created_at DESC LIMIT ?").all(...chatIds,like,limit) as Array<{chat_id:string;role:string;content:string;created_at:string}>;
+  }
   messages(id:string):ChatMessage[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
     return this.db.prepare("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY rowid LIMIT 500").all(id) as ChatMessage[];
