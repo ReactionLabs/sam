@@ -56,6 +56,7 @@ import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
+import { classifyNote, saveNote } from "./notes.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
 import { detectCorrection, proposeCorrection } from "./corrections.js";
 import { listDoors } from "./mini-door.js";
@@ -217,6 +218,9 @@ const compCmd=program.command("compaction").description("Context compression (Pl
 compCmd.command("list").description("Every chat that has compacted, newest first, with how many messages its summary covers").action(()=>output(listCompactions(program.opts().workspace)));
 compCmd.command("show").argument("<chat>").description("One chat's compaction record (covered count + summary), or compacted:false").action((chat:string)=>{const found=getCompaction(program.opts().workspace,chat);output(found??{chat_id:chat,compacted:false});});
 compCmd.command("run").argument("<chat>").description("Fold a chat's older turns now (keeps the newest exchanges verbatim; writes the memory flush first; visitor chats compact without a flush)").action((chat:string)=>{const result=forceCompactChat(program.opts().workspace,chat);output({chat:result.chatId,covered:result.covered,compactedNow:result.compactedNow,foldedCount:result.foldedCount,kept:result.kept.length,summary:result.summary});});
+const noteCmd=program.command("notes").description("Two-tier note saves (Plan Phase B): helpful notes save immediately at the profile's scope; hard changes (superseding a record, identity facts, rule-like phrasing) route to the owner approval gate instead - when in doubt, gated");
+noteCmd.command("save").argument("<content>").option("--profile <name>","Acting profile (default sam = core scope)","sam").option("--kind <kind>","Memory kind: observation, decision, failure, or procedure","observation").option("--supersedes <id>","Record id this note corrects (forces the hard tier)").action((content:string,o:{profile:string;kind:string;supersedes?:string})=>{const r=saveNote(program.opts().workspace,{actor:o.profile,content,kind:o.kind,supersedes:o.supersedes??null});output(r.status==="saved"?{status:r.status,tier:r.tier,id:r.record.id,scope:r.record.scope,source:r.record.source}:{status:r.status,tier:r.tier,reason:r.reason,proposalId:r.proposal.id});});
+noteCmd.command("classify").argument("<content>").option("--supersedes <id>","Record id the note would correct").action((content:string,o:{supersedes?:string})=>output(classifyNote(content,{supersedes:o.supersedes??null})));
 const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
 epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
