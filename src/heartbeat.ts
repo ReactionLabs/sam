@@ -11,6 +11,7 @@ import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { assessDelivery } from "./worthiness.js";
+import { runSkillCurator } from "./skill-author.js";
 
 // Heartbeats: SAM's scheduled self-maintenance and self-directed work.
 // Every tick does two things:
@@ -148,7 +149,7 @@ export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>
  return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
 }
 function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
-export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number}{
+export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[]}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
  const db=new ChatStore(root);const prefs=new PreferenceStore(root);
@@ -194,9 +195,17 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     if(writeEpisode(root,profile,date,[...(byDate.get(date) as Map<string,EpisodeChat>).values()]))episodes.push(profile+":"+date);
    }
   }
+  // Skill curator (Phase B item 3): a deterministic pass over the
+  // skill library on the same tick - no model call, so the cheap
+  // tier costs zero. It flags duplicate, shadowed, orphaned, and
+  // unmatchable skills into .sam/skill-curator.json with a suggested
+  // patch each, and ledgers only when the finding set changes. A
+  // curator failure never breaks a tick.
+  let curator:string[]=[];
+  try{curator=runSkillCurator(root).findings.map(f=>f.kind+":"+f.skills.join("+"));}catch{/* the curator never breaks a tick */}
   state.lastTick=new Date().toISOString();saveState(root,state);
-  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped});
-  return {scanned,noted,promoted,episodes,corrections,visitorSkipped};
+  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped,curator});
+  return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
  }finally{db.close();prefs.close();}
 }
 export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void> }

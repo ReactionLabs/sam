@@ -40,6 +40,7 @@ export const CORE_OWN_TOOLS = [
   "sam_save_note",
   "sam_patch_note",
   "sam_propose_action",
+  "sam_author_skill",
 ];
 
 export const LOADER_TOOL_DEF: Record<string, unknown> = {

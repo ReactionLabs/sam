@@ -7,18 +7,20 @@ import { addHeartbeatJob } from "./heartbeat.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { installSkill } from "./skill-registry.js";
+import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
 // is deliberately internal-only: save a memory note, set a standing law, create
-// a heartbeat job, post a message into one of SAM's own chats, or (P12, on the
+// a heartbeat job, post a message into one of SAM's own chats, write a
+// skill SAM authored itself (Phase B item 3), or (P12, on the
 // owner's own program order) save an outbound DRAFT the owner then sends
 // themselves - drafting writes only to SAM's own store, there is no send path.
 // No external sends, no service control, no money, no trading - widening this
 // list is an owner decision, never a model decision. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -29,7 +31,7 @@ export interface ActionProposal {
   // that record is archived, so recall stops surfacing the stale text.
   supersedes: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author"];
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
@@ -90,6 +92,11 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (!detail || detail.length > 4000) throw new Error("Invalid action detail");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
+  // Skill authoring (Phase B item 3): the draft is validated at
+  // proposal time - shape, secret scan, and the ownership rule (a
+  // patch may only target a sam-authored skill) - so the owner is
+  // never shown a card that cannot execute.
+  if (input.kind === "skill-author") validateSkillAuthorDetail(root, detail);
   const item: ActionProposal = {
     id: randomUUID(), actor: input.actor, kind: input.kind as ActionKind, title, detail,
     status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null,
@@ -147,6 +154,15 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const spec = JSON.parse(a.detail) as { to: string; channel?: string; subject?: string | null; body: string };
     const draft = createDraft(root, { actor: a.actor, to: spec.to, channel: spec.channel, subject: spec.subject ?? null, body: spec.body, via: "proposal" });
     return "Draft saved for " + draft.to + " (" + draft.id + ") - the owner sends it";
+  }
+  if (a.kind === "skill-author") {
+    // Self-authored skills (Phase B item 3): the approved execution
+    // writes SAM's own SKILL.md into the discovery root and stamps
+    // sam-authored provenance. Internal only - the skill is read as
+    // untrusted reference afterwards, never executed by being written.
+    const { draft, patch } = validateSkillAuthorDetail(root, a.detail);
+    const record = writeAuthoredSkill(root, draft, { actor: a.actor });
+    return (patch ? "Patched" : "Authored") + " skill " + record.name + " (v" + record.version + ") - it is now in the installed catalog";
   }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
