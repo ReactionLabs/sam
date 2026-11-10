@@ -38,6 +38,7 @@ export const CORE_OWN_TOOLS = [
   "sam_workspace_list",
   "sam_workspace_read",
   "sam_save_note",
+  "sam_patch_note",
   "sam_propose_action",
 ];
 

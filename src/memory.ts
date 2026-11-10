@@ -81,6 +81,12 @@ export class MemoryStore {
       WHERE memory_search MATCH ? AND m.archived_at IS NULL${scopeSql}
       ORDER BY bm25(memory_search),m.created_at DESC LIMIT ?`).all(query,...(scopes&&scopes.length?scopes:[]),limit) as MemoryRecord[];
   }
+  get(id:string):MemoryRecord|null {
+    // Includes archived records: patch/supersession validation needs to
+    // distinguish "no such record" from "already retired".
+    const row=this.db.prepare("SELECT * FROM memory_records WHERE id=?").get(id) as MemoryRecord|undefined;
+    return row??null;
+  }
   archive(id:string):boolean {
     return this.db.prepare("UPDATE memory_records SET archived_at=? WHERE id=? AND archived_at IS NULL")
       .run(new Date().toISOString(),id).changes===1;

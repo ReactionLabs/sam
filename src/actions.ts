@@ -24,13 +24,17 @@ export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
   status: ActionStatus; createdAt: string; decidedAt: string | null; result: string | null;
   chatId: string | null;
+  // Note PATCH (Phase B item 2): a kind "note" proposal may name the
+  // memory record it supersedes. On approval the new note saves AND
+  // that record is archived, so recall stops surfacing the stale text.
+  supersedes: string | null;
 }
 const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft"];
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
   const file = actionsFile(root);
   if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null })) : []; }
+  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null, supersedes: a.supersedes ?? null })) : []; }
   catch { return []; }
 }
 function saveActions(root: string, items: ActionProposal[]): void {
@@ -78,7 +82,7 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
   if (typeof s.prompt !== "string" || !s.prompt.trim() || s.prompt.length > 2000) throw new Error("Invalid heartbeat prompt in detail");
 }
-export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null }): ActionProposal {
+export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
   const detail = (input.detail ?? "").trim();
@@ -90,6 +94,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
     id: randomUUID(), actor: input.actor, kind: input.kind as ActionKind, title, detail,
     status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null,
     chatId: input.chatId ?? null,
+    supersedes: input.kind === "note" ? (input.supersedes ?? null) : null,
   };
   const items = listActions(root); items.push(item); saveActions(root, items);
   recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);
@@ -100,7 +105,21 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
     try {
       const scope = a.actor === "sam" ? "core" : "profile:" + a.actor;
+      // PATCH execution: the superseded record must still be a live
+      // record at the new note's scope, or the patch lands failed
+      // rather than silently saving beside a record it cannot retire.
+      let old: ReturnType<MemoryStore["get"]> = null;
+      if (a.supersedes) {
+        old = store.get(a.supersedes);
+        if (!old) throw new Error("Cannot patch: record " + a.supersedes + " no longer exists");
+        if (old.archived_at) throw new Error("Cannot patch: record " + a.supersedes + " is already archived");
+        if (old.scope !== scope) throw new Error("Cannot patch: record " + a.supersedes + " is not in this profile's scope");
+      }
       const rec = store.add({ kind: "observation", content: a.detail, source: "owner-approved action " + a.id, scope });
+      if (a.supersedes && old) {
+        if (!store.archive(old.id)) throw new Error("Cannot patch: record " + old.id + " could not be archived");
+        return "Memory note saved (" + rec.id + "), superseding record archived (" + old.id + ")";
+      }
       return "Memory note saved (" + rec.id + ")";
     } finally { store.close(); }
   }

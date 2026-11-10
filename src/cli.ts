@@ -60,7 +60,7 @@ import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
-import { classifyNote, saveNote } from "./notes.js";
+import { classifyNote, patchNote, saveNote } from "./notes.js";
 import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
 import { detectCorrection, proposeCorrection } from "./corrections.js";
 import { listDoors } from "./mini-door.js";
@@ -227,6 +227,7 @@ compCmd.command("run").argument("<chat>").description("Fold a chat's older turns
 const noteCmd=program.command("notes").description("Two-tier note saves (Plan Phase B): helpful notes save immediately at the profile's scope; hard changes (superseding a record, identity facts, rule-like phrasing) route to the owner approval gate instead - when in doubt, gated");
 noteCmd.command("save").argument("<content>").option("--profile <name>","Acting profile (default sam = core scope)","sam").option("--kind <kind>","Memory kind: observation, decision, failure, or procedure","observation").option("--supersedes <id>","Record id this note corrects (forces the hard tier)").action((content:string,o:{profile:string;kind:string;supersedes?:string})=>{const r=saveNote(program.opts().workspace,{actor:o.profile,content,kind:o.kind,supersedes:o.supersedes??null});output(r.status==="saved"?{status:r.status,tier:r.tier,id:r.record.id,scope:r.record.scope,source:r.record.source}:{status:r.status,tier:r.tier,reason:r.reason,proposalId:r.proposal.id});});
 noteCmd.command("classify").argument("<content>").option("--supersedes <id>","Record id the note would correct").action((content:string,o:{supersedes?:string})=>output(classifyNote(content,{supersedes:o.supersedes??null})));
+noteCmd.command("patch").description("Supersede one stored record by id with replacement text (Phase B item 2): always routed to the owner approval gate; on approval the new note saves and the old record is archived").argument("<id>").argument("<content>").option("--profile <name>","Acting profile (default sam = core scope)","sam").action((id:string,content:string,o:{profile:string})=>{const r=patchNote(program.opts().workspace,{actor:o.profile,id,content});output({status:r.status,tier:r.tier,reason:r.reason,proposalId:r.proposal.id,supersedes:r.supersedes});});
 const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
 epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
 const loopCmd=program.command("loops").description("Open loops: questions whose answers may change, carried into the next session under 'Where things stand'");

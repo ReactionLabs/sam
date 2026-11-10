@@ -17,7 +17,7 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "sam-tiers-"));
 }
 
-const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_handoff_task", "sam_ask_linked"];
+const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_patch_note", "sam_handoff_task", "sam_ask_linked"];
 const MCP_NAMES = ["whoami", "list_leads", "get_lead", "pipeline_summary", "analytics_summary", "coin_lookup", "list_candidates", "list_alerts", "paper_setups", "stack_health"];
 
 test("tool tiers: at or below the threshold nothing is deferred and no loader exists", () => {
