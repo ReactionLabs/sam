@@ -27,6 +27,7 @@ import { drainEngineTasks, engineStatus, listEngineTasks, queueEngineTask } from
 import { runChatTurn } from "./agent-turn.js";
 import { runTui } from "./tui.js";
 import { renderImageFile } from "./term-image.js";
+import { listReachChannels, reachDoctor, runReach } from "./reach.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { findChannel, issuePairingCode, pairingStatus, redeemPairingCode } from "./pairing.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
@@ -200,6 +201,10 @@ goldfishCmd.command("review").description("Run one fresh-context goldfish review
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 program.command("tui").description("SAM in the terminal: the S.A.M. splash, a live chat on the shared turn, images rendered in the transcript").option("--profile <name>","Profile to talk to (default sam)").option("--banner","Print the startup splash and exit").action(async(o:{profile?:string;banner?:boolean})=>{await runTui(program.opts().workspace,{profile:o.profile,bannerOnly:!!o.banner});});
 program.command("image").argument("<file>").description("Render an image in this terminal (Kitty/iTerm2 graphics where the terminal supports them, ANSI half-blocks elsewhere)").action((file:string)=>{process.stdout.write(renderImageFile(file,{cols:Math.max(20,(process.stdout.columns??80)-2),rows:24}));});
+const reach=program.command("reach").description("agent-reach from the operator seat: the same read-only search/read SAM uses through sam_reach");
+reach.command("channels").description("Channels and the read actions each declares").action(async()=>output(await listReachChannels()));
+reach.command("doctor").description("agent-reach channel status (text)").action(async()=>{process.stdout.write(await reachDoctor());});
+reach.command("call").argument("<channel>").argument("<action>").argument("[query]").option("--limit <n>","Max results for a search").description("Run one declared read action, e.g. reach call web search 'breaking news' or reach call youtube subtitle <url>").action(async(channel:string,action:string,query:string|undefined,o:{limit?:string})=>output(await runReach({channel,action,query,limit:o.limit?Number(o.limit):undefined})));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
 channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));
 channelCmd.command("add-discord").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"discord",name,profile,tokenEnv)));

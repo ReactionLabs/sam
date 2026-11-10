@@ -27,7 +27,12 @@ import { join, resolve } from "node:path";
  */
 
 export const TOOL_TIER_THRESHOLD = 15;
-export const UPFRONT_LIMIT = 14;
+export const UPFRONT_LIMIT = 16;
+// 16, not 14: the core tier grew to 14 when sam_reach joined it
+// (2026-11-10), and at 14 a connector chat's upfront set was ALL own
+// tools - every MCP tool of the pinned connector started deferred,
+// taxing the exact chats the connector exists for. The limit leaves
+// headroom for the connector's first tools after the core rides.
 export const LOADER_TOOL_NAME = "sam_load_tools";
 
 /** The own tools that are always upfront when tiering is active:
@@ -41,6 +46,7 @@ export const CORE_OWN_TOOLS = [
   "sam_save_note",
   "sam_react",
   "sam_read_skill",
+  "sam_reach",
   "sam_patch_note",
   "sam_propose_action",
   "sam_author_skill",

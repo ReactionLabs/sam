@@ -17,7 +17,7 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "sam-tiers-"));
 }
 
-const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_react", "sam_patch_note", "sam_author_skill", "sam_code", "sam_coding_task", "sam_handoff_task", "sam_ask_linked"];
+const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_react", "sam_reach", "sam_patch_note", "sam_author_skill", "sam_code", "sam_coding_task", "sam_handoff_task", "sam_ask_linked"];
 const MCP_NAMES = ["whoami", "list_leads", "get_lead", "pipeline_summary", "analytics_summary", "coin_lookup", "list_candidates", "list_alerts", "paper_setups", "stack_health"];
 
 test("tool tiers: at or below the threshold nothing is deferred and no loader exists", () => {
@@ -65,10 +65,10 @@ test("tool tiers: loads persist per chat, unknown names are refused, stubs name 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("tool tiers: own chats crossed the threshold with sam_search_chats (19 own tools after sam_react) - the core rides upfront, the rest is deferred with the loader", async () => {
+test("tool tiers: own chats crossed the threshold with sam_search_chats (20 own tools after sam_reach) - the core rides upfront, the rest is deferred with the loader", async () => {
   const root = scratch();
   try {
-    assert.equal(OWN_TOOLS.length, 19);
+    assert.equal(OWN_TOOLS.length, 20);
     const sentNames: string[][] = [];
     let step = 0;
     const fake = {
@@ -102,7 +102,7 @@ test("tool tiers: a connector chat defers, stubs an early call, loads, then offe
         modelCalls++;
         const sentNames = (body.tools ?? []).map((t: { function?: { name?: string } }) => t.function?.name);
         if (modelCalls === 1) {
-          assert.ok(sentNames.length <= 15, "upfront tier plus loader stays bounded");
+          assert.ok(sentNames.length <= UPFRONT_LIMIT + 1, "upfront tier plus loader stays bounded");
           assert.ok(sentNames.includes("sam_load_tools"));
           assert.ok(!sentNames.includes("sam_handoff_task"), "handoff starts deferred");
           return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name: "sam_handoff_task", arguments: "{\"prompt\":\"deep work\"}" } }] } }] }), { headers: { "Content-Type": "application/json" } });
