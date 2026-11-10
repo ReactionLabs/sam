@@ -10,6 +10,7 @@ import { loadBridgeState } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
+import { drainCodingTasks } from "./coding.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
 import { compileSchedule, nextCronRun, scriptArgv, scriptCommandNames, validateTimezone } from "./schedule.js";
@@ -279,7 +280,7 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]}}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]}}>{
  const consolidation=consolidatePreferences(root);
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
@@ -399,7 +400,12 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // cheap tier never competes with the deep work.
  const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
  if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
- return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background};
+ // Coder C3: the same tick drains the coding loop, after background
+ // work, on the same deep tier - a queued coding task plans, edits,
+ // verifies, and iterates without the owner watching it happen.
+ const coding=await drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
+ if(coding.ran.length||coding.blocked.length||coding.failed.length||coding.recovered.length)appendLog(root,{type:"coding",ran:coding.ran.length,blocked:coding.blocked.length,failed:coding.failed.length,recovered:coding.recovered.length});
+ return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.
