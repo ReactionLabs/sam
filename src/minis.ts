@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
 import { addHeartbeatJob } from "./heartbeat.js";
+import { connectors } from "./connectors.js";
 
 // Minis: a mini is a scoped SAM spawned for one person. Under the hood it is a
 // profile plus a registry record, and everything SAM has learned to scope by
@@ -42,6 +43,34 @@ export function spawnMini(root:string,input:SpawnMiniInput):Mini{
   saveMinis(root,[...existing,mini]);
   void welcomeChatId;
   return mini;
+}
+export interface SpawnSpec { name:string; person:string; instructions:string; model:string|null; connectorId:string|null; starterHeartbeat:boolean }
+/** Proposal-time validation for a kind "spawn" detail (the team build,
+ *  Dip 2026-11-10): the owner is never shown a spawn card that cannot
+ *  execute. The name must be a fresh profile name - not "sam", not an
+ *  existing scoped agent, not an existing profile of any kind - the
+ *  person and the standing instructions must be real, and a connector
+ *  pin must name a connector this install actually holds. Execution
+ *  re-validates, so a name taken between proposal and approval fails
+ *  the card instead of colliding. */
+export function validateSpawnDetail(root:string,detail:string):SpawnSpec{
+  let raw:Record<string,unknown>;
+  try{raw=JSON.parse(detail) as Record<string,unknown>;}catch{throw new Error("Invalid spawn detail: not JSON");}
+  const name=typeof raw.name==="string"?raw.name:"";
+  if(!/^[a-z][a-z0-9._-]{0,63}$/.test(name))throw new Error("Invalid spawn name: a lowercase profile name (letters, digits, . _ -), starting with a letter");
+  if(name==="sam")throw new Error("Invalid spawn name: 'sam' is the core profile and already exists");
+  const person=typeof raw.person==="string"?raw.person.trim():"";
+  if(!person||person.length>80)throw new Error("Invalid spawn person: name who or what the new agent serves (1 to 80 chars)");
+  const instructions=typeof raw.instructions==="string"?raw.instructions.trim():"";
+  if(!instructions||instructions.length>4000)throw new Error("Invalid spawn instructions: the new agent's standing orders (1 to 4000 chars)");
+  if(minis(root).some(m=>m.name===name))throw new Error("Cannot spawn '" + name + "': an agent with that name already exists");
+  const db=new ChatStore(root);
+  try{if(db.agents().some(a=>a.name===name))throw new Error("Cannot spawn '" + name + "': a profile with that name already exists");}finally{db.close();}
+  const model=typeof raw.model==="string"&&raw.model.trim()?raw.model.trim():null;
+  if(model&&model.length>120)throw new Error("Invalid spawn model pin (max 120 chars)");
+  const connectorId=typeof raw.connectorId==="string"&&raw.connectorId.trim()?raw.connectorId.trim():null;
+  if(connectorId&&!connectors(root).some(c=>c.id===connectorId))throw new Error("Cannot spawn: no connector with id " + connectorId + " exists on this install");
+  return {name,person,instructions,model,connectorId,starterHeartbeat:raw.starterHeartbeat===true};
 }
 export function removeMini(root:string,name:string):boolean{
   const items=minis(root),rest=items.filter(m=>m.name!==name);

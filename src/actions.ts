@@ -13,6 +13,8 @@ import { createDraft } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
 import { pushBranch, validateGitPushDetail } from "./git-work.js";
 import { queueEngineTask, validateEngineDetail } from "./engine.js";
+import { spawnMini, validateSpawnDetail } from "./minis.js";
+import { createLink } from "./links.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -35,7 +37,7 @@ import { queueEngineTask, validateEngineDetail } from "./engine.js";
 // No external sends, no service control, no money, no trading - widening this
 // list is an owner decision, never a model decision. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine" | "spawn";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -53,7 +55,7 @@ export interface ActionProposal {
   risk: ProposalRisk | null;
   decidedBy: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 export function listActions(root: string): ActionProposal[] {
@@ -148,6 +150,10 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // root (the branch sandbox), and the engine binary actually
   // installed - and it needs a chat to report back into (the
   // proposal's own chat, or one named in the detail).
+  // Team spawn (Dip, 2026-11-10): creating a new agent is validated at
+  // proposal time - fresh name, real person and instructions, a real
+  // connector pin - so the card the owner sees can always execute.
+  if (input.kind === "spawn") validateSpawnDetail(root, detail);
   if (input.kind === "engine") {
     const parsed = validateEngineDetail(root, detail);
     if (!input.chatId && !parsed.chatId) throw new Error("An engine proposal needs a chat to report back into - propose it from inside a chat, or name chatId in the detail");
@@ -255,6 +261,23 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     const { branch } = validateGitPushDetail(root, a.detail);
     const pushed = await pushBranch(root, branch);
     return "Pushed branch " + pushed.branch + " to origin (" + pushed.sha.slice(0, 12) + ") - no pull request was opened; that stays the owner's act";
+  }
+  if (a.kind === "spawn") {
+    // Team spawn execution: the agent is created (profile + welcome
+    // chat + optional starter digest) and LINKED to its creator in the
+    // same act, because a teammate the creator cannot talk to is just
+    // another isolated profile. Validation runs again here, so a name
+    // taken since the proposal fails the card instead of colliding.
+    // A link failure after a successful spawn is reported in the
+    // result, not hidden: the agent exists either way.
+    const spec = validateSpawnDetail(root, a.detail);
+    const mini = spawnMini(root, spec);
+    let linkNote = "";
+    try {
+      const group = createLink(root, a.actor + " + " + spec.name, [a.actor, spec.name]);
+      linkNote = "; linked to " + a.actor + " ('" + group.name + "') so they can work together through the link";
+    } catch (e) { linkNote = "; the agent exists but linking it to " + a.actor + " failed: " + (e instanceof Error ? e.message : "unknown error"); }
+    return "Agent " + mini.name + " created for " + mini.person + " (profile + welcome chat 'Meet " + mini.person + "'" + (spec.starterHeartbeat ? " + a starter daily digest" : "") + ")" + linkNote;
   }
   if (a.kind === "engine") {
     // C6 managed engine runtime: approval QUEUES the run - it does
