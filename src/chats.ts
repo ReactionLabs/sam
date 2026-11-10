@@ -6,7 +6,14 @@ import { join,resolve } from "node:path";
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
-export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string }
+export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null }
+// A reaction is a single emoji or a short emoji sequence (flags, ZWJ
+// families, keycaps, skin tones) - never text. This one validator
+// fences the sam_react tool, the dashboard badges, and the CLI verb.
+export function isReactionText(value:string):boolean{
+  if(typeof value!=="string"||!value||value.length>24)return false;
+  return /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[#*0-9]\uFE0F?\u20E3|[\uFE0F\u200D]|\p{Emoji_Modifier})+$/u.test(value);
+}
 export interface ChatCompaction { chat_id:string; covered:number; summary:string; updated_at:string }
 // Turn a person's question into a safe FTS5 MATCH expression: plain
 // terms only (letters, numbers, underscore), deduplicated, capped at
@@ -43,6 +50,8 @@ export class ChatStore {
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
+    const mcols=this.db.pragma("table_info(chat_messages)") as Array<{name:string}>;
+    if(!mcols.some(c=>c.name==="reaction"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN reaction TEXT");
     // Full-text chat search (Plan Phase B item 4): an FTS5 external-content
     // index over chat_messages, the MemoryStore pattern - triggers keep it
     // in step with inserts, and a DB that predates the index gets one
@@ -157,13 +166,22 @@ export class ChatStore {
   }
   add(id:string,role:"user"|"assistant",content:string):ChatMessage {
     if(!["user","assistant"].includes(role)||!content.trim()||content.length>20000)throw new Error("Invalid chat message");
-    const now=new Date().toISOString(),item={id:randomUUID(),chat_id:id,role,content,created_at:now};
+    const now=new Date().toISOString(),item={id:randomUUID(),chat_id:id,role,content,created_at:now,reaction:null as string|null};
     this.db.transaction(()=>{
       if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
-      this.db.prepare("INSERT INTO chat_messages VALUES (@id,@chat_id,@role,@content,@created_at)").run(item);
+      this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at) VALUES (@id,@chat_id,@role,@content,@created_at)").run(item);
       this.db.prepare("UPDATE chats SET updated_at=? WHERE id=?").run(now,id);
     })();
     return item;
+  }
+  // Reactions (Dip, 2026-11-10): an emoji stamped on one message -
+  // SAM's automatic seen/acknowledged marks and its deliberate
+  // sam_react both land here. Null clears. The message must belong
+  // to the named chat; a foreign id changes nothing and says so.
+  setReaction(chatId:string,messageId:string,reaction:string|null):boolean{
+    if(reaction!==null&&!isReactionText(reaction))throw new Error("Invalid reaction: a single emoji or short emoji sequence, no text");
+    const res=this.db.prepare("UPDATE chat_messages SET reaction=? WHERE id=? AND chat_id=?").run(reaction,messageId,chatId);
+    return res.changes>0;
   }
   // Context compaction (Plan Phase A item 2): one record per chat - how
   // many leading messages the stored summary covers, and the summary

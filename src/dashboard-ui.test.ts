@@ -104,3 +104,11 @@ test("dashboard page: sidebar sections actually navigate (owner defect 2026-11-0
   assert.match(dashboardHtml,/No skills installed yet/);
   assert.doesNotMatch(dashboardHtml,/\['missions','skills','schedules','logs'\]/);
 });
+
+test("dashboard page: skill visibility + reaction badges surface (2026-11-10)", () => {
+  assert.match(dashboardHtml, /userReaction/);
+  assert.match(dashboardHtml, /lastSkill/);
+  assert.match(dashboardHtml, /setReaction/);
+  assert.match(dashboardHtml, /\.reaction\{/);
+  assert.match(dashboardHtml, /skill: /);
+});

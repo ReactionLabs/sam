@@ -17,7 +17,7 @@ function scratch(): string {
   return mkdtempSync(join(tmpdir(), "sam-tiers-"));
 }
 
-const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_patch_note", "sam_author_skill", "sam_code", "sam_coding_task", "sam_handoff_task", "sam_ask_linked"];
+const OWN_NAMES = ["sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_workspace_list", "sam_workspace_read", "sam_search_skills", "sam_list_skills", "sam_read_skill", "sam_propose_action", "sam_save_note", "sam_react", "sam_patch_note", "sam_author_skill", "sam_code", "sam_coding_task", "sam_handoff_task", "sam_ask_linked"];
 const MCP_NAMES = ["whoami", "list_leads", "get_lead", "pipeline_summary", "analytics_summary", "coin_lookup", "list_candidates", "list_alerts", "paper_setups", "stack_health"];
 
 test("tool tiers: at or below the threshold nothing is deferred and no loader exists", () => {
@@ -65,10 +65,10 @@ test("tool tiers: loads persist per chat, unknown names are refused, stubs name 
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("tool tiers: own chats crossed the threshold with sam_search_chats (18 own tools after sam_coding_task) - the core rides upfront, the rest is deferred with the loader", async () => {
+test("tool tiers: own chats crossed the threshold with sam_search_chats (19 own tools after sam_react) - the core rides upfront, the rest is deferred with the loader", async () => {
   const root = scratch();
   try {
-    assert.equal(OWN_TOOLS.length, 18);
+    assert.equal(OWN_TOOLS.length, 19);
     const sentNames: string[][] = [];
     let step = 0;
     const fake = {

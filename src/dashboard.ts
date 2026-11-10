@@ -2,6 +2,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { MissionStore } from "./storage.js";
 import { ChatStore } from "./chats.js";
+import { recentSkillUse, lastSkillByChat } from "./skill-use.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { discoverSkills, skillAllowlists } from "./skills.js";
@@ -178,7 +179,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const turnStart=new Date().toISOString();
         const reply=await runChatTurn(workspace,id,body.content);
         const result={message:{role:"assistant" as const,content:reply}};
-        json(200,{reply:result.message,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
+        let userReaction:string|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"){userReaction=msgs[i].reaction;break;}}}finally{db2.close();}}catch{/* the badge is garnish */}
+        json(200,{reply:result.message,userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
     const doorMatch=/^\/mini\/([0-9a-f]{32,64})(\/(message|history))?(\?.*)?$/.exec(req.url??"");
@@ -238,7 +240,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         let missions:unknown;
         try{missions=store.list().slice(0,100).map(m=>({code:m.code,status:m.status,objective:m.objective}));}finally{store.close();}
         res.setHeader("Content-Type","application/json");
-        const chatStore=new ChatStore(workspace);let chats:unknown;let archivedChats:unknown;try{const act=new Map(chatStore.lastActivity().map(a=>[a.chat_id,a] as const));const enrich=(c:{id:string})=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0});chats=chatStore.list().map(enrich);archivedChats=chatStore.list({includeArchived:true}).filter(c=>c.archived).map(enrich);}finally{chatStore.close();}
+        const chatStore=new ChatStore(workspace);let chats:unknown;let archivedChats:unknown;try{const act=new Map(chatStore.lastActivity().map(a=>[a.chat_id,a] as const));const skillByChat=lastSkillByChat(workspace);const enrich=(c:{id:string})=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0,lastSkill:skillByChat.get(c.id)??null});chats=chatStore.list().map(enrich);archivedChats=chatStore.list({includeArchived:true}).filter(c=>c.archived).map(enrich);}finally{chatStore.close();}
         const audit=join(workspace,".sam","execution-audit.jsonl");
         let logs:string[]=[];
         if(existsSync(audit)){
@@ -246,7 +248,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
         }
         const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,archivedChats,agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),compactions:listCompactions(workspace),pairing:pairingStatus(workspace),skillAuthored:authoredSkills(workspace),skillCurator:curatorFindings(workspace),deliveryOutbox:deliverySummary(workspace),bindings:listBindings(workspace),skillAllowlists:skillAllowlists(workspace),approvals:loadApprovalPolicy(workspace),code:codeSummary(workspace),coding:codingSummary(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
+        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,archivedChats,skillUse:recentSkillUse(workspace,10),agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),compactions:listCompactions(workspace),pairing:pairingStatus(workspace),skillAuthored:authoredSkills(workspace),skillCurator:curatorFindings(workspace),deliveryOutbox:deliverySummary(workspace),bindings:listBindings(workspace),skillAllowlists:skillAllowlists(workspace),approvals:loadApprovalPolicy(workspace),code:codeSummary(workspace),coding:codingSummary(workspace),activity:readActivity(workspace,30,activityFilter),logs}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

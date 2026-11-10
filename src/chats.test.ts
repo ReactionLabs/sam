@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync,rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ChatStore } from "./chats.js";
+import { ChatStore, isReactionText } from "./chats.js";
 
 test("chat sessions persist separately across restarts",()=>{
  const root=mkdtempSync(join(tmpdir(),"sam-chats-"));
@@ -120,4 +120,30 @@ test("agent profile pins can be re-pinned and cleared after creation",()=>{
     assert.equal(reopened.agents()[0].connector_id,null);
     reopened.close();
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("message reactions: set, read back, clear; text is refused; a foreign chat cannot stamp", () => {
+ const root = mkdtempSync(join(tmpdir(), "sam-reactions-"));
+ try {
+  const db = new ChatStore(root);
+  const chat = db.create("Reactions");
+  const other = db.create("Other");
+  const mine = db.add(chat.id, "user", "Ship it");
+  const foreign = db.add(other.id, "user", "Not yours");
+  assert.equal(mine.reaction, null);
+  assert.equal(db.setReaction(chat.id, mine.id, "\uD83D\uDC40"), true);
+  assert.equal(db.messages(chat.id)[0].reaction, "\uD83D\uDC40");
+  assert.equal(db.setReaction(chat.id, mine.id, "\u2764\uFE0F"), true);
+  assert.equal(db.messages(chat.id)[0].reaction, "\u2764\uFE0F");
+  assert.equal(db.setReaction(chat.id, mine.id, null), true);
+  assert.equal(db.messages(chat.id)[0].reaction, null);
+  assert.equal(db.setReaction(chat.id, foreign.id, "\uD83D\uDC40"), false);
+  assert.equal(db.messages(other.id)[0].reaction, null);
+  assert.throws(() => db.setReaction(chat.id, mine.id, "great"), /Invalid reaction/);
+  assert.throws(() => db.setReaction(chat.id, mine.id, "ok \uD83D\uDC4D"), /Invalid reaction/);
+  assert.ok(isReactionText("\uD83C\uDF89"));
+  assert.ok(isReactionText("\uD83D\uDC68\u200D\uD83D\uDC69\u200D\uD83D\uDC67"));
+  assert.ok(!isReactionText(""));
+  db.close();
+ } finally { rmSync(root, { recursive: true, force: true }); }
 });

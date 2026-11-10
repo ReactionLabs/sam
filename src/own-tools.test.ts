@@ -8,6 +8,7 @@ import { MemoryStore } from "./memory.js";
 import { createLink } from "./links.js";
 import { executeOwnTool, ownToolsChat, ownToolsFor, skillCatalogForPrompt, SKILL_AUTO_SELECT_DIRECTIVE } from "./own-tools.js";
 import { readActivity } from "./activity.js";
+import { recentSkillUse, lastSkillByChat } from "./skill-use.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 
 test("own tools: memory search is fenced to the acting profile's levels",()=>{
@@ -221,4 +222,49 @@ test("own tools: budget exhaustion stubs extra calls, answers from partial resul
   assert.match(logged[0].summary,/sam_memory_list/);
   assert.match(logged[0].summary,/not executed: sam_memory_list/);
  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("own tools: a model skill read is ledgered as skill use; a refused read is not", () => {
+ const root = mkdtempSync(join(tmpdir(), "sam-own-skilluse-"));
+ try {
+  seedSkill(root, "agent-reach", "Reach the public web", "Step one: run the reach check.");
+  const db = new ChatStore(root); const chat = db.create("Working"); db.close();
+  const read = executeOwnTool(root, "sam", "sam_read_skill", { name: "agent-reach" }, chat.id) as { name?: string };
+  assert.equal(read.name, "agent-reach");
+  const uses = recentSkillUse(root, 10);
+  assert.equal(uses.length, 1);
+  assert.equal(uses[0].skill, "agent-reach");
+  assert.equal(uses[0].chatId, chat.id);
+  assert.equal(lastSkillByChat(root).get(chat.id)?.skill, "agent-reach");
+  assert.ok(readActivity(root, 10).some(a => a.kind === "skill-use" && a.summary.includes("agent-reach")));
+  const refused = executeOwnTool(root, "sam", "sam_read_skill", { name: "no-such-skill" }, chat.id) as { error?: string };
+  assert.ok(refused.error);
+  assert.equal(recentSkillUse(root, 10).length, 1);
+ } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("own tools: sam_react stamps the triggering message, refuses text, assistant messages, visitors, and context-free calls", () => {
+ const root = mkdtempSync(join(tmpdir(), "sam-own-react-"));
+ try {
+  const db = new ChatStore(root);
+  const chat = db.create("Chat");
+  const userMsg = db.add(chat.id, "user", "Deploy it");
+  const samMsg = db.add(chat.id, "assistant", "On it");
+  const visitorChat = db.create("Door", null, { visitor: true });
+  const visitorMsg = db.add(visitorChat.id, "user", "Hello");
+  db.close();
+  const noCtx = executeOwnTool(root, "sam", "sam_react", { reaction: "\uD83D\uDC40" }) as { error?: string };
+  assert.match(noCtx.error ?? "", /live chat turn/);
+  const ok = executeOwnTool(root, "sam", "sam_react", { reaction: "\uD83C\uDF89" }, chat.id, userMsg.id) as { reacted?: string };
+  assert.equal(ok.reacted, "\uD83C\uDF89");
+  const check = new ChatStore(root);
+  assert.equal(check.messages(chat.id).find(m => m.id === userMsg.id)?.reaction, "\uD83C\uDF89");
+  check.close();
+  const onSam = executeOwnTool(root, "sam", "sam_react", { reaction: "\uD83D\uDC40", messageId: samMsg.id }, chat.id, userMsg.id) as { error?: string };
+  assert.match(onSam.error ?? "", /owner's messages/);
+  const text = executeOwnTool(root, "sam", "sam_react", { reaction: "nice" }, chat.id, userMsg.id) as { error?: string };
+  assert.match(text.error ?? "", /Invalid reaction/);
+  const visitor = executeOwnTool(root, "sam", "sam_react", { reaction: "\uD83D\uDC40" }, visitorChat.id, visitorMsg.id) as { error?: string };
+  assert.match(visitor.error ?? "", /visitor/);
+ } finally { rmSync(root, { recursive: true, force: true }); }
 });

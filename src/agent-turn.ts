@@ -32,6 +32,11 @@ const DASHBOARD_NOTE="This dashboard supports creating chats, branching the sele
 // persists both sides of the exchange. Visitor chats (P12, created through a
 // visitor-mode door) skip ALL capture: a customer is not the owner, so their
 // words never become preference, law, or confirmed fact.
+// Reactions never break a turn: a failed stamp is swallowed here,
+// the same discipline as recall and the session ledger.
+function setReactionSafe(root:string,chatId:string,messageId:string,reaction:string|null):void{
+  try{const db=new ChatStore(root);try{db.setReaction(chatId,messageId,reaction);}finally{db.close();}}catch{/* a reaction is garnish, never the meal */}
+}
 export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
   const route=opts?.route??"chat";
   const budget=toolBudget(route);
@@ -68,7 +73,16 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   const db=new ChatStore(root);let history;
   // No history limit anymore (Phase A item 2): a long chat compacts
   // below instead of dying at 100 messages.
-  try{history=db.messages(chatId);db.add(chatId,"user",content);}finally{db.close();}
+  let userMessageId:string|null=null;
+  try{history=db.messages(chatId);userMessageId=db.add(chatId,"user",content).id;}finally{db.close();}
+  // Reactions (Dip, 2026-11-10): on a live owner chat turn the
+  // owner's message gets an eyes stamp while SAM works and a heart
+  // once the reply lands - the texting acknowledgement, on the
+  // message itself. A failed turn clears it. Visitor chats and
+  // machine routes (heartbeat, background) never react: there is no
+  // person waiting on the other end of those prompts.
+  const reactable=!visitor&&route==="chat"&&!!userMessageId;
+  if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,"\uD83D\uDC40");
   const prefs=new PreferenceStore(root);let lawBlock="";
   try{
     // Visitor chats (P12): the person talking is a customer, not the owner.
@@ -135,21 +149,27 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
   if(active?.connector_id){
     const pinned=connectors(root).find(c=>c.id===active.connector_id);
     if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId},budget);
+    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
   }else if(chatAgent){
-    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget);
+    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
   }else{
     const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId},budget);
-    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget);
+    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
+    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
   }
   }catch(error){
     // A turn that dies mid-flight still spent what it spent; the
     // session ledger records it so the caps see the true total.
+    if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
     recordSessionTurn(root,{chatId,route,tokens:turnTokens});
     throw error;
   }
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
+  // The heart lands only if the eyes are still showing: a deliberate
+  // sam_react during the turn (or the owner's own CLI stamp) is
+  // SAM's/the owner's choice and is never overwritten by the
+  // automatic acknowledgement.
+  if(reactable&&userMessageId){try{const db=new ChatStore(root);try{const msg=db.messages(chatId).find(m=>m.id===userMessageId);if(msg&&msg.reaction==="\uD83D\uDC40")db.setReaction(chatId,userMessageId,"\u2764\uFE0F");}finally{db.close();}}catch{/* reactions never break a turn */}}
   recordSessionTurn(root,{chatId,route,tokens:turnTokens});
   recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8));
   return reply;

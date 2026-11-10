@@ -17,7 +17,7 @@ function safeArgs(raw:Record<string,unknown>):Record<string,unknown>|null{
  }
  return out;
 }
-export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string }
+export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string; userMessageId?:string }
 export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat")):Promise<string>{
  const connected=connectors(root).filter(c=>c.enabled&&!!process.env[c.tokenEnv]&&(!connectorId||c.id===connectorId));
  if(!connected.length)throw Error(connectorId?"Profile connector unavailable":"No configured MCP connector credentials");
@@ -76,7 +76,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     else for(const n of names){if(!valid.has(n))unknown.push(n);else if(!ephemeralLoaded.has(n)){ephemeralLoaded.add(n);loadedNow.push(n);}}
     outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
    }else if(own&&call.name.startsWith("sam_")){
-    pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId);}catch(e){return {error:e instanceof Error?e.message:String(e)};}}});
+    pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId,own.userMessageId);}catch(e){return {error:e instanceof Error?e.message:String(e)};}}});
    }else{
     const name=toolMap.get(call.name);
     if(!name)outputs.set(call.id,{error:"Tool not approved"});
