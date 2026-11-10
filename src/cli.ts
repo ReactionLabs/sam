@@ -73,6 +73,7 @@ import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
+import { revisitDueLoops } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
@@ -116,6 +117,19 @@ function output(data:unknown):void { console.log(program.opts().json?JSON.string
 // task then closes blocked naming the missing reviewer, never
 // done-unreviewed.
 function codingReviewer(root:string){ const reviewer=defaultCodingReviewer(root); if(reviewer) return (task:{spec:string})=>reviewer(task.spec); return async()=>{ throw new Error("Self-review is not configured on this install (no model endpoint/key for the goldfish reviewer)"); }; }
+// The one channel-delivery closure: heartbeat job deliveries and
+// second-answer channel updates ride the same door (Telegram via
+// the channel's token env, Discord via its webhook poster).
+function makeChannelDeliver(root:string){ return async(channelId:string,text:string)=>{
+ const channel=channels(root).find(c=>c.id===channelId);
+ await deliverToChannel(root,channelId,text,
+  async(chatId:number,body:string)=>{
+   if(!channel||channel.kind!=="telegram")return;
+   const token=process.env[channel.tokenEnv];if(!token)throw new Error("Telegram credential missing");
+   await new TelegramApi(token).sendMessage(chatId,body);
+  },
+  async(ch,body)=>postDiscord(ch,body));
+}; }
 program.command("init").description("Initialize local mission workspace").action(()=>{
   const dir=join(resolve(program.opts().workspace),".sam");mkdirSync(dir,{recursive:true});
   const db=store();db.close();output("SAM initialized at "+dir);
@@ -266,6 +280,7 @@ const loopCmd=program.command("loops").description("Open loops: questions whose 
 loopCmd.command("list").option("--profile <name>","Only this profile").option("--all","Include closed loops").action((o:{profile?:string;all?:boolean})=>output(listLoops(program.opts().workspace,{profile:o.profile,status:o.all?undefined:"open"})));
 loopCmd.command("open").argument("<profile>").argument("<question>").argument("<watchFor>").option("--answer <text>","The answer given").option("--hours <n>","Hours until the next look").action((profile:string,question:string,watchFor:string,o:{answer?:string;hours?:string})=>output(openLoop(program.opts().workspace,{profile,question,answer:o.answer??"",watchFor,dueInHours:o.hours?Number(o.hours):undefined})));
 loopCmd.command("close").argument("<id>").action((id:string)=>output({closed:closeLoop(program.opts().workspace,id)}));
+loopCmd.command("revisit").description("Revisit due open loops now (SECOND ANSWERS): each due loop is re-checked on the heartbeat tier in its own check chat; unchanged stays silent and reschedules, a changed answer posts an update into the original chat (and its channel, through the outbox + worthiness gate), a settled question posts its final answer and closes").action(async()=>{const root=program.opts().workspace as string;output(await revisitDueLoops(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),deliver:makeChannelDeliver(root)}));});
 const delCmd=program.command("deliveries").description("Notification worthiness ledger: every proactive delivery SAM sent or held, with the reason (S5)");
 delCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(readDeliveryLedger(program.opts().workspace,100).filter(e=>!o.profile||e.profile===o.profile)));
 const hbCmd=program.command("heartbeats").description("Standing heartbeat jobs: SAM working on a timer");
@@ -287,16 +302,7 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
     return db.create(title,profile==="sam"?null:profile).id;
    }finally{db.close();}
   };
-  const deliver=async(channelId:string,text:string)=>{
-   const channel=channels(root).find(c=>c.id===channelId);
-   await deliverToChannel(root,channelId,text,
-    async(chatId:number,body:string)=>{
-     if(!channel||channel.kind!=="telegram")return;
-     const token=process.env[channel.tokenEnv];if(!token)throw new Error("Telegram credential missing");
-     await new TelegramApi(token).sendMessage(chatId,body);
-    },
-    async(ch,body)=>postDiscord(ch,body));
-  };
+  const deliver=makeChannelDeliver(root);
   output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver,reviewCoding:codingReviewer(root),reviewEngine:codingReviewer(root)}));
  });
 const bgCmd=program.command("background").description("Background work (legs): tasks a chat handed off to run async and post back into the chat");

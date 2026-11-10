@@ -12,6 +12,7 @@ import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { drainCodingTasks, type CodingTask } from "./coding.js";
 import { drainEngineTasks, type EngineTask } from "./engine.js";
+import { revisitDueLoops, type LoopRevisitResult } from "./loop-revisit.js";
 import type { GoldfishRecord } from "./goldfish.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
@@ -282,7 +283,7 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]}}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
  const consolidation=consolidatePreferences(root);
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
@@ -412,7 +413,14 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // its branch sandbox, with SAM verifying and reviewing its work.
  const engine=await drainEngineTasks(root,{review:deps.reviewEngine});
  if(engine.ran.length||engine.blocked.length||engine.failed.length||engine.recovered.length)appendLog(root,{type:"engine",ran:engine.ran.length,blocked:engine.blocked.length,failed:engine.failed.length,recovered:engine.recovered.length});
- return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding,engine};
+ // SECOND ANSWERS: the same tick revisits due open loops, last -
+ // a loop's re-check is a cheap-tier turn in its own check chat,
+ // and only a proven change crosses into the owner's conversation
+ // (plus its channel, through the outbox and the S5 gate, inside
+ // the revisit engine itself).
+ const loops=await revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver});
+ if(loops.checked.length)appendLog(root,{type:"loops",checked:loops.checked.length,changed:loops.changed.length,resolved:loops.resolved.length,failed:loops.failed.length,held:loops.held.length});
+ return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding,engine,loops};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.
