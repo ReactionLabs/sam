@@ -1,0 +1,19 @@
+[package]
+name = "sam-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Terminal client for a running SAM. Holds no agent state of its own."
+publish = false
+
+[[bin]]
+name = "sam-cli"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+crossterm = "0.28"
+ratatui = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2.12", default-features = false, features = ["json", "tls"] }
+url = "2"

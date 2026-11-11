@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .sam/
+cli-rust/target/
+cli-rust/smoke-out/
 *.db
 *.db-shm
 *.db-wal
