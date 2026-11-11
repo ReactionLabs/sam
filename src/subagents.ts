@@ -4,16 +4,20 @@ import { executeOwnToolAsync, OWN_TOOLS } from "./own-tools.js";
 import { toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
-// Sub-agents (item 10). A profile spawns a child turn with its own
-// prompt, a tool allowlist inherited from the parent or narrowed
-// (never widened), and a budget carved out of the parent's pool.
-// The child uses the same approval gate: a consequential proposal
-// stays a card for the owner. The run is an AgentLoopJournal loop,
-// so a restart can still see the checkpoint and fences an orphaned
-// run as interrupted instead of replaying its tools.
+// Sub-agents (item 10). During a normal chat turn SAM can start an
+// invisible helper (research, a build step, a review) and keep
+// talking. The helper inherits the parent's tools or a narrower
+// list, spends a carved budget, and stays under the depth and
+// concurrency caps. The owner sees at most "Working on it." and
+// then the folded answer. Helper text is ledgered, not chatted.
+// A consequential proposal still waits on the approval card.
+// The run is an AgentLoopJournal loop, so a restart can still see
+// the checkpoint and fences an orphaned run as interrupted
+// instead of replaying its tools.
 
 export const SUBAGENT_MAX_DEPTH = 2;
 export const SUBAGENT_MAX_CONCURRENT = 2;
@@ -34,12 +38,31 @@ export interface Subagent {
   createdAt: string;
   finishedAt: string | null;
   chatId: string | null;
+  role: "research" | "build" | "review" | "task";
+  quiet: boolean;
 }
 
 export interface SubagentTurn { content: string | null; calls: Array<{ id: string; name: string; args: Record<string, unknown> }> }
 export type SubagentCompleter = (model: string, messages: Array<Record<string, unknown>>, tools: Array<Record<string, unknown>>) => Promise<SubagentTurn>;
 
 const live = new Set<string>();
+const inflight = new Map<string, Promise<Subagent>>();
+const parentSlot = new AsyncLocalStorage<string>();
+
+/** The sub-agent whose tool call is running, so a helper it spawns is a child, not a sibling. */
+export function currentParentId(): string | null {
+  return parentSlot.getStore() ?? null;
+}
+
+export const ROLE_TOOLS: Record<"research" | "build" | "review", string[]> = {
+  research: ["sam_memory_search", "sam_memory_list", "sam_workspace_list", "sam_workspace_read", "sam_reach"],
+  build: ["sam_workspace_list", "sam_workspace_read", "sam_code", "sam_memory_list"],
+  review: ["sam_workspace_read", "sam_memory_list"],
+};
+
+export function defaultRoleTools(role: "research" | "build" | "review", inherited: string[]): string[] {
+  return ROLE_TOOLS[role].filter(name => inherited.includes(name));
+}
 
 function file(root: string): string { return join(resolve(root), ".sam", "subagents.json"); }
 function journalPath(root: string): string { return join(resolve(root), ".sam", "subagents.db"); }
@@ -52,7 +75,8 @@ function read(root: string): Subagent[] {
   if (!existsSync(file(root))) return [];
   try {
     const data = JSON.parse(readFileSync(file(root), "utf8")) as unknown;
-    return Array.isArray(data) ? data as Subagent[] : [];
+    if (!Array.isArray(data)) return [];
+    return (data as Subagent[]).map(item => ({ ...item, role: item.role ?? "task", quiet: item.quiet === true }));
   } catch { return []; }
 }
 function save(root: string, items: Subagent[]): void {
@@ -136,7 +160,17 @@ async function defaultComplete(env: NodeJS.ProcessEnv): Promise<SubagentComplete
   return async (_model, messages, tools) => provider.completeConnectorTurn(model, messages, tools);
 }
 
-export async function spawnSubagent(root: string, input: { profile?: string; prompt: string; tools?: string[]; parentId?: string | null; chatId?: string | null; rounds?: number; maxCalls?: number }, opts?: { complete?: SubagentCompleter; env?: NodeJS.ProcessEnv }): Promise<Subagent> {
+type SpawnInput = { profile?: string; prompt: string; tools?: string[]; parentId?: string | null; chatId?: string | null; rounds?: number; maxCalls?: number; role?: Subagent["role"]; quiet?: boolean };
+type SpawnOpts = { complete?: SubagentCompleter; env?: NodeJS.ProcessEnv; fold?: (item: Subagent) => Promise<string> };
+
+let testRunner: SpawnOpts | null = null;
+/** Tests inject the child model and the fold. Production leaves this unset. */
+export function setSubagentRunnerForTests(opts: SpawnOpts | null): void { testRunner = opts; }
+function runner(opts?: SpawnOpts): SpawnOpts | undefined {
+  return testRunner ? { ...testRunner, ...opts } : opts;
+}
+
+function openSubagent(root: string, input: SpawnInput): Subagent {
   const prompt = input.prompt?.trim() ?? "";
   if (!prompt || prompt.length > 2000) throw new Error("Sub-agent prompt must be 1 to 2000 characters");
   const profile = input.profile?.trim() || "sam";
@@ -150,7 +184,9 @@ export async function spawnSubagent(root: string, input: { profile?: string; pro
   const running = items.filter(s => s.profile === profile && s.status === "running").length;
   if (running >= SUBAGENT_MAX_CONCURRENT) throw new Error("Sub-agent concurrency cap is " + SUBAGENT_MAX_CONCURRENT);
   const inherited = parent ? parent.tools : profileToolNames();
-  const tools = narrowTools(input.tools, inherited);
+  const role = input.role ?? "task";
+  const requested = input.tools ?? (role === "research" || role === "build" || role === "review" ? defaultRoleTools(role, inherited) : undefined);
+  const tools = narrowTools(requested, inherited);
   const budget = carveBudget(items, profile, { rounds: input.rounds ?? 2, maxCalls: input.maxCalls ?? 4 });
   const chatId = input.chatId ?? null;
   if (chatId) {
@@ -166,10 +202,15 @@ export async function spawnSubagent(root: string, input: { profile?: string; pro
   const item: Subagent = {
     id: loopId, profile, parentId: parent?.id ?? null, depth, prompt, tools, budget,
     status: "running", result: null, loopId, createdAt: new Date().toISOString(), finishedAt: null, chatId,
+    role, quiet: input.quiet === true,
   };
   put(root, item);
   live.add(item.id);
   recordActivity(root, profile, "subagent-spawn", "Sub-agent " + item.id.slice(0, 8) + " depth " + depth + " tools " + tools.length + " budget " + budget.rounds + "x" + budget.maxCalls);
+  return item;
+}
+
+async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Promise<Subagent> {
   try {
     const complete = opts?.complete ?? await defaultComplete(opts?.env ?? process.env);
     const result = await runChild(root, item, complete);
@@ -185,12 +226,13 @@ export async function spawnSubagent(root: string, input: { profile?: string; pro
     item.finishedAt = new Date().toISOString();
     put(root, item);
     finishLoop(root, item.loopId, "completed", result);
-    recordActivity(root, profile, "subagent-done", "Sub-agent " + item.id.slice(0, 8) + " returned: " + result.replace(/\s+/g, " ").slice(0, 180));
-    if (chatId) {
+    recordActivity(root, item.profile, "subagent-done", "Sub-agent " + item.id.slice(0, 8) + " (" + item.role + ") returned: " + result.replace(/\s+/g, " ").slice(0, 160));
+    if (item.chatId && !item.quiet) {
       const db = new ChatStore(root);
-      try { db.add(chatId, "assistant", ("Sub-agent result:\n" + result).slice(0, 12000)); }
+      try { db.add(item.chatId, "assistant", ("Sub-agent result:\n" + result).slice(0, 12000)); }
       finally { db.close(); }
     }
+    if (item.chatId && item.quiet && !item.parentId) await postFoldedAnswer(root, item, opts?.fold, opts?.env ?? process.env);
     return item;
   } catch (error) {
     const message = error instanceof Error ? error.message : "Sub-agent failed";
@@ -206,17 +248,76 @@ export async function spawnSubagent(root: string, input: { profile?: string; pro
     item.finishedAt = new Date().toISOString();
     put(root, item);
     finishLoop(root, item.loopId, "failed", message);
-    recordActivity(root, profile, "subagent-failed", "Sub-agent " + item.id.slice(0, 8) + " failed: " + message.slice(0, 180));
+    recordActivity(root, item.profile, "subagent-failed", "Sub-agent " + item.id.slice(0, 8) + " failed: " + message.slice(0, 180));
     throw error;
   } finally {
     live.delete(item.id);
   }
 }
 
+/** Owner-facing text only. Helper prompts, tool chatter, and verdict labels stay out of the chat. */
+export function ownerFold(result: string): string {
+  const lines = result.split("\n").map(line => line.trim()).filter(Boolean);
+  const body = lines.filter(line => !/^VERDICT:/i.test(line)).join(" ").replace(/\s+/g, " ").trim();
+  return (body || "Working on it.").slice(0, 2000);
+}
+
+async function defaultFold(env: NodeJS.ProcessEnv, item: Subagent): Promise<string> {
+  try {
+    const complete = await defaultComplete(env);
+    const turn = await complete("fold", [
+      { role: "system", content: "Write one reply to the owner. Do not mention helpers, sub-agents, internal reviews, or verdict labels. If the notes say changes are still needed, say what remains in your own words. Otherwise give the outcome." },
+      { role: "user", content: item.result ?? "" },
+    ], []);
+    const text = (turn.content ?? "").trim();
+    if (!text || /\bsub-agent\b|\bhelper\b|VERDICT:/i.test(text)) return ownerFold(item.result ?? "");
+    return text.slice(0, 4000);
+  } catch {
+    return ownerFold(item.result ?? "");
+  }
+}
+
+async function postFoldedAnswer(root: string, item: Subagent, fold: ((item: Subagent) => Promise<string>) | undefined, env: NodeJS.ProcessEnv): Promise<void> {
+  if (!item.chatId || !item.result) return;
+  let text = "";
+  try { text = (fold ? await fold(item) : await defaultFold(env, item)).trim(); }
+  catch { text = ownerFold(item.result); }
+  if (!text || /\bsub-agent\b|VERDICT:/i.test(text)) text = ownerFold(item.result);
+  const db = new ChatStore(root);
+  try { db.add(item.chatId, "assistant", text.slice(0, 4000)); }
+  finally { db.close(); }
+  recordActivity(root, item.profile, "subagent-folded", "Folded " + item.id.slice(0, 8) + " into chat " + item.chatId.slice(0, 8));
+}
+
+/**
+ * Start a helper without waiting. The chat turn returns at once with the id.
+ * When the helper finishes, one folded answer is posted into the chat.
+ */
+export function startBackgroundSubagent(root: string, input: SpawnInput, opts?: SpawnOpts): { id: string; status: "working"; ownerLine: string } {
+  const item = openSubagent(root, { ...input, quiet: true });
+  const job = driveSubagent(root, item, runner(opts)).catch(error => {
+    const latest = read(root).find(s => s.id === item.id);
+    if (latest && latest.status !== "running") return latest;
+    throw error;
+  });
+  inflight.set(item.id, job);
+  return { id: item.id, status: "working", ownerLine: "Working on it." };
+}
+
+export function whenSubagentSettled(id: string): Promise<Subagent> {
+  const job = inflight.get(id);
+  if (!job) throw new Error("Sub-agent is not running in this process: " + id);
+  return job;
+}
+
+export async function spawnSubagent(root: string, input: SpawnInput, opts?: SpawnOpts): Promise<Subagent> {
+  return driveSubagent(root, openSubagent(root, input), runner(opts));
+}
+
 async function runChild(root: string, item: Subagent, complete: SubagentCompleter): Promise<string> {
   const defs = toolDefs(item.tools);
   const messages: Array<Record<string, unknown>> = [
-    { role: "system", content: "You are a sub-agent of profile " + item.profile + ". Do only this task. You may use only these tools: " + (item.tools.join(", ") || "(none)") + ". A tool not in that list does not exist for you. Consequential actions are proposals: sam_propose_action cards the owner and does not run until they approve. When the task is done, answer with the result and no further tool calls.\n\nTask: " + item.prompt },
+    { role: "system", content: "You are a sub-agent of profile " + item.profile + ". Do only this task. You may use only these tools: " + (item.tools.join(", ") || "(none)") + ". A tool not in that list does not exist for you. Consequential actions are proposals: sam_propose_action cards the owner and does not run until they approve. The owner never sees this turn." + (item.role === "review" ? " You are the internal reviewer. The first line of your answer must be exactly `VERDICT: approve` or `VERDICT: request-changes`, then the reasons." : " When the task is done, answer with the result and no further tool calls.") + "\n\nTask: " + item.prompt },
     { role: "user", content: item.prompt },
   ];
   const journal = new AgentLoopJournal(journalPath(root));
@@ -234,7 +335,7 @@ async function runChild(root: string, item: Subagent, complete: SubagentComplete
         else if (callsUsed >= item.budget.maxCalls) body = { error: "Sub-agent tool budget exhausted" };
         else {
           callsUsed++;
-          try { body = await executeOwnToolAsync(root, item.profile, call.name, call.args ?? {}); }
+          try { body = await parentSlot.run(item.id, () => executeOwnToolAsync(root, item.profile, call.name, call.args ?? {}, undefined, item.chatId ?? undefined)); }
           catch (error) { body = { error: error instanceof Error ? error.message : "Tool failed" }; }
           const detail = call.name + " " + JSON.stringify(body).slice(0, 400);
           try { journal.event(item.loopId!, "tool_call", detail); } catch { /* a closed loop does not break the child */ }

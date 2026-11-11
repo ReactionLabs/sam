@@ -725,7 +725,7 @@ operative.command("candidates").argument("<capabilities>").action((capabilities:
   try{ output(reg.candidates(capabilities.split(",").map(x=>x.trim()).filter(Boolean))); }
   finally{reg.close();}
 });
-const subagentCmd=program.command("subagent").description("Sub-agents: a profile spawns a child turn with a scoped prompt, a tool allowlist inherited or narrowed from the parent, and a budget carved from the parent's pool. Consequential proposals still wait for the owner. Children are checkpointed and can be listed or cancelled");
+const subagentCmd=program.command("subagent").description("Debug invisible helpers a chat turn started on its own. list, status, and cancel inspect them. The owner-facing path is the sam_spawn_subagent tool: the chat shows Working on it, then the folded answer, never the helper's own text");
 subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
   const tools=o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):undefined;
   output(await spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)}));
