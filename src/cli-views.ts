@@ -28,6 +28,7 @@ import { sensesStatus } from "./senses.js";
 import { briefStatus } from "./brief.js";
 import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
 import { authStatus, type AuthStatus } from "./auth-status.js";
+import { stackWatchStatus } from "./stack-watch.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -76,6 +77,7 @@ export function statusSnapshot(root: string): {
   brief: { installed: boolean; job: unknown; script: string };
   setup: SetupRecord | null;
   auth: AuthStatus;
+  stackWatch: { connector: string | null; script: string };
 } {
   return {
     at: new Date().toISOString(),
@@ -106,5 +108,6 @@ export function statusSnapshot(root: string): {
     brief: briefStatus(root),
     setup: readSetupRecord(root),
     auth: authStatus(root),
+    stackWatch: stackWatchStatus(root),
   };
 }

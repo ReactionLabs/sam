@@ -267,6 +267,7 @@ export const SCRIPT_JOB_COMMANDS: Record<string, { description: string; argv: (r
   "sam-curator": { description: "The skill curator pass over the library (sam skills curator)", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "skills", "curator"] },
   "sam-deliveries": { description: "The notification-worthiness ledger (sam deliveries list)", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "deliveries", "list"] },
   "sam-brief": { description: "The morning brief (sam brief today): today's agenda and mail through the senses, what needs the owner, the watches' latest verdicts, and the open work queues - assembled deterministically, no model call", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "brief", "today"] },
+  "sam-stack-watch": { description: "The Nines stack watch (sam watches stack): candidates total, newest candidate, alert verdicts, and the entered paper-setups count - read through the Nines connector and counted in code, never by a model from a paged list; a full page reports a floor, never a fake exact count", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "watches", "stack"] },
 };
 export function scriptCommandNames(): string[] { return Object.keys(SCRIPT_JOB_COMMANDS); }
 export function scriptArgv(root: string, name: string): string[] {

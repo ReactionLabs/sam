@@ -27,6 +27,7 @@ import { drainEngineTasks, engineStatus, listEngineTasks, queueEngineTask } from
 import { connectEngine, disconnectEngine, engineConnectStatus, probeEngineAuth } from "./engine-connect.js";
 import { runSense, sensesStatus } from "./senses.js";
 import { briefStatus, buildBrief, installBrief } from "./brief.js";
+import { buildStackWatchReport, stackWatchStatus } from "./stack-watch.js";
 import { runChatTurn } from "./agent-turn.js";
 import { runTui } from "./tui.js";
 import { renderImageFile } from "./term-image.js";
@@ -336,6 +337,9 @@ const briefCmd=program.command("brief").description("The morning brief (Phase E 
 briefCmd.command("today").description("Assemble and print today's brief as plain text (this is the sam-brief script job's stdout)").action(async()=>output((await buildBrief(program.opts().workspace)).text));
 briefCmd.command("status").description("Whether the daily brief job is installed, and its schedule").action(()=>output(briefStatus(program.opts().workspace)));
 briefCmd.command("install").option("--channel <id-or-name>","Deliver the brief to this channel (default: no channel - the brief lands in the core chat only)").option("--schedule <phrase>","Schedule phrase (default: daily at 8am)").option("--timezone <iana>","Per-job timezone (default: America/New_York)").description("Install the daily brief as a wall-clock script heartbeat job; refuses if it is already installed").action((o:{channel?:string;schedule?:string;timezone?:string})=>output(installBrief(program.opts().workspace,{channelId:o.channel??null,schedule:o.schedule,timezone:o.timezone})));
+const watchCmd=program.command("watches").description("Deterministic watches: reports assembled in code from a connector's own aggregates - counted in code, never by a model from a paged list");
+watchCmd.command("stack").description("The Nines stack watch as plain text (this is the sam-stack-watch script job's stdout): candidates total, newest candidate, alert verdicts, and the entered paper-setups count through the Nines connector; a full page reports a floor, never a fake exact count").action(async()=>output((await buildStackWatchReport(program.opts().workspace)).text));
+watchCmd.command("status").description("Whether the stack watch has a connector to read through (registry only - no MCP call is made)").action(()=>output(stackWatchStatus(program.opts().workspace)));
 const bkCmd=program.command("backup").description("Reliability (P9): nightly state backups of the whole .sam state, with manifest verify and a restore drill that proves the copy boots");
 bkCmd.command("create").description("Snapshot the whole .sam state (SQLite DBs via VACUUM INTO, manifest with sha256 per file) into a tarball").option("--dest <dir>","Backup directory (default: <workspace>/backups)").option("--keep <n>","Keep the newest N archives","7").action((o:{dest?:string;keep:string})=>{const root=program.opts().workspace as string;output(createBackup(root,o.dest??join(resolve(root),"backups"),Number(o.keep)));});
 bkCmd.command("list").description("List backup archives, oldest first").option("--dest <dir>","Backup directory (default: <workspace>/backups)").action((o:{dest?:string})=>{const root=program.opts().workspace as string;output(listBackups(o.dest??join(resolve(root),"backups")));});
