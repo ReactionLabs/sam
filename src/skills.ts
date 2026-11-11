@@ -1,5 +1,6 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
+import Database from "better-sqlite3";
 import { recordActivity } from "./activity.js";
 
 export interface SkillEntry {
@@ -126,35 +127,127 @@ export function searchSkills(workspace: string, query: string): SkillEntry[] {
 // The operator/CLI surfaces (skills list/read) stay global on purpose: the
 // owner manages the whole library; profiles live inside their list.
 function allowlistPath(workspace: string): string { return join(resolve(workspace), ".sam", "skill-allowlists.json"); }
+function allowlistsDbFile(workspace: string): string { return join(resolve(workspace), ".sam", "skill-allowlists.db"); }
 const profilePattern = /^[a-z][a-z0-9._-]{0,63}$/;
+// State convergence (UNIFICATION item 4, eighteenth store): the skill
+// allowlist registry is SQLite (.sam/skill-allowlists.db, the
+// contacts/bindings pattern), one row per profile keyed by profile
+// holding that profile's names JSON, rowid order = the old object
+// order. The old skill-allowlists.json was rewritten whole on every
+// set and clear, and its writers (the CLI) ran beside skillAllowlist
+// readers on every turn's skill catalog and the dashboard status
+// build, so two writers holding the same snapshot silently lost the
+// second one's change - fence-shaped here: a profile just fenced to
+// a smaller playbook set could revert to unrestricted under a
+// concurrent save. Here each mutation is a single-row INSERT/UPDATE
+// or DELETE, and connections carry a busy_timeout so a writer waits
+// out a peer's transaction instead of dying on "database is locked".
+// First open imports a legacy skill-allowlists.json entry by entry
+// and renames it skill-allowlists.json.migrated - imported, never
+// deleted; a malformed file or a non-object payload imports nothing
+// and is left in place (the migrated shape reads it as no
+// allowlists - every profile unrestricted, the pre-allowlist
+// behavior - instead of throwing "Invalid skill allowlists store",
+// the channels/minis precedent). A pure read on an install with
+// neither file creates nothing. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried with no
+// backup change.
+function openAllowlistsStore(workspace: string): Database.Database {
+  const dir = join(resolve(workspace), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(allowlistsDbFile(workspace));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS skill_allowlists (profile TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyAllowlists(db, workspace);
+  return db;
+}
+function migrateLegacyAllowlists(db: Database.Database, workspace: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM skill_allowlists").get() as { n: number };
+  if (n > 0) return;
+  const file = allowlistPath(workspace);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO skill_allowlists (profile, data) VALUES (?, ?)");
+  const importAll = db.transaction((entries: Array<[string, unknown]>) => {
+    for (const [profile, names] of entries) {
+      if (!profilePattern.test(profile)) continue;
+      if (!Array.isArray(names) || !names.every(n => typeof n === "string")) continue;
+      insert.run(profile, JSON.stringify(names));
+    }
+  });
+  importAll(Object.entries(data as Record<string, unknown>));
+  renameSync(file, file + ".migrated");
+}
+function rowToNames(data: string): string[] | null {
+  try {
+    const value: unknown = JSON.parse(data);
+    return Array.isArray(value) && value.every(n => typeof n === "string") ? value as string[] : null;
+  } catch { return null; }
+}
+function allowlistStoreExists(workspace: string): boolean {
+  return existsSync(allowlistsDbFile(workspace)) || existsSync(allowlistPath(workspace));
+}
 export function skillAllowlists(workspace: string): Record<string, string[]> {
-  if (!existsSync(allowlistPath(workspace))) return {};
-  const value: unknown = JSON.parse(readFileSync(allowlistPath(workspace), "utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid skill allowlists store");
-  return value as Record<string, string[]>;
+  if (!allowlistStoreExists(workspace)) return {};
+  const db = openAllowlistsStore(workspace);
+  try {
+    const rows = db.prepare("SELECT profile, data FROM skill_allowlists ORDER BY rowid").all() as Array<{ profile: string; data: string }>;
+    const out: Record<string, string[]> = {};
+    for (const row of rows) { const names = rowToNames(row.data); if (names) out[row.profile] = names; }
+    return out;
+  } finally { db.close(); }
 }
 export function skillAllowlist(workspace: string, profile: string): string[] | null {
-  const all = skillAllowlists(workspace);
-  return Object.prototype.hasOwnProperty.call(all, profile) ? [...all[profile]] : null;
+  if (!allowlistStoreExists(workspace)) return null;
+  const db = openAllowlistsStore(workspace);
+  try {
+    const row = db.prepare("SELECT data FROM skill_allowlists WHERE profile = ?").get(profile) as { data: string } | undefined;
+    return row ? rowToNames(row.data) : null;
+  } finally { db.close(); }
 }
-export function setSkillAllowlist(workspace: string, profile: string, names: string[] | null): string[] | null {
-  if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
-  const all = skillAllowlists(workspace);
-  if (names === null) {
-    delete all[profile];
-    mkdirSync(join(resolve(workspace), ".sam"), { recursive: true });
-    writeFileSync(allowlistPath(workspace), JSON.stringify(all, null, 2), { mode: 0o600 });
-    recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist cleared for profile " + profile + " (unrestricted)");
-    return null;
-  }
+function cleanAllowlistNames(workspace: string, names: string[]): string[] {
   const known = discoverSkills(workspace).map(s => s.name);
   const clean = [...new Set(names.map(n => n.trim()).filter(Boolean))];
   const unknown = clean.filter(n => !known.includes(n));
   if (unknown.length) throw new Error("Unknown skill(s): " + unknown.join(", ") + ". Installed skills: " + (known.length ? known.join(", ") : "(none)"));
-  all[profile] = clean;
-  mkdirSync(join(resolve(workspace), ".sam"), { recursive: true });
-  writeFileSync(allowlistPath(workspace), JSON.stringify(all, null, 2), { mode: 0o600 });
+  return clean;
+}
+export function setSkillAllowlist(workspace: string, profile: string, names: string[] | null): string[] | null {
+  if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
+  if (names === null) {
+    if (allowlistStoreExists(workspace)) {
+      const db = openAllowlistsStore(workspace);
+      try { db.prepare("DELETE FROM skill_allowlists WHERE profile = ?").run(profile); } finally { db.close(); }
+    }
+    recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist cleared for profile " + profile + " (unrestricted)");
+    return null;
+  }
+  const clean = cleanAllowlistNames(workspace, names);
+  const db = openAllowlistsStore(workspace);
+  try { db.prepare("INSERT INTO skill_allowlists (profile, data) VALUES (?, ?) ON CONFLICT(profile) DO UPDATE SET data = excluded.data").run(profile, JSON.stringify(clean)); }
+  finally { db.close(); }
   recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist set for profile " + profile + ": " + (clean.length ? clean.join(", ") : "(none - no skills)"));
+  return [...clean];
+}
+// The store's update door (the contacts precedent): patch one
+// profile's allowlist by profile through the store's own shape,
+// validated exactly as setSkillAllowlist validates installed names.
+// Returns the updated list, or null when no such entry exists - and
+// a miss on an install with no store at all creates nothing.
+export function updateSkillAllowlist(workspace: string, profile: string, names: string[]): string[] | null {
+  if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
+  if (!allowlistStoreExists(workspace)) return null;
+  if (skillAllowlist(workspace, profile) === null) return null;
+  const clean = cleanAllowlistNames(workspace, names);
+  const db = openAllowlistsStore(workspace);
+  try {
+    const result = db.prepare("UPDATE skill_allowlists SET data = ? WHERE profile = ?").run(JSON.stringify(clean), profile);
+    if (result.changes === 0) return null;
+  } finally { db.close(); }
   return [...clean];
 }
 /** The skills one profile may hold: the whole library, or its allowlist. */
