@@ -236,6 +236,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       res.writeHead(405);res.end();return;
     }
     if(req.method!=="GET"){res.writeHead(405);res.end();return;}
+    // Stable door: the dashboard token rotates on every start. Clients that
+    // bookmark /sam (the Rust CLI, a reloaded page) get the current token URL.
+    if(req.url==="/sam"||req.url==="/sam/"){res.writeHead(302,{Location:"/dashboard/"+token});res.end();return;}
     if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
     const statusParts=(req.url??"").split("?");
     if(statusParts[0]===`/api/status/${token}`){
