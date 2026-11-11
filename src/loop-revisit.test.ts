@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
-import { listLoops, openLoop, type OpenLoop } from "./loops.js";
+import { listLoops, openLoop, updateOpenLoop, type OpenLoop } from "./loops.js";
 import { parseRevisitReply, revisitDueLoops, revisitPrompt } from "./loop-revisit.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { addChannel } from "./channels.js";
@@ -16,10 +16,10 @@ import { readActivity } from "./activity.js";
 function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-loop-revisit-")); }
 
 function makeDue(root: string, id: string): void {
-  const path = join(root, ".sam", "loops.json");
-  const file = JSON.parse(readFileSync(path, "utf8")) as { loops: OpenLoop[] };
-  for (const loop of file.loops) if (loop.id === id) loop.dueAt = new Date(Date.now() - 60_000).toISOString();
-  writeFileSync(path, JSON.stringify(file, null, 2));
+  // Through the store's own update door (the actions precedent):
+  // tests never rewrite the store file around the store.
+  const updated = updateOpenLoop(root, id, { dueAt: new Date(Date.now() - 60_000).toISOString() });
+  if (!updated) throw new Error("makeDue: no such loop " + id);
 }
 
 function makeChat(root: string, title = "Main chat", profile?: string): string {
