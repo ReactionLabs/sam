@@ -1,7 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
@@ -30,7 +31,7 @@ import type { GoldfishRecord } from "./goldfish.js";
  *   itself (the branch sandbox is the containment story), or no
  *   engine binary installed - each refusal names the fix.
  * - QUEUE: approval (or the operator's CLI) queues an EngineTask
- *   in .sam/engine.json, the background/coding store pattern.
+ *   in .sam/engine.db (UNIFICATION item 4, seventh store).
  * - RUN: the heartbeat tick (or `engine drain`) runs ONE queued
  *   task per drain, single-shot - iteration across failures is
  *   the C3 loop's shape; the engine is one heavy pass. The task's
@@ -89,17 +90,107 @@ const OUTPUT_TAIL_CHARS = 4_000;
 const ENGINE_FOOTER = "\n\nManaged-run rules from SAM (the orchestrator): work only inside the current directory, which is a git branch made for this task alone. Make the change with your file tools. Do not run git commands, do not commit, do not push, and do not install or remove packages. SAM will record your changes, run the project's build and test, review the diff, and commit it - your job is only the code change itself. When you are finished, end with a short summary of what you changed.";
 
 function engineFile(root: string): string { return join(resolve(root), ".sam", "engine.json"); }
-
-export function listEngineTasks(root: string): EngineTask[] {
-  const file = engineFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? data as EngineTask[] : []; }
-  catch { return []; }
-}
-
-function saveTasks(root: string, items: EngineTask[]): void {
+function engineDbFile(root: string): string { return join(resolve(root), ".sam", "engine.db"); }
+// State convergence (UNIFICATION item 4, seventh store): the
+// managed engine queue is SQLite (.sam/engine.db, the
+// actions/jobs/background/coding pattern), one row per task
+// holding the task's full JSON, rowid order = the old file
+// order. The old engine.json was rewritten whole on every queue
+// and on every drain transition (the stale-recovery pass, the
+// running mark, the git-state save, a save per accumulated
+// field, and the close - roughly ten whole-file rewrites for
+// one run), and three processes write this store (the
+// dashboard/chat process queues through the ONE gate's engine
+// executor, the heartbeat tick drains, the CLI queues and
+// drains on demand), so two writers holding the same snapshot
+// silently lost the second one's record: a queued run could
+// vanish under a tick's transition save, and a finished run's
+// done mark could revert to queued and run the engine twice -
+// with real code writes and git commits the second time. Here
+// each mutation is a single-row INSERT or UPDATE, and
+// connections carry a busy_timeout (the F1 cross-process lock
+// seam) so a writer waits out a peer's transaction instead of
+// dying on "database is locked". First open imports a legacy
+// engine.json in file order and renames it
+// engine.json.migrated - imported, never deleted; a malformed
+// file imports nothing and is left in place. A pure read on an
+// install with neither file creates nothing, so read-only
+// audits stay read-only. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried with
+// no backup change.
+function openEngineStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(engineFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+  const db = new Database(engineDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS engine_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyEngine(db, root);
+  return db;
+}
+function migrateLegacyEngine(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM engine_tasks").get() as { n: number };
+  if (n > 0) return;
+  const file = engineFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO engine_tasks (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const task = raw as Partial<EngineTask>;
+      if (typeof task.id !== "string" || !task.id) continue;
+      insert.run(task.id, JSON.stringify(task));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function rowToTask(data: string): EngineTask | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as EngineTask : null; }
+  catch { return null; }
+}
+export function listEngineTasks(root: string): EngineTask[] {
+  if (!existsSync(engineDbFile(root)) && !existsSync(engineFile(root))) return [];
+  const db = openEngineStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM engine_tasks ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: EngineTask[] = [];
+    for (const row of rows) { const task = rowToTask(row.data); if (task) items.push(task); }
+    return items;
+  } finally { db.close(); }
+}
+export function getEngineTask(root: string, id: string): EngineTask | null {
+  if (!existsSync(engineDbFile(root)) && !existsSync(engineFile(root))) return null;
+  const db = openEngineStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM engine_tasks WHERE id = ?").get(id) as { data: string } | undefined;
+    return row ? rowToTask(row.data) : null;
+  } finally { db.close(); }
+}
+function insertEngineTask(root: string, item: EngineTask): void {
+  const db = openEngineStore(root);
+  try { db.prepare("INSERT INTO engine_tasks (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  finally { db.close(); }
+}
+function updateEngineTaskRow(root: string, item: EngineTask): void {
+  const db = openEngineStore(root);
+  try { db.prepare("UPDATE engine_tasks SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  finally { db.close(); }
+}
+// The store's update door (the updateBackgroundTask /
+// updateCodingTask precedent): patch one task by id through the
+// store's own shape. Returns the updated task, or null when no
+// such task exists - and a miss on an install with no store at
+// all creates nothing.
+export function updateEngineTask(root: string, id: string, patch: Partial<EngineTask>): EngineTask | null {
+  if (!existsSync(engineDbFile(root)) && !existsSync(engineFile(root))) return null;
+  const current = getEngineTask(root, id);
+  if (!current) return null;
+  const next: EngineTask = { ...current, ...patch, id: current.id };
+  updateEngineTaskRow(root, next);
+  return next;
 }
 
 /** The engine binary this install would run: the operator's
@@ -165,7 +256,7 @@ export function queueEngineTask(root: string, input: { actor: string; chatId: st
     result: null, output: null, exitCode: null,
     changes: [], unreviewable: [], verification: null, review: null, git: null,
   };
-  items.push(item); saveTasks(root, items);
+  insertEngineTask(root, item);
   recordActivity(root, input.actor, "engine-queued", "Queued engine run: " + item.title);
   return item;
 }
@@ -241,34 +332,33 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
   const ran: string[] = []; const blocked: string[] = []; const failed: string[] = []; const recovered: string[] = [];
   try {
     const items = listEngineTasks(root);
-    const now = Date.now(); let dirty = false;
+    const now = Date.now();
     for (const t of items) {
       if (t.status === "running" && t.startedAt && now - Date.parse(t.startedAt) > STALE_RUNNING_MS) {
-        t.status = "failed"; t.finishedAt = new Date().toISOString(); t.result = "Runner stopped mid-run; marked failed by the next drain.";
-        recovered.push(t.id); dirty = true;
+        updateEngineTask(root, t.id, { status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-run; marked failed by the next drain." });
+        recovered.push(t.id);
         recordActivity(root, t.actor, "engine-failed", "Engine run died mid-run: " + t.title);
       }
     }
-    if (dirty) saveTasks(root, items);
     // One engine run per drain: an engine pass is the heaviest work
     // SAM supervises, and serializing it keeps the branch sandbox
     // (one checked-out branch per tree) honest by construction.
     const queued = listEngineTasks(root).filter(t => t.status === "queued").slice(0, 1);
     for (const task of queued) {
-      const live = listEngineTasks(root); const current = live.find(t => t.id === task.id);
-      if (!current || current.status !== "queued") continue;
-      current.status = "running"; current.startedAt = new Date().toISOString(); saveTasks(root, live);
+      const found = getEngineTask(root, task.id);
+      if (!found || found.status !== "queued") continue;
+      const current = updateEngineTask(root, task.id, { status: "running", startedAt: new Date().toISOString() }) ?? found;
       recordActivity(root, current.actor, "engine-started", "Engine run started: " + current.title);
       const close = (status: EngineStatus, result: string) => {
-        const after = listEngineTasks(root); const done = after.find(t => t.id === task.id);
-        if (!done) return;
         // Carry every field the run accumulated on `current` - the
-        // record on disk only holds what the mid-run saves wrote.
-        done.exitCode = current.exitCode; done.output = current.output;
-        done.changes = current.changes; done.unreviewable = current.unreviewable;
-        done.verification = current.verification; done.review = current.review; done.git = current.git;
-        done.status = status; done.result = result.slice(0, 600); done.finishedAt = new Date().toISOString();
-        saveTasks(root, after);
+        // record on disk only holds what the mid-run updates wrote.
+        const done = updateEngineTask(root, task.id, {
+          exitCode: current.exitCode, output: current.output,
+          changes: current.changes, unreviewable: current.unreviewable,
+          verification: current.verification, review: current.review, git: current.git,
+          status, result: result.slice(0, 600), finishedAt: new Date().toISOString(),
+        });
+        if (!done) return;
         postToChat(root, current.chatId, engineSummaryText(done));
         if (status === "done") { ran.push(task.id); recordActivity(root, current.actor, "engine-done", "Engine run done and verified: " + current.title + " (" + done.changes.length + " file(s))"); }
         else if (status === "blocked") { blocked.push(task.id); recordActivity(root, current.actor, "engine-blocked", "Engine run blocked: " + current.title + " - " + result.slice(0, 120)); }
@@ -280,7 +370,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       try { gitState = prepareTaskBranch(root, current); }
       catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? e.message : "Git preparation failed" }; }
       current.git = gitState;
-      { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.git = gitState; saveTasks(root, mid); } }
+      updateEngineTask(root, task.id, { git: gitState });
       if (gitState.mode !== "branch") {
         current.verification = verificationStatus(root).state;
         close("blocked", gitState.mode === "none"
@@ -298,12 +388,12 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       catch (e) { outcome = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
       current.exitCode = outcome.exitCode;
       current.output = (outcome.output ?? "").slice(-OUTPUT_TAIL_CHARS);
-      { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.exitCode = current.exitCode; m.output = current.output; saveTasks(root, mid); } }
+      updateEngineTask(root, task.id, { exitCode: current.exitCode, output: current.output });
       if (outcome.timedOut || outcome.exitCode !== 0) {
         // A failed engine pass: whatever it half-wrote stays
         // uncommitted on the task branch, named in the record.
         try { current.changes = worktreeChanges(root).map(c => c.path); } catch { /* tree unreadable; the exit record stands */ }
-        { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.changes = current.changes; saveTasks(root, mid); } }
+        updateEngineTask(root, task.id, { changes: current.changes });
         close("failed", outcome.timedOut
           ? "The engine run timed out after " + Math.round(ENGINE_TIMEOUT_MS / 60000) + " minutes and was killed. Its partial changes, if any, stay uncommitted on " + gitState.branch + " for inspection."
           : "The engine exited with code " + String(outcome.exitCode) + ". Its partial changes, if any, stay uncommitted on " + gitState.branch + " for inspection. Output tail is on the task record.");
@@ -325,7 +415,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
         } catch { unreviewable.push(change.path); }
       }
       current.changes = recorded; current.unreviewable = unreviewable;
-      { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.changes = recorded; m.unreviewable = unreviewable; saveTasks(root, mid); } }
+      updateEngineTask(root, task.id, { changes: recorded, unreviewable });
       if (unreviewable.length) {
         close("blocked", "The engine changed " + unreviewable.length + " path(s) outside the shape SAM can record, verify, and review (" + unreviewable.join(", ") + ") - protected, binary, oversize, or deleted files are refused by the same fences that bind SAM's own write hands. The recorded changes stay uncommitted on " + gitState.branch + "; fix the tree outside SAM and re-queue, or narrow the task.");
         continue;
@@ -346,7 +436,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       } catch (e) { verifyError = e instanceof Error ? e.message : String(e); }
       const vstate = verificationStatus(root).state;
       current.verification = verifyError ? "unavailable: " + verifyError.slice(0, 160) : vstate;
-      { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.verification = current.verification; saveTasks(root, mid); } }
+      updateEngineTask(root, task.id, { verification: current.verification });
       if (verifyError || vstate !== "verified") {
         close("blocked", verifyError
           ? "SAM could not verify the engine's changes: " + verifyError.slice(0, 240) + " The changes stay uncommitted on " + gitState.branch + "."
@@ -363,7 +453,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
           recordActivity(root, current.actor, "engine-review", "Self-review " + record.verdict + " for engine run: " + current.title);
         } catch (e) { reviewUnavailable = e instanceof Error ? e.message : "Self-review failed"; }
         current.review = reviewUnavailable ? "unavailable: " + reviewUnavailable.slice(0, 240) : reviewOutcome;
-        { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.review = current.review; saveTasks(root, mid); } }
+        updateEngineTask(root, task.id, { review: current.review });
         if (reviewUnavailable) {
           close("blocked", "The engine's work verified, but the fresh-context self-review could not run (" + reviewUnavailable.slice(0, 200) + ") - unreviewed work is not done. The changes stay uncommitted on " + gitState.branch + ".");
           continue;
@@ -379,7 +469,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       try { commitTaskPaths(root, gitState, [...recorded], 1, current.title); gitState.error = null; }
       catch (e) { gitState.error = e instanceof Error ? e.message : "git commit failed"; }
       current.git = gitState;
-      { const mid = listEngineTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.git = gitState; saveTasks(root, mid); } }
+      updateEngineTask(root, task.id, { git: gitState });
       if (gitState.pending.length) {
         close("blocked", "The engine's work verified and reviewed, but git discipline is incomplete: " + gitState.pending.join(", ") + " not committed on " + gitState.branch + (gitState.error ? " - " + gitState.error.slice(0, 200) : "") + ". Uncommitted work is not done.");
         continue;
