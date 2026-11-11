@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { setCodeRoot, writeCodeFile, editCodeFile } from "./code.js";
 import { recordVerification, verificationStatus } from "./verification.js";
-import { codingPrompt, codingSummary, drainCodingTasks, listCodingTasks, queueCodingTask } from "./coding.js";
+import { codingPrompt, codingSummary, drainCodingTasks, listCodingTasks, queueCodingTask, updateCodingTask } from "./coding.js";
 import { executeOwnToolAsync } from "./own-tools.js";
 import { readActivity } from "./activity.js";
 
@@ -167,11 +167,7 @@ test("a stale running task is recovered as failed by the next drain instead of w
   try {
     setCodeRoot(sam, proj);
     const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Long task" });
-    const file = join(sam, ".sam", "coding.json");
-    const items = JSON.parse(readFileSync(file, "utf8"));
-    items[0].status = "running";
-    items[0].startedAt = new Date(Date.now() - 2 * 3600_000).toISOString();
-    writeFileSync(file, JSON.stringify(items, null, 2));
+    updateCodingTask(sam, task.id, { status: "running", startedAt: new Date(Date.now() - 2 * 3600_000).toISOString() });
     const out = await drainCodingTasks(sam, { runTurn: stubTurn(sam, () => {}) });
     assert.deepEqual(out.recovered, [task.id]);
     assert.equal(listCodingTasks(sam)[0].status, "failed");

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, codeWrites, type CodeWriteRecord } from "./code.js";
@@ -89,17 +90,105 @@ const STALE_RUNNING_MS = 60 * 60000;
 const SUMMARY_DIFF_BUDGET = 6_000;
 
 function codingFile(root: string): string { return join(resolve(root), ".sam", "coding.json"); }
-
-export function listCodingTasks(root: string): CodingTask[] {
-  const file = codingFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? data as CodingTask[] : []; }
-  catch { return []; }
-}
-
-function saveTasks(root: string, items: CodingTask[]): void {
+function codingDbFile(root: string): string { return join(resolve(root), ".sam", "coding.db"); }
+// State convergence (UNIFICATION item 4, sixth store): the coding
+// queue is SQLite (.sam/coding.db, the actions/jobs/background
+// pattern), one row per task holding the task's full JSON, rowid
+// order = the old file order. The old coding.json was rewritten
+// whole on every queue and on every drain transition (the
+// stale-recovery pass, the running mark, the git-state save, a
+// save per iteration, a further save per iteration when the C4
+// commit lands, and the close - roughly ten whole-file rewrites
+// for one task), and three processes write this store (the
+// dashboard/chat process queues through sam_coding_task, the
+// heartbeat tick drains, the CLI queues and drains on demand),
+// so two writers holding the same snapshot silently lost the
+// second one's record: a queued task could vanish under a tick's
+// transition save, and a finished task's done mark could revert
+// to queued and run twice - with real code writes and git
+// commits the second time. Here each mutation is a single-row
+// INSERT or UPDATE, and connections carry a busy_timeout (the F1
+// cross-process lock seam) so a writer waits out a peer's
+// transaction instead of dying on "database is locked". First
+// open imports a legacy coding.json in file order and renames it
+// coding.json.migrated - imported, never deleted; a malformed
+// file imports nothing and is left in place. A pure read on an
+// install with neither file creates nothing, so read-only audits
+// stay read-only. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup
+// change.
+function openCodingStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(codingFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+  const db = new Database(codingDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS coding_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyCoding(db, root);
+  return db;
+}
+function migrateLegacyCoding(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM coding_tasks").get() as { n: number };
+  if (n > 0) return;
+  const file = codingFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO coding_tasks (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const task = raw as Partial<CodingTask>;
+      if (typeof task.id !== "string" || !task.id) continue;
+      insert.run(task.id, JSON.stringify(task));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function rowToTask(data: string): CodingTask | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as CodingTask : null; }
+  catch { return null; }
+}
+export function listCodingTasks(root: string): CodingTask[] {
+  if (!existsSync(codingDbFile(root)) && !existsSync(codingFile(root))) return [];
+  const db = openCodingStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM coding_tasks ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: CodingTask[] = [];
+    for (const row of rows) { const task = rowToTask(row.data); if (task) items.push(task); }
+    return items;
+  } finally { db.close(); }
+}
+export function getCodingTask(root: string, id: string): CodingTask | null {
+  if (!existsSync(codingDbFile(root)) && !existsSync(codingFile(root))) return null;
+  const db = openCodingStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM coding_tasks WHERE id = ?").get(id) as { data: string } | undefined;
+    return row ? rowToTask(row.data) : null;
+  } finally { db.close(); }
+}
+function insertCodingTask(root: string, item: CodingTask): void {
+  const db = openCodingStore(root);
+  try { db.prepare("INSERT INTO coding_tasks (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  finally { db.close(); }
+}
+function updateCodingTaskRow(root: string, item: CodingTask): void {
+  const db = openCodingStore(root);
+  try { db.prepare("UPDATE coding_tasks SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  finally { db.close(); }
+}
+// The store's update door (the updateBackgroundTask precedent):
+// patch one task by id through the store's own shape. Returns the
+// updated task, or null when no such task exists - and a miss on
+// an install with no store at all creates nothing.
+export function updateCodingTask(root: string, id: string, patch: Partial<CodingTask>): CodingTask | null {
+  if (!existsSync(codingDbFile(root)) && !existsSync(codingFile(root))) return null;
+  const current = getCodingTask(root, id);
+  if (!current) return null;
+  const next: CodingTask = { ...current, ...patch, id: current.id };
+  updateCodingTaskRow(root, next);
+  return next;
 }
 
 export function codingSummary(root: string): { root: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: CodingTask[] } {
@@ -125,7 +214,7 @@ export function queueCodingTask(root: string, input: { actor: string; chatId: st
     createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
     result: null, verification: null, changes: [], review: null, git: null,
   };
-  items.push(item); saveTasks(root, items);
+  insertCodingTask(root, item);
   recordActivity(root, input.actor, "coding-queued", "Queued coding task: " + item.title);
   return item;
 }
@@ -200,22 +289,20 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
   try {
     // Recover first, on the background pattern: a task still marked
     // running long past any plausible loop means its runner died.
-    const items = listCodingTasks(root);
-    const now = Date.now(); let dirty = false;
-    for (const t of items) {
+    const now = Date.now();
+    for (const t of listCodingTasks(root)) {
       if (t.status === "running" && t.startedAt && now - Date.parse(t.startedAt) > STALE_RUNNING_MS) {
-        t.status = "failed"; t.finishedAt = new Date().toISOString(); t.result = "Runner stopped mid-task; marked failed by the next drain.";
-        recovered.push(t.id); dirty = true;
+        updateCodingTask(root, t.id, { status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-task; marked failed by the next drain." });
+        recovered.push(t.id);
         recordActivity(root, t.actor, "coding-failed", "Coding task died mid-run: " + t.title);
       }
     }
-    if (dirty) saveTasks(root, items);
     const limit = deps.maxPerDrain ?? 2;
     const queued = listCodingTasks(root).filter(t => t.status === "queued").slice(0, limit);
     for (const task of queued) {
-      const live = listCodingTasks(root); const current = live.find(t => t.id === task.id);
-      if (!current || current.status !== "queued") continue;
-      current.status = "running"; current.startedAt = new Date().toISOString(); saveTasks(root, live);
+      const found = getCodingTask(root, task.id);
+      if (!found || found.status !== "queued") continue;
+      const current = updateCodingTask(root, task.id, { status: "running", startedAt: new Date().toISOString() }) ?? found;
       recordActivity(root, current.actor, "coding-started", "Coding task started: " + current.title);
       // C4 git discipline: the task's branch is prepared before the
       // first turn. A refusal (a dirty tree, an unborn HEAD) closes
@@ -225,13 +312,10 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       try { gitState = prepareTaskBranch(root, current); }
       catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? e.message : "Git preparation failed" }; }
       current.git = gitState;
-      { const mid = listCodingTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.git = gitState; saveTasks(root, mid); } }
+      updateCodingTask(root, task.id, { git: gitState });
       if (gitState.mode === "refused") {
-        const after = listCodingTasks(root); const done = after.find(t => t.id === task.id);
+        const done = updateCodingTask(root, task.id, { status: "blocked", git: gitState, verification: verificationStatus(root).state, finishedAt: new Date().toISOString(), result: gitState.error });
         if (done) {
-          done.status = "blocked"; done.git = gitState; done.verification = verificationStatus(root).state;
-          done.finishedAt = new Date().toISOString(); done.result = gitState.error;
-          saveTasks(root, after);
           postToChat(root, current.chatId, codingSummaryText(done, []));
         }
         blocked.push(task.id);
@@ -248,7 +332,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       try {
         for (let iteration = 1; iteration <= current.maxIterations; iteration++) {
           current.iterations = iteration;
-          const mid = listCodingTasks(root); const m = mid.find(t => t.id === task.id); if (m) { m.iterations = iteration; saveTasks(root, mid); }
+          updateCodingTask(root, task.id, { iterations: iteration });
           const writesBeforeIter = codeWrites(root, 100_000).length;
           lastReply = await deps.runTurn(current.chatId, codingPrompt(current, iteration, verdict));
           // C4: commit this iteration's writes locally on the task
@@ -262,7 +346,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
             if (gitState.pending.length) {
               try { commitTaskPaths(root, gitState, [...gitState.pending], iteration, current.title); gitState.error = null; }
               catch (e) { gitState.error = e instanceof Error ? e.message : "git commit failed"; }
-              const mid2 = listCodingTasks(root); const m2 = mid2.find(t => t.id === task.id); if (m2) { m2.git = gitState; saveTasks(root, mid2); }
+              updateCodingTask(root, task.id, { git: gitState });
             }
           }
           const status = verificationStatus(root);
@@ -296,15 +380,12 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       } catch (e) {
         turnFailed = e instanceof Error ? e.message : "Coding run failed";
       }
-      const after = listCodingTasks(root); const done = after.find(t => t.id === task.id);
-      if (!done) continue;
+      const fresh = getCodingTask(root, task.id);
+      if (!fresh) continue;
       const writes = codeWrites(root, 100_000).slice(writesBefore);
-      done.changes = writes.map(w => ({ path: w.path, created: w.created, addedLines: w.addedLines, removedLines: w.removedLines }));
+      const changes = writes.map(w => ({ path: w.path, created: w.created, addedLines: w.addedLines, removedLines: w.removedLines }));
       const status = verificationStatus(root);
-      done.verification = status.state;
-      done.review = reviewUnavailable ? "unavailable: " + reviewUnavailable.slice(0, 240) : reviewOutcome;
-      done.git = gitState;
-      done.finishedAt = new Date().toISOString();
+      const done: CodingTask = { ...fresh, changes, verification: status.state, review: reviewUnavailable ? "unavailable: " + reviewUnavailable.slice(0, 240) : reviewOutcome, git: gitState, finishedAt: new Date().toISOString() };
       const reviewGateOk = !deps.review || reviewOutcome?.startsWith("PASS") === true;
       const gitPending = gitState?.mode === "branch" ? gitState.pending : [];
       if (turnFailed) {
@@ -336,8 +417,8 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
         blocked.push(task.id);
         recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (" + status.state + "): " + current.title);
       }
-      saveTasks(root, after);
-      postToChat(root, current.chatId, codingSummaryText(done, writes));
+      const saved = updateCodingTask(root, task.id, { status: done.status, result: done.result, changes: done.changes, verification: done.verification, review: done.review, git: done.git, finishedAt: done.finishedAt, iterations: done.iterations }) ?? done;
+      postToChat(root, current.chatId, codingSummaryText(saved, writes));
     }
     return { ran, blocked, failed, recovered };
   } finally { draining.delete(key); }
