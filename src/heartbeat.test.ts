@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
-import { addHeartbeatJob, consolidatePreferences, heartbeatFactSignature, heartbeatFactSignatureString, heartbeatLog, heartbeatOutputHash, heartbeatOutputsEquivalent, normalizeHeartbeatOutput, runHeartbeat } from "./heartbeat.js";
+import { addHeartbeatJob, consolidatePreferences, heartbeatFactSignature, heartbeatFactSignatureString, heartbeatJobs, heartbeatLog, heartbeatOutputHash, heartbeatOutputsEquivalent, normalizeHeartbeatOutput, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
 import { PreferenceStore } from "./preferences.js";
 import { readActivity } from "./activity.js";
 
@@ -170,10 +170,10 @@ test("heartbeat diffing: a paraphrased repeat stays silent, a fact change delive
 });
 
 function makeJobDue(root:string){
- const path=join(root,".sam","heartbeat-jobs.json");
- const jobs=JSON.parse(readFileSync(path,"utf8")) as Array<Record<string,unknown>>;
- for(const job of jobs)job.lastRun="2000-01-01T00:00:00.000Z";
- writeFileSync(path,JSON.stringify(jobs,null,2));
+ // Through the store's own update door (UNIFICATION item 4): the
+ // jobs store is SQLite now, and tests write through its shape,
+ // never around it - the actions-migration precedent.
+ for(const job of heartbeatJobs(root))updateHeartbeatJob(root,job.id,{lastRun:"2000-01-01T00:00:00.000Z"});
 }
 
 test("heartbeat diffing: unchanged output stays silent, changed output delivers and lands in the activity ledger",async()=>{

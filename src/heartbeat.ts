@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore, extractPreferences } from "./preferences.js";
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
@@ -41,22 +42,89 @@ export interface HeartbeatJob { id:string; name:string; minutes:number; profile:
  // ran it removes the job (self-retiring; see runHeartbeat).
  cron?:string|null; schedule?:string|null; timezone?:string; mode?:"agent"|"script"; script?:string|null; createdAt?:string; onceAt?:string|null }
 function jobsPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.json");}
+function jobsDbPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.db");}
 function statePath(root:string){return join(resolve(root),".sam","heartbeat-state.json");}
 function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl");}
-export function heartbeatJobs(root:string):HeartbeatJob[]{
- if(!existsSync(jobsPath(root)))return [];
- const value:unknown=JSON.parse(readFileSync(jobsPath(root),"utf8"));
- if(!Array.isArray(value)||value.length>32)throw Error("Invalid heartbeat jobs file");
- return value as HeartbeatJob[];
+// State convergence (UNIFICATION item 4, second store): the job
+// store is SQLite (.sam/heartbeat-jobs.db, the actions pattern),
+// one row per job holding the job's full JSON (the optional
+// schedule fields evolve; the row is the record). The old
+// heartbeat-jobs.json was rewritten whole on every create, every
+// remove, and every tick that advanced a lastRun or retired a
+// one-shot - and three processes write this store (the dashboard
+// executing approved proposals, the CLI, the heartbeat tick), so
+// two writers holding the same snapshot silently lost the second
+// one's change. Here each mutation is a single-row INSERT,
+// UPDATE, or DELETE, and connections carry a busy_timeout (the
+// F1 cross-process lock seam) so a writer waits out a peer's
+// transaction instead of dying on "database is locked". First
+// open imports a legacy heartbeat-jobs.json in file order and
+// renames it heartbeat-jobs.json.migrated - imported, never
+// deleted; a malformed file imports nothing and is left in
+// place. A pure read on an install with neither file creates
+// nothing, so read-only audits stay read-only. The P9 backup
+// snapshots every .sam/*.db generically, so the migrated store
+// is carried with no backup change.
+function openJobsStore(root:string):Database.Database{
+ mkdirSync(join(resolve(root),".sam"),{recursive:true});
+ const db=new Database(jobsDbPath(root));
+ db.pragma("journal_mode = WAL");
+ db.pragma("busy_timeout = 5000");
+ db.exec("CREATE TABLE IF NOT EXISTS heartbeat_jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+ migrateLegacyJobs(db,root);
+ return db;
 }
-function saveJobs(root:string,items:HeartbeatJob[]){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(jobsPath(root),JSON.stringify(items,null,2),{mode:0o600});}
+function migrateLegacyJobs(db:Database.Database,root:string):void{
+ const {n}=db.prepare("SELECT COUNT(*) AS n FROM heartbeat_jobs").get() as {n:number};
+ if(n>0)return;
+ const file=jobsPath(root);
+ if(!existsSync(file))return;
+ let data:unknown;
+ try{data=JSON.parse(readFileSync(file,"utf8"));}catch{return;}
+ if(!Array.isArray(data))return;
+ const insert=db.prepare("INSERT OR IGNORE INTO heartbeat_jobs (id, data) VALUES (?, ?)");
+ const importAll=db.transaction((rows:unknown[])=>{
+  for(const raw of rows){
+   if(!raw||typeof raw!=="object")continue;
+   const job=raw as Partial<HeartbeatJob>;
+   if(typeof job.id!=="string"||!job.id)continue;
+   insert.run(job.id,JSON.stringify(job));
+  }
+ });
+ importAll(data);
+ renameSync(file,file+".migrated");
+}
+export function heartbeatJobs(root:string):HeartbeatJob[]{
+ if(!existsSync(jobsDbPath(root))&&!existsSync(jobsPath(root)))return [];
+ const db=openJobsStore(root);
+ try{
+  const rows=db.prepare("SELECT data FROM heartbeat_jobs ORDER BY rowid").all() as Array<{data:string}>;
+  const items=rows.map(r=>JSON.parse(r.data) as HeartbeatJob);
+  if(items.length>32)throw Error("Invalid heartbeat jobs file");
+  return items;
+ }finally{db.close();}
+}
+function insertJob(root:string,job:HeartbeatJob){const db=openJobsStore(root);try{db.prepare("INSERT INTO heartbeat_jobs (id, data) VALUES (?, ?)").run(job.id,JSON.stringify(job));}finally{db.close();}}
+function updateJobRow(root:string,job:HeartbeatJob){const db=openJobsStore(root);try{db.prepare("UPDATE heartbeat_jobs SET data = ? WHERE id = ?").run(JSON.stringify(job),job.id);}finally{db.close();}}
+function deleteJobRow(root:string,id:string):boolean{const db=openJobsStore(root);try{return db.prepare("DELETE FROM heartbeat_jobs WHERE id = ?").run(id).changes>0;}finally{db.close();}}
+// The store's own update door: patch one job's record in place
+// (the tick's lastRun advances ride updateJobRow directly; this
+// is the named seam for operator/test mutations, so nothing ever
+// needs to write around the store).
+export function updateHeartbeatJob(root:string,id:string,patch:Partial<HeartbeatJob>):HeartbeatJob|null{
+ const job=heartbeatJobs(root).find(j=>j.id===id);
+ if(!job)return null;
+ const next:HeartbeatJob={...job,...patch,id:job.id};
+ updateJobRow(root,next);
+ return next;
+}
 function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null;onceAt?:string|null}):HeartbeatJob{
  if(jobNameTaken(root,input.name))throw Error("Heartbeat limit or duplicate name");
  const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};
  if(input.cron||input.schedule||input.onceAt){item.cron=input.cron??null;item.schedule=input.schedule??null;item.timezone=input.timezone??ownerTimezone();}
  if(input.onceAt)item.onceAt=input.onceAt;
  if(input.mode==="script"){item.mode="script";item.script=input.script??null;}
- saveJobs(root,[...heartbeatJobs(root),item]);return item;
+ insertJob(root,item);return item;
 }
 function jobNameTaken(root:string,name:string):boolean{const items=heartbeatJobs(root);return items.length>=32||items.some(j=>j.name===name);}
 function validJobName(name:string){if(!/^[a-zA-Z0-9 _-]{1,80}$/.test(name))throw Error("Invalid heartbeat name");}
@@ -117,8 +185,8 @@ export function jobDue(job:HeartbeatJob,now:Date=new Date()):boolean{
  return next!==null&&next.getTime()<=now.getTime();
 }
 export function removeHeartbeatJob(root:string,id:string):boolean{
- const items=heartbeatJobs(root),rest=items.filter(j=>j.id!==id);
- if(rest.length===items.length)return false;saveJobs(root,rest);return true;
+ if(!heartbeatJobs(root).some(j=>j.id===id))return false;
+ return deleteJobRow(root,id);
 }
 export interface HeartbeatOutputRecord { hash:string; at:string; preview:string; sig?:string }
 interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; outputs?:Record<string,HeartbeatOutputRecord> }
@@ -324,7 +392,11 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // Loaded after consolidation, which saves this same state file for its
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
- let dirty=false;let stateDirty=false;
+ let stateDirty=false;
+ // Per-job persistence (item 4 store): a tick updates exactly the
+ // rows of the jobs that ran, and deletes exactly the retired
+ // one-shots - no whole-store rewrite rides a tick anymore.
+ const ranJobs=new Set<string>();
  const retired:string[]=[];
  // One-shot retirement (Telegram reminder gaps, 2026-11-10): a
  // one-shot job that has had its run - a delivered or quiet reply,
@@ -347,13 +419,13 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    let outcome:{stdout:string;code:number};
    try{outcome=await runScript(job.script??"");}
    catch(e){
-    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
+    job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
     retireIfOnce(job);
     continue;
    }
-   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+   job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);
    if(outcome.code!==0){
     failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
@@ -382,13 +454,13 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     const chatId=await deps.ensureChat("Heartbeat · "+job.name,job.profile);
     reply=await deps.runTurn(chatId,job.prompt);
    }catch(e){
-    job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);failed.push(job.name);
+    job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
     appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
     recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
     retireIfOnce(job);
     continue;
    }
-   job.lastRun=new Date().toISOString();dirty=true;ran.push(job.name);
+   job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);
   }
   const hash=heartbeatOutputHash(reply);
   const sig=heartbeatFactSignatureString(reply);
@@ -428,7 +500,8 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   }
   retireIfOnce(job);
  }
- if(dirty||retired.length)saveJobs(root,jobs.filter(j=>!retired.includes(j.id)));
+ for(const job of jobs){if(ranJobs.has(job.id)&&!retired.includes(job.id))updateJobRow(root,job);}
+ for(const id of retired)deleteJobRow(root,id);
  if(stateDirty)saveState(root,state);
  deliveryResult.pending=pendingDeliveries(root).length;
  // Legs (P5): every tick also drains the background queue, so a task a chat

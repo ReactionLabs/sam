@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addHeartbeatJob, addScheduledJob, heartbeatJobs, jobDue, jobNextRun, runHeartbeat } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatJobs, jobDue, jobNextRun, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
 import { deliverySummary, pendingDeliveries, queueDelivery, readDeliveries } from "./delivery-outbox.js";
 import { scriptArgv, scriptCommandNames } from "./schedule.js";
 import { proposeAction, decideAction } from "./actions.js";
@@ -58,9 +58,7 @@ test("a due cron job runs once, then waits for its next wall-clock time", async 
     const job = addScheduledJob(root, { name: "morning brief", profile: "trading", schedule: "daily at 9am", timezone: "UTC", prompt: "Brief me" });
     // Force the anchor into the past so 9am UTC today is already due.
     const jobs = heartbeatJobs(root);
-    jobs[0].createdAt = "2026-01-01T00:00:00.000Z";
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(join(root, ".sam", "heartbeat-jobs.json"), JSON.stringify(jobs, null, 2));
+    updateHeartbeatJob(root, jobs[0].id, { createdAt: "2026-01-01T00:00:00.000Z" });
     let turns = 0;
     const first = await runHeartbeat(root, deps({ runTurn: async () => { turns++; return "Brief " + turns; } }));
     assert.deepEqual(first.ran, ["morning brief"]);
@@ -90,16 +88,14 @@ test("script mode: stdout is the output, no model turn runs, a quiet script stay
     assert.equal(deliveries.length, 1);
     assert.ok(deliveries[0].includes("3 archives, newest sam-state-20261110T083000Z.tar.gz"));
     // Same stdout again: diffing holds it silent.
-    const stored = heartbeatJobs(root); stored[0].lastRun = "2000-01-01T00:00:00.000Z";
-    const { writeFileSync } = await import("node:fs");
-    writeFileSync(join(root, ".sam", "heartbeat-jobs.json"), JSON.stringify(stored, null, 2));
+    const stored = heartbeatJobs(root);
+    updateHeartbeatJob(root, stored[0].id, { lastRun: "2000-01-01T00:00:00.000Z" });
     const second = await runHeartbeat(root, d);
     assert.deepEqual(second.unchanged, ["backups watch"]);
     assert.equal(deliveries.length, 1);
     // Empty stdout is a quiet run: no delivery, no change.
     stdout = "  \n";
-    stored[0].lastRun = "2000-01-01T00:00:00.000Z";
-    writeFileSync(join(root, ".sam", "heartbeat-jobs.json"), JSON.stringify(stored, null, 2));
+    updateHeartbeatJob(root, stored[0].id, { lastRun: "2000-01-01T00:00:00.000Z" });
     const third = await runHeartbeat(root, d);
     assert.deepEqual(third.unchanged, ["backups watch"]);
     assert.equal(deliveries.length, 1);

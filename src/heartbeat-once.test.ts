@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compileSchedule, ownerTimezone } from "./schedule.js";
-import { addHeartbeatJob, addScheduledJob, heartbeatJobs, heartbeatLog, jobDue, jobNextRun, runHeartbeat } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatJobs, heartbeatLog, jobDue, jobNextRun, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
 import { proposeAction, decideAction, listActions } from "./actions.js";
 import { addChannel } from "./channels.js";
 import { saveBridgeState } from "./telegram.js";
@@ -99,8 +99,7 @@ test("a due one-shot fires exactly once and retires itself; a recurring job stay
     addHeartbeatJob(root, "stack watch", 30, "sam", "Check");
     // Force the one-shot due by moving its instant into the past.
     const jobs = heartbeatJobs(root);
-    jobs[0].onceAt = "2020-01-01T00:00:00.000Z";
-    writeFileSync(join(root, ".sam", "heartbeat-jobs.json"), JSON.stringify(jobs, null, 2));
+    updateHeartbeatJob(root, jobs[0].id, { onceAt: "2020-01-01T00:00:00.000Z" });
     const deliveries: string[] = [];
     const d = deps({ deliver: async (_id: string, text: string) => { deliveries.push(text); } });
     const first = await runHeartbeat(root, d);
@@ -125,8 +124,7 @@ test("a one-shot whose turn fails still retires (the failure is logged once, nev
     const lp = localPartsIn("UTC", future);
     addScheduledJob(root, { name: "dentist", profile: "sam", schedule: "once at " + lp.year + "-" + pad(lp.month) + "-" + pad(lp.day) + " " + pad(lp.hour) + ":" + pad(lp.minute), timezone: "UTC", prompt: "Remind me" });
     const jobs = heartbeatJobs(root);
-    jobs[0].onceAt = "2020-01-01T00:00:00.000Z";
-    writeFileSync(join(root, ".sam", "heartbeat-jobs.json"), JSON.stringify(jobs, null, 2));
+    updateHeartbeatJob(root, jobs[0].id, { onceAt: "2020-01-01T00:00:00.000Z" });
     const r = await runHeartbeat(root, deps({ runTurn: async () => { throw new Error("model down"); } }));
     assert.deepEqual(r.failed, ["dentist"]);
     assert.deepEqual(heartbeatJobs(root), []);
