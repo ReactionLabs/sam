@@ -45,7 +45,7 @@ import { recordActivity } from "./activity.js";
 // copy (discovery takes the first, so the shadowed copy never
 // loads), an orphaned provenance record whose skill is gone, and an
 // unmatchable description. Each finding carries a suggested patch in
-// words; findings persist in .sam/skill-curator.json and a changed
+// words; findings persist in .sam/skill-curator.db and a changed
 // finding set writes ONE curator ledger line, so a standing problem
 // is reported once, not every 15 minutes. Usage-based staleness (a
 // skill nobody loads) is NOT claimed: SAM has no skill-use tracking,
@@ -403,13 +403,80 @@ function skillDraftIsPatchSafe(root: string, name: string): boolean {
   try { return skillDraftIsPatch(root, name); } catch { return false; }
 }
 
-interface CuratorState { lastRun: string; hash: string; findings: CuratorFinding[] }
+export interface CuratorState { lastRun: string; hash: string; findings: CuratorFinding[] }
 function curatorFile(root: string): string { return join(resolve(root), ".sam", "skill-curator.json"); }
-export function curatorFindings(root: string): CuratorFinding[] {
+function curatorDbFile(root: string): string { return join(resolve(root), ".sam", "skill-curator.db"); }
+// State convergence (UNIFICATION item 4, twenty-second store): the
+// curator's findings state is SQLite (.sam/skill-curator.db, the
+// skill-installs pattern), ONE row holding the state's full JSON so
+// the singleton keeps its exact shape. The old skill-curator.json
+// was rewritten whole by runSkillCurator on every consolidation
+// tick (every 15 minutes - the lastRun stamp alone forced the
+// rewrite) and on every CLI curator run, with writers in two
+// processes, so two writers holding the same snapshot silently
+// lost the second one's state: the changed-set hash that
+// suppresses a duplicate curator ledger line could revert, and a
+// torn write read back as no findings. Here each run is a
+// single-row UPSERT and connections carry a busy_timeout. First
+// open imports a legacy skill-curator.json and renames it
+// skill-curator.json.migrated - imported, never deleted; a
+// malformed file or a non-object payload imports nothing and is
+// left in place (the migrated shape reads it as no findings,
+// exactly the old forgiving contract). A pure read on an install
+// with neither file creates nothing. The P9 backup snapshots
+// every .sam/*.db generically, so the migrated store is carried
+// with no backup change.
+function openCuratorStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(curatorDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS skill_curator (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyCurator(db, root);
+  return db;
+}
+function migrateLegacyCurator(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM skill_curator WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
   const file = curatorFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")) as CuratorState; return Array.isArray(data.findings) ? data.findings : []; }
-  catch { return []; }
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!data || typeof data !== "object" || Array.isArray(data)) return;
+  db.prepare("INSERT OR IGNORE INTO skill_curator (id, data) VALUES (1, ?)").run(JSON.stringify(data));
+  renameSync(file, file + ".migrated");
+}
+function rowToCuratorState(data: string): CuratorState | null {
+  try {
+    const value: unknown = JSON.parse(data);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const state = value as Partial<CuratorState>;
+    return {
+      lastRun: typeof state.lastRun === "string" ? state.lastRun : "",
+      hash: typeof state.hash === "string" ? state.hash : "",
+      findings: Array.isArray(state.findings) ? state.findings : [],
+    };
+  } catch { return null; }
+}
+function curatorStoreExists(root: string): boolean {
+  return existsSync(curatorDbFile(root)) || existsSync(curatorFile(root));
+}
+// The store's read door (the pairing precedent): the full curator
+// state (lastRun + hash + findings) through the store's own shape,
+// or null when no pass has ever persisted one - and a read on an
+// install with no store at all creates nothing.
+export function readCuratorState(root: string): CuratorState | null {
+  if (!curatorStoreExists(root)) return null;
+  const db = openCuratorStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM skill_curator WHERE id = 1").get() as { data: string } | undefined;
+    return row ? rowToCuratorState(row.data) : null;
+  } finally { db.close(); }
+}
+export function curatorFindings(root: string): CuratorFinding[] {
+  return readCuratorState(root)?.findings ?? [];
 }
 
 // One consolidation pass: recompute, persist, and ledger ONLY when
@@ -418,14 +485,13 @@ export function curatorFindings(root: string): CuratorFinding[] {
 export function runSkillCurator(root: string): { findings: CuratorFinding[]; changed: boolean } {
   const findings = curateSkills(root);
   const hash = createHash("sha256").update(findings.map(f => f.id).join(",")).digest("hex");
-  let priorHash = "";
-  const file = curatorFile(root);
-  if (existsSync(file)) {
-    try { priorHash = (JSON.parse(readFileSync(file, "utf8")) as CuratorState).hash ?? ""; } catch { priorHash = ""; }
-  }
+  const priorHash = readCuratorState(root)?.hash ?? "";
   const changed = hash !== priorHash;
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(file, JSON.stringify({ lastRun: new Date().toISOString(), hash, findings }, null, 2), { mode: 0o600 });
+  const state: CuratorState = { lastRun: new Date().toISOString(), hash, findings };
+  const db = openCuratorStore(root);
+  try {
+    db.prepare("INSERT INTO skill_curator (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(state));
+  } finally { db.close(); }
   if (changed && findings.length) {
     recordActivity(root, "sam", "skill-curator", "Skill curator flagged " + findings.length + " issue(s): " + findings.map(f => f.kind + " (" + f.skills.join(", ") + ")").join("; ").slice(0, 300));
   }

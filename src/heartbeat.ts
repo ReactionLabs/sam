@@ -417,7 +417,7 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   // Skill curator (Phase B item 3): a deterministic pass over the
   // skill library on the same tick - no model call, so the cheap
   // tier costs zero. It flags duplicate, shadowed, orphaned, and
-  // unmatchable skills into .sam/skill-curator.json with a suggested
+  // unmatchable skills into .sam/skill-curator.db with a suggested
   // patch each, and ledgers only when the finding set changes. A
   // curator failure never breaks a tick.
   let curator:string[]=[];
