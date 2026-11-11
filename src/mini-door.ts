@@ -1,6 +1,7 @@
 import { randomUUID, randomBytes, createHash, timingSafeEqual } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { minis } from "./minis.js";
 
 // The web door: how a person reaches their mini. Each mini can have one door,
@@ -26,13 +27,120 @@ interface Door { mini:string; keyHash:string; enabled:boolean; created_at:string
 interface DoorSession { mini:string; session:string; chatId:string; updated_at:string }
 interface DoorFile { doors:Door[]; sessions:DoorSession[] }
 function doorPath(root:string){return join(resolve(root),".sam","mini-doors.json");}
-function load(root:string):DoorFile{
-  if(!existsSync(doorPath(root)))return {doors:[],sessions:[]};
-  const value:unknown=JSON.parse(readFileSync(doorPath(root),"utf8"));
-  if(!value||typeof value!=="object"||Array.isArray(value))throw new Error("Invalid mini doors file");
-  return value as DoorFile;
+function doorsDbFile(root:string){return join(resolve(root),".sam","mini-doors.db");}
+// State convergence (UNIFICATION item 4, thirteenth store): the web-door
+// store is SQLite (.sam/mini-doors.db, the pairing two-collection
+// pattern), one row per door keyed by mini holding the door's full JSON
+// in rowid order, plus one row per session keyed by mini+session holding
+// its full JSON in rowid order. The old mini-doors.json ({doors,
+// sessions} in ONE file) was rewritten whole on every issue, disable,
+// session creation, session touch (sessionChat saves the whole file
+// even when only a session's updated_at moved), and session rotation -
+// that is, on essentially every door message the dashboard process
+// serves - and its writers are two processes (the dashboard, the door
+// server itself, and the CLI issuing / rotating / disabling on
+// demand), so two writers holding the same snapshot silently lost the
+// second one's change: a CLI disable or key rotation could revert
+// under a concurrent door message's session save, resurrecting a
+// bearer credential the operator just killed (a door key is a P10
+// credential - a reverted rotation is a live leaked link again), and
+// a session mapping could vanish and split one person's conversation
+// across two chats. Here each mutation is a single-row INSERT,
+// UPDATE, or upsert (an issue replaces exactly its one door row -
+// delete + insert, so a re-issued door moves to the end exactly as
+// the old array filter + append did - a disable updates exactly its
+// door row, a session touch updates exactly its session row), and
+// connections carry a busy_timeout (the F1 cross-process lock seam)
+// so a writer waits out a peer's transaction instead of dying on
+// "database is locked". First open imports a legacy mini-doors.json
+// (doors in order, sessions in order) and renames it
+// mini-doors.json.migrated - imported, never deleted; a malformed
+// file imports nothing and is left in place (the migrated shape
+// reads it as no doors instead of throwing, the channels/pairing
+// precedent - the old reader threw "Invalid mini doors file", and
+// doorForKey / listDoors ride the dashboard's door handler and
+// /api/status, so one torn write took every door down). A pure read
+// on an install with neither file creates nothing. The P9 backup
+// snapshots every .sam/*.db generically, so the migrated store is
+// carried with no backup change.
+const MAX_SESSIONS=1000;
+function openDoorsStore(root:string):Database.Database{
+  const dir=join(resolve(root),".sam");
+  mkdirSync(dir,{recursive:true,mode:0o700});
+  if(lstatSync(dir).isSymbolicLink())throw new Error("Unsafe SAM state directory");
+  const db=new Database(doorsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS mini_doors (mini TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS mini_door_sessions (k TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyDoors(db,root);
+  return db;
 }
-function save(root:string,file:DoorFile){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(doorPath(root),JSON.stringify(file,null,2),{mode:0o600});}
+function migrateLegacyDoors(db:Database.Database,root:string):void{
+  const doors=db.prepare("SELECT COUNT(*) AS n FROM mini_doors").get() as {n:number};
+  const sessions=db.prepare("SELECT COUNT(*) AS n FROM mini_door_sessions").get() as {n:number};
+  if(doors.n>0||sessions.n>0)return;
+  const file=doorPath(root);
+  if(!existsSync(file))return;
+  let value:unknown;
+  try{value=JSON.parse(readFileSync(file,"utf8"));}catch{return;}
+  if(!value||typeof value!=="object"||Array.isArray(value))return;
+  const legacy=value as DoorFile;
+  if(!Array.isArray(legacy.doors)||!Array.isArray(legacy.sessions))return;
+  const insertDoor=db.prepare("INSERT OR IGNORE INTO mini_doors (mini, data) VALUES (?, ?)");
+  const insertSession=db.prepare("INSERT OR IGNORE INTO mini_door_sessions (k, data) VALUES (?, ?)");
+  const importAll=db.transaction((data:DoorFile)=>{
+    for(const raw of data.doors){
+      if(!raw||typeof raw!=="object")continue;
+      const door=raw as Partial<Door>;
+      if(typeof door.mini!=="string"||!door.mini)continue;
+      insertDoor.run(door.mini,JSON.stringify(door));
+    }
+    for(const raw of data.sessions){
+      if(!raw||typeof raw!=="object")continue;
+      const session=raw as Partial<DoorSession>;
+      if(typeof session.mini!=="string"||!session.mini||typeof session.session!=="string"||!session.session)continue;
+      insertSession.run(sessionKey(session.mini,session.session),JSON.stringify(session));
+    }
+  });
+  importAll(legacy);
+  renameSync(file,file+".migrated");
+}
+function storeExists(root:string):boolean{
+  return existsSync(doorsDbFile(root))||existsSync(doorPath(root));
+}
+function sessionKey(mini:string,session:string):string{return mini+"\0"+session;}
+function rowToDoor(data:string):Door|null{
+  try{const value:unknown=JSON.parse(data);return value&&typeof value==="object"?value as Door:null;}
+  catch{return null;}
+}
+function rowToSession(data:string):DoorSession|null{
+  try{const value:unknown=JSON.parse(data);return value&&typeof value==="object"?value as DoorSession:null;}
+  catch{return null;}
+}
+function readDoors(db:Database.Database):Door[]{
+  const rows=db.prepare("SELECT data FROM mini_doors ORDER BY rowid").all() as Array<{data:string}>;
+  const items:Door[]=[];
+  for(const row of rows){const door=rowToDoor(row.data);if(door)items.push(door);}
+  return items;
+}
+function readSessions(db:Database.Database):DoorSession[]{
+  const rows=db.prepare("SELECT data FROM mini_door_sessions ORDER BY rowid").all() as Array<{data:string}>;
+  const items:DoorSession[]=[];
+  for(const row of rows){const session=rowToSession(row.data);if(session)items.push(session);}
+  return items;
+}
+function load(root:string):DoorFile{
+  if(!storeExists(root))return {doors:[],sessions:[]};
+  const db=openDoorsStore(root);
+  try{return {doors:readDoors(db),sessions:readSessions(db)};}finally{db.close();}
+}
+// The store's read door (the readPairingStore precedent): the full
+// door snapshot read through the store's own shape. A pure read on
+// an install with neither file creates nothing.
+export function readDoorStore(root:string):DoorFile{
+  return load(root);
+}
 function hashKey(key:string):string{return createHash("sha256").update(key).digest("hex");}
 export function doorExpiry(door:Door):string{
   if(door.expires_at)return door.expires_at;
@@ -51,13 +159,21 @@ export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolea
   // "sam" is the core itself: the main SAM gets a door too, not just the minis.
   if(miniName!=="sam"&&!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
   const key=randomBytes(32).toString("hex");
-  const file=load(root);
-  const rest=file.doors.filter(d=>d.mini!==miniName);
   const now=new Date();
   // Door mode (P12): an owner door is the mini's own person talking; a
   // visitor door is a customer of theirs. Records written before modes
   // existed read as owner doors, so live doors keep learning their person.
-  save(root,{...file,doors:[...rest,{mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,mode:opts?.visitor?"visitor":"owner",created_at:now.toISOString(),expires_at:new Date(now.getTime()+DOOR_KEY_TTL_DAYS*86400000).toISOString(),keyVersion:2}]});
+  const door:Door={mini:miniName,keyHash:hashKey(key),enabled:true,homeLink:!!opts?.homeLink,mode:opts?.visitor?"visitor":"owner",created_at:now.toISOString(),expires_at:new Date(now.getTime()+DOOR_KEY_TTL_DAYS*86400000).toISOString(),keyVersion:2};
+  const db=openDoorsStore(root);
+  try{
+    // Replace exactly this mini's door row: delete + insert moves a
+    // re-issued door to the end, the old array filter + append order.
+    const replace=db.transaction(()=>{
+      db.prepare("DELETE FROM mini_doors WHERE mini = ?").run(miniName);
+      db.prepare("INSERT INTO mini_doors (mini, data) VALUES (?, ?)").run(miniName,JSON.stringify(door));
+    });
+    replace();
+  }finally{db.close();}
   return key;
 }
 export function doorModeForKey(root:string,key:string):DoorMode|null{
@@ -71,9 +187,16 @@ export function doorModeForKey(root:string,key:string):DoorMode|null{
   return null;
 }
 export function disableDoor(root:string,miniName:string):boolean{
-  const file=load(root);let changed=false;
-  for(const door of file.doors)if(door.mini===miniName&&door.enabled){door.enabled=false;changed=true;}
-  if(changed)save(root,file);return changed;
+  if(!storeExists(root))return false;
+  const db=openDoorsStore(root);
+  try{
+    const row=db.prepare("SELECT data FROM mini_doors WHERE mini = ?").get(miniName) as {data:string}|undefined;
+    const door=row?rowToDoor(row.data):null;
+    if(!door||!door.enabled)return false;
+    door.enabled=false;
+    db.prepare("UPDATE mini_doors SET data = ? WHERE mini = ?").run(JSON.stringify(door),miniName);
+    return true;
+  }finally{db.close();}
 }
 export function doorEnabled(root:string,miniName:string):boolean{return load(root).doors.some(d=>d.mini===miniName&&doorLive(d));}
 function keyShapeOk(key:string):boolean{return /^[0-9a-f]{32}$/.test(key)||/^[0-9a-f]{64}$/.test(key);}
@@ -103,21 +226,43 @@ export function peekSessionChat(root:string,miniName:string,session:string):stri
 }
 export function sessionChat(root:string,miniName:string,session:string,createChat:()=>string):string{
   if(!/^[A-Za-z0-9-]{16,64}$/.test(session))throw new Error("Invalid session");
-  const file=load(root);
-  const found=file.sessions.find(s=>s.mini===miniName&&s.session===session);
-  if(found){found.updated_at=new Date().toISOString();save(root,file);return found.chatId;}
+  if(storeExists(root)){
+    const db=openDoorsStore(root);
+    try{
+      const row=db.prepare("SELECT data FROM mini_door_sessions WHERE k = ?").get(sessionKey(miniName,session)) as {data:string}|undefined;
+      const found=row?rowToSession(row.data):null;
+      if(found){
+        // The touch: exactly this session's row moves, nothing else.
+        found.updated_at=new Date().toISOString();
+        db.prepare("UPDATE mini_door_sessions SET data = ? WHERE k = ?").run(JSON.stringify(found),sessionKey(miniName,session));
+        return found.chatId;
+      }
+    }finally{db.close();}
+  }
   const chatId=createChat();
-  const sessions=[...file.sessions,{mini:miniName,session,chatId,updated_at:new Date().toISOString()}].slice(-1000);
-  save(root,{...file,sessions});
+  const record:DoorSession={mini:miniName,session,chatId,updated_at:new Date().toISOString()};
+  const db=openDoorsStore(root);
+  try{
+    const insert=db.transaction(()=>{
+      db.prepare("INSERT INTO mini_door_sessions (k, data) VALUES (?, ?)").run(sessionKey(miniName,session),JSON.stringify(record));
+      // The 1,000-session cap, pruned oldest-first (the old slice(-1000)).
+      const {n}=db.prepare("SELECT COUNT(*) AS n FROM mini_door_sessions").get() as {n:number};
+      if(n>MAX_SESSIONS)db.prepare("DELETE FROM mini_door_sessions WHERE rowid IN (SELECT rowid FROM mini_door_sessions ORDER BY rowid ASC LIMIT ?)").run(n-MAX_SESSIONS);
+    });
+    insert();
+  }finally{db.close();}
   return chatId;
 }
 export function rotateSessionChat(root:string,miniName:string,session:string,createChat:()=>string):string{
-  const file=load(root);
+  const existing=storeExists(root)?load(root):{doors:[],sessions:[]};
   const chatId=createChat();
-  const found=file.sessions.find(s=>s.mini===miniName&&s.session===session);
-  if(found){found.chatId=chatId;found.updated_at=new Date().toISOString();}
-  else file.sessions.push({mini:miniName,session,chatId,updated_at:new Date().toISOString()});
-  save(root,file);return chatId;
+  const found=existing.sessions.find(s=>s.mini===miniName&&s.session===session);
+  const record:DoorSession=found?{...found,chatId,updated_at:new Date().toISOString()}:{mini:miniName,session,chatId,updated_at:new Date().toISOString()};
+  const db=openDoorsStore(root);
+  try{
+    db.prepare("INSERT INTO mini_door_sessions (k, data) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET data = excluded.data").run(sessionKey(miniName,session),JSON.stringify(record));
+  }finally{db.close();}
+  return chatId;
 }
 export class RateLimiter {
   private hits=new Map<string,number[]>();
