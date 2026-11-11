@@ -10,6 +10,7 @@ import { sensesStatus } from "./senses.js";
 import { recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { listProviders, modelKeyEnvName, readProviderKey, resolveTurnConnection, type ConfiguredProvider } from "./providers.js";
+import { codexAuthState, type CodexAuthState } from "./codex-auth.js";
 
 export { modelKeyEnvName };
 
@@ -74,6 +75,7 @@ export interface AuthStatus {
   senses: { installed: boolean; binary: string | null };
   lastProbeAt: string | null;
   healthy: boolean;
+  codex: CodexAuthState;
 }
 
 function targets(root: string, env: NodeJS.ProcessEnv): { routes: Array<Omit<AuthTarget, "lastProbe">>; profiles: Array<Omit<AuthTarget, "lastProbe">> } {
@@ -141,6 +143,7 @@ export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): 
     senses: sensesStatus(env),
     lastProbeAt: store?.at ?? null,
     healthy: authCheckOk({ routes: routeRows }),
+    codex: codexAuthState(root),
   };
 }
 
