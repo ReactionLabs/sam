@@ -78,6 +78,7 @@ import { loadApprovalPolicy, saveApprovalPolicy, scanNeverList, neverListSummary
 import { listContacts, getContact, upsertContact, removeContact } from "./contacts.js";
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
+import { observabilityReport } from "./observability.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
@@ -477,6 +478,7 @@ program.command("relay").description("Send one prompt to 2 or more configured mo
 });
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
+program.command("observe").description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability").action(()=>output(observabilityReport(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")
