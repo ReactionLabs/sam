@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { addChannel, channels } from "./channels.js";
 import {
   PAIRING_TTL_MS, formatPairingCode, issuePairingCode, normalizePairingCode,
-  pairingAttemptCode, pairingStatus, redeemPairingCode,
+  pairingAttemptCode, pairingStatus, readPairingStore, redeemPairingCode,
 } from "./pairing.js";
 
 function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-pairing-")); }
@@ -34,9 +34,10 @@ test("issue: code shown once, only its hash stored, 1-hour expiry, re-issue reti
     const first = issuePairingCode(root, "Dip Telegram", T0);
     assert.match(first.code, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
     assert.equal(Date.parse(first.expiresAt) - T0, PAIRING_TTL_MS);
-    const stored = readFileSync(join(root, ".sam", "pairing.json"), "utf8");
+    const stored = JSON.stringify(readPairingStore(root));
     assert.equal(stored.includes(first.code.replace("-", "")), false, "plaintext code must never be stored");
     assert.equal(stored.includes(first.code), false);
+    assert.match(readPairingStore(root).codes[0].codeHash, /^[0-9a-f]{64}$/);
     const status = pairingStatus(root, T0 + 1000);
     assert.equal(status.length, 1);
     assert.equal(status[0].liveCode, true);
