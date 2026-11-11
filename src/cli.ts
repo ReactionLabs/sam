@@ -61,6 +61,7 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
+import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
@@ -691,6 +692,10 @@ operative.command("register").argument("<name>").argument("<adapter>").argument(
 operative.command("list").action(()=>{
   const reg=new OperativeRegistry(dbPath()); try{output(reg.list());}finally{reg.close();}
 });
+operative.command("status").description("Each operative with its liveness (fresh, stale, or offline). A stale declaration cannot receive new work").action(()=>{
+  const reg=new OperativeRegistry(dbPath());
+  try{output(reg.list().map(o=>({...o,liveness:operativeLiveness(o)})));}finally{reg.close();}
+});
 operative.command("state").argument("<id>").argument("<state>").action((id:string,state:string)=>{
   const reg=new OperativeRegistry(dbPath()); try{output({updated:reg.setState(id,state as OperativeState)});}finally{reg.close();}
 });
@@ -703,6 +708,25 @@ operative.command("candidates").argument("<capabilities>").action((capabilities:
   finally{reg.close();}
 });
 
+const delegateCmd=program.command("delegate").description("Delegate a repo coding job to a Codex CLI or Claude Code operative. This creates an approval card (adapter, repo, branch, prompt) and runs nothing until the owner approves. The operative works in a worktree on its own branch, never main, and does not push or open a pull request");
+delegateCmd.argument("[adapter]").option("--repo <path>","Git repository to work in").option("--branch <name>","Branch for the worktree (never main or master)").option("--prompt <text>","The job, shown on the approval card").option("--chat <id>","Chat that receives the branch, diff stat, and test result").option("--timeout <ms>","Process budget in milliseconds, 1000 to 600000","120000").option("--actor <name>","Acting profile","sam").action((adapter:string|undefined,o:{repo?:string;branch?:string;prompt?:string;chat?:string;timeout:string;actor:string})=>{
+  if(!adapter||!o.repo||!o.branch||!o.prompt)throw new Error("Usage: sam delegate <codex|claude-code> --repo <path> --branch <name> --prompt <text>");
+  const root=program.opts().workspace as string;
+  const timeoutMs=Number(o.timeout);
+  const job=proposeDelegation(root,{actor:o.actor,adapter,repo:o.repo,branch:o.branch,prompt:o.prompt,timeoutMs,chatId:o.chat??null},(detail,title)=>proposeAction(root,{actor:o.actor,kind:"delegate",title,detail,chatId:o.chat??null}));
+  output({status:"pending_owner_approval",delegation:job.id,action:job.actionId,adapter:job.adapter,repo:job.repo,branch:job.branch,prompt:job.prompt,auth:job.auth,note:"Nothing runs until the owner approves this card."});
+});
+delegateCmd.command("status").argument("[id]").description("One delegation, or every delegation when no id is given").action((id?:string)=>{
+  const root=program.opts().workspace as string;
+  if(!id){output(listDelegations(root));return;}
+  const job=getDelegation(root,id);if(!job)throw new Error("Unknown delegation: "+id);output(job);
+});
+delegateCmd.command("cancel").argument("<id>").description("Cancel a pending card or kill a running operative. Nothing is pushed").action(async(id:string)=>{
+  const root=program.opts().workspace as string;
+  const current=getDelegation(root,id);if(!current)throw new Error("Unknown delegation: "+id);
+  if(current.status==="pending"&&current.actionId){try{await decideAction(root,current.actionId,false);}catch{/* the card may already have been decided */}}
+  output(cancelDelegation(root,current.id));
+});
 const assignment=program.command("assignment").description("Durable operative assignment leases (a lease is not execution permission)");
 assignment.command("claim").argument("<operative-id>").argument("<task-id>").option("--ttl <ms>","Lease TTL in milliseconds").action((operativeId:string,taskId:string,options:{ttl?:string})=>{
   const reg=new OperativeRegistry(dbPath()); reg.close();
