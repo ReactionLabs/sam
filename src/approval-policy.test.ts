@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
+import Database from "better-sqlite3";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scanNeverList, classifyProposal, loadApprovalPolicy, saveApprovalPolicy, approvalAutoVia } from "./approval-policy.js";
@@ -145,10 +146,11 @@ test("gate: off mode auto-executes even a law, stamped auto:off - and the never-
     // A record written around the gate (straight into the store, the
     // legacy/tamper case) can never execute a hardline payload, even
     // with the owner approving and the mode off.
-    mkdirSync(join(root, ".sam"), { recursive: true });
-    const items = JSON.parse(readFileSync(join(root, ".sam", "actions.json"), "utf8"));
-    items.push({ id: "legacy-bad", actor: "sam", kind: "law", title: "Legacy", detail: "setup: dd if=x of=/dev/sda", status: "pending", createdAt: new Date().toISOString(), decidedAt: null, result: null, chatId: null, supersedes: null });
-    writeFileSync(join(root, ".sam", "actions.json"), JSON.stringify(items, null, 2));
+    const store = new Database(join(root, ".sam", "actions.db"));
+    try {
+      store.prepare("INSERT INTO actions (id, actor, kind, title, detail, status, created_at, decided_at, result, chat_id, supersedes, risk, decided_by) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL)")
+        .run("legacy-bad", "sam", "law", "Legacy", "setup: dd if=x of=/dev/sda", "pending", new Date().toISOString());
+    } finally { store.close(); }
     const blocked = await decideAction(root, "legacy-bad", true);
     assert.equal(blocked.status, "failed");
     assert.match(blocked.result ?? "", /never-list/);

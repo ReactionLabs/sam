@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
@@ -60,15 +61,71 @@ export interface ActionProposal {
 const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
-export function listActions(root: string): ActionProposal[] {
-  const file = actionsFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? (data as ActionProposal[]).map(a => ({ ...a, chatId: a.chatId ?? null, supersedes: a.supersedes ?? null, risk: a.risk ?? null, decidedBy: a.decidedBy ?? null })) : []; }
-  catch { return []; }
+function actionsDbFile(root: string): string { return join(resolve(root), ".sam", "actions.db"); }
+// State convergence (UNIFICATION item 4): the gate's store is SQLite
+// (.sam/actions.db, the MemoryStore/ChatStore pattern), one row per
+// proposal. The old actions.json was rewritten whole on every propose,
+// decide, and settle, and three processes write this store (dashboard,
+// Telegram bridge, heartbeat tick) - two writers holding the same
+// snapshot silently lost the second one's record. Here each mutation
+// is a single-row INSERT or UPDATE, so interleaved writers cannot lose
+// each other, and a crash mid-write cannot tear the store. First open
+// imports a legacy actions.json in file order (the legacy field
+// defaults listActions always applied) and renames it
+// actions.json.migrated - imported, never deleted; a malformed file
+// imports nothing and is left in place. A pure read on an install with
+// neither file creates nothing, so read-only audits stay read-only.
+const ACTION_COLUMNS = "id, actor, kind, title, detail, status, created_at, decided_at, result, chat_id, supersedes, risk, decided_by";
+interface ActionRow { id: string; actor: string; kind: string; title: string; detail: string; status: string; created_at: string; decided_at: string | null; result: string | null; chat_id: string | null; supersedes: string | null; risk: string | null; decided_by: string | null }
+function rowToProposal(row: ActionRow): ActionProposal {
+  return { id: row.id, actor: row.actor, kind: row.kind as ActionKind, title: row.title, detail: row.detail, status: row.status as ActionStatus, createdAt: row.created_at, decidedAt: row.decided_at ?? null, result: row.result ?? null, chatId: row.chat_id ?? null, supersedes: row.supersedes ?? null, risk: (row.risk ?? null) as ProposalRisk | null, decidedBy: row.decided_by ?? null };
 }
-function saveActions(root: string, items: ActionProposal[]): void {
+function proposalParams(a: ActionProposal): Record<string, string | null> {
+  return { id: a.id, actor: a.actor, kind: a.kind, title: a.title, detail: a.detail, status: a.status, created_at: a.createdAt, decided_at: a.decidedAt ?? null, result: a.result ?? null, chat_id: a.chatId ?? null, supersedes: a.supersedes ?? null, risk: a.risk ?? null, decided_by: a.decidedBy ?? null };
+}
+function openActionStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(actionsFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+  const db = new Database(actionsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.exec("CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, actor TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT, result TEXT, chat_id TEXT, supersedes TEXT, risk TEXT, decided_by TEXT)");
+  migrateLegacyActions(db, root);
+  return db;
+}
+function migrateLegacyActions(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM actions").get() as { n: number };
+  if (n > 0) return;
+  const file = actionsFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO actions (" + ACTION_COLUMNS + ") VALUES (@id, @actor, @kind, @title, @detail, @status, @created_at, @decided_at, @result, @chat_id, @supersedes, @risk, @decided_by)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const a = raw as Partial<ActionProposal>;
+      if (typeof a.id !== "string" || !a.id) continue;
+      insert.run(proposalParams({ id: a.id, actor: String(a.actor ?? ""), kind: (a.kind ?? "note") as ActionKind, title: String(a.title ?? ""), detail: String(a.detail ?? ""), status: (a.status ?? "pending") as ActionStatus, createdAt: String(a.createdAt ?? ""), decidedAt: a.decidedAt ?? null, result: a.result ?? null, chatId: a.chatId ?? null, supersedes: a.supersedes ?? null, risk: a.risk ?? null, decidedBy: a.decidedBy ?? null }));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+export function listActions(root: string): ActionProposal[] {
+  if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
+  const db = openActionStore(root);
+  try { return (db.prepare("SELECT " + ACTION_COLUMNS + " FROM actions ORDER BY rowid").all() as ActionRow[]).map(rowToProposal); }
+  finally { db.close(); }
+}
+function insertAction(root: string, item: ActionProposal): void {
+  const db = openActionStore(root);
+  try { db.prepare("INSERT INTO actions (" + ACTION_COLUMNS + ") VALUES (@id, @actor, @kind, @title, @detail, @status, @created_at, @decided_at, @result, @chat_id, @supersedes, @risk, @decided_by)").run(proposalParams(item)); }
+  finally { db.close(); }
+}
+function updateAction(root: string, item: ActionProposal): void {
+  const db = openActionStore(root);
+  try { db.prepare("UPDATE actions SET actor=@actor, kind=@kind, title=@title, detail=@detail, status=@status, created_at=@created_at, decided_at=@decided_at, result=@result, chat_id=@chat_id, supersedes=@supersedes, risk=@risk, decided_by=@decided_by WHERE id=@id").run(proposalParams(item)); }
+  finally { db.close(); }
 }
 // Profile-reference validation (found live 2026-11-09 on Dip's PC): a
 // heartbeat proposal named profile "Second Shift" - the connector's DISPLAY
@@ -209,7 +266,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
     risk: classifyProposal(input.kind, input.kind === "note" ? (input.supersedes ?? null) : null).risk,
     decidedBy: null,
   };
-  const items = listActions(root); items.push(item); saveActions(root, items);
+  insertAction(root, item);
   recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);
   return item;
 }
@@ -332,13 +389,13 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
 // via stamp ("auto:smart" / "auto:off"); it lands on the record as
 // decidedBy and shapes the ledger lines, so an auto-execution is
 // never mistaken for an owner's tap after the fact.
-async function applyDecision(root: string, items: ActionProposal[], a: ActionProposal, approve: boolean, by: string): Promise<ActionProposal> {
+async function applyDecision(root: string, a: ActionProposal, approve: boolean, by: string): Promise<ActionProposal> {
   const decider = by === "owner" ? "owner" : a.actor;
   a.decidedAt = new Date().toISOString();
   a.decidedBy = by;
   if (!approve) {
     a.status = "rejected"; a.result = by === "owner" ? "Rejected by owner" : "Rejected by " + by;
-    saveActions(root, items);
+    updateAction(root, a);
     recordActivity(root, decider, "rejected", a.kind + ": " + a.title);
     return a;
   }
@@ -349,7 +406,7 @@ async function applyDecision(root: string, items: ActionProposal[], a: ActionPro
   if (neverHit) {
     a.status = "failed";
     a.result = "Refused by the never-list at decision time (" + neverHit.id + "): " + neverHit.label + " can never execute in any approval mode";
-    saveActions(root, items);
+    updateAction(root, a);
     recordActivity(root, decider, "never-list", "Blocked execution of " + a.kind + " " + a.id + " (" + neverHit.id + "): " + a.title.slice(0, 120));
     return a;
   }
@@ -362,7 +419,7 @@ async function applyDecision(root: string, items: ActionProposal[], a: ActionPro
       // owner's own approval of the same proposal executes as-is.
       a.status = "pending"; a.decidedAt = null; a.decidedBy = null;
       a.result = "Auto-install held by the skill content scan (" + e.message + ") - waiting for the owner, who can approve it as-is or install it from the CLI";
-      saveActions(root, items);
+      updateAction(root, a);
       recordActivity(root, a.actor, "skill-scan-hold", a.kind + ": " + a.title + " - " + e.message);
       return a;
     }
@@ -386,33 +443,32 @@ async function applyDecision(root: string, items: ActionProposal[], a: ActionPro
         }
       } catch { /* detail was not JSON; the failure result stands as-is */ }
     }
-    saveActions(root, items);
+    updateAction(root, a);
     recordActivity(root, decider, "failed", a.kind + ": " + a.title + " - " + (a.result ?? ""));
     if (reproposal) {
       try {
         const existing = listActions(root).find(x => x.status === "pending" && x.kind === "heartbeat" && x.actor === a.actor && x.detail === reproposal!.detail);
         const np = existing ?? proposeAction(root, { actor: a.actor, kind: a.kind, title: a.title, detail: reproposal.detail, chatId: a.chatId });
-        const fresh = listActions(root); const self = fresh.find(x => x.id === a.id);
+        const self = listActions(root).find(x => x.id === a.id);
         if (self) {
           self.result = (self.result ?? "") + " Corrected re-proposal pending approval: " + np.id + " (profile " + reproposal.fix + ")";
-          saveActions(root, fresh); a.result = self.result;
+          updateAction(root, self); a.result = self.result;
         }
         if (!existing) recordActivity(root, decider, "reproposal", "Corrected re-proposal for failed " + a.kind + ": " + a.title + " -> profile " + reproposal.fix);
       } catch { /* a re-proposal that itself refuses (e.g. the never-list) leaves the failure result standing */ }
     }
     return a;
   }
-  saveActions(root, items);
+  updateAction(root, a);
   recordActivity(root, decider, by === "owner" ? "approved" : "auto-approved", a.kind + ": " + a.title + " - " + (a.result ?? "") + (by === "owner" ? "" : " [" + by + "]"));
   return a;
 }
 
 export async function decideAction(root: string, id: string, approve: boolean): Promise<ActionProposal> {
-  const items = listActions(root);
-  const a = items.find(x => x.id === id);
+  const a = listActions(root).find(x => x.id === id);
   if (!a) throw new Error("Unknown action");
   if (a.status !== "pending") throw new Error("Action already decided");
-  return applyDecision(root, items, a, approve, "owner");
+  return applyDecision(root, a, approve, "owner");
 }
 
 // Approvals engine settle (Phase D item 1): execute every pending
@@ -431,10 +487,9 @@ export async function settleAutoApprovals(root: string, onlyId?: string): Promis
   for (const candidate of candidates) {
     const auto = approvalAutoVia(policy, candidate.kind, candidate.supersedes);
     if (!auto) continue;
-    const items = listActions(root);
-    const fresh = items.find(x => x.id === candidate.id);
+    const fresh = listActions(root).find(x => x.id === candidate.id);
     if (!fresh || fresh.status !== "pending") continue;
-    settled.push(await applyDecision(root, items, fresh, true, auto.via));
+    settled.push(await applyDecision(root, fresh, true, auto.via));
   }
   return settled;
 }
