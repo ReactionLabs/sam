@@ -8,7 +8,8 @@ import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./co
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
-import { readProviderKey, resolveTurnConnection } from "./providers.js";
+import { readProviderKey } from "./providers.js";
+import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
 import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
@@ -81,19 +82,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
-  // Model routing (P11) plus multi-provider: the route picks the tier's
-  // model on the env provider; a profile model pin wins; a profile
-  // provider pin selects that provider's endpoint and key name. Spend
-  // is recorded against the model that actually ran.
-  const conn=resolveTurnConnection(root,process.env,active?{provider:active.provider??null,model:active.model??null}:null,route);
-  if(conn.unavailable)throw Error(conn.unavailable);
-  if(!conn.endpoint)throw Error("Model not configured");
-  const model=conn.model;
-  if(!model)throw Error("Model not configured");
-  const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",60000);
-  const tier=conn.tier;
+  // Primary route, then the profile's configured fallbacks. With no
+  // fallback, a missing primary still dies here - before the user
+  // message is stored - exactly as a single-provider turn always did.
+  const routes=turnRoutes(root,process.env,profileName,active?{provider:active.provider??null,model:active.model??null}:null,route);
+  if(routes.length===1&&(routes[0].unavailable||!routes[0].endpoint||!routes[0].model))throw Error(routes[0].unavailable??"Model not configured");
   let turnTokens=0;
-  provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
   // Session caps (harness item 3): a chat that has spent today's
   // turn or token cap closes this turn gracefully with NO model
   // call. The exchange still persists, so the owner sees the pause
@@ -180,26 +174,45 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const messages=[{role:"system" as const,content:systemContent},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
     ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content}];
-  let reply:string;
-  try{
-  if(active?.connector_id){
-    const pinned=connectors(root).find(c=>c.id===active.connector_id);
-    if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
-  }else if(chatAgent){
-    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
-  }else{
-    const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
-    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
+  let reply="";
+  let answered=false;
+  for(let i=0;i<routes.length;i++){
+    const conn=routes[i];
+    const guard:TurnToolGuard={toolsStarted:false};
+    try{
+      if(conn.unavailable)throw Error(conn.unavailable);
+      if(!conn.endpoint||!conn.model)throw Error("Model not configured");
+      const model=conn.model;
+      const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",60000);
+      const tier=conn.tier;
+      provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
+      if(active?.connector_id){
+        const pinned=connectors(root).find(c=>c.id===active.connector_id);
+        if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
+        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
+      }else if(chatAgent){
+        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+      }else{
+        const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
+        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+      }
+      answered=true;
+      break;
+    }catch(error){
+      const next=routes[i+1];
+      if(!next||!failoverEligible(error,guard)){
+        // A turn that dies mid-flight still spent what it spent; the
+        // session ledger records it so the caps see the true total.
+        if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
+        recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+        throw error;
+      }
+      const reason=error instanceof Error?error.message:String(error);
+      recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+    }
   }
-  }catch(error){
-    // A turn that dies mid-flight still spent what it spent; the
-    // session ledger records it so the caps see the true total.
-    if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
-    recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-    throw error;
-  }
+  if(!answered)throw Error("Model not configured");
   const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is

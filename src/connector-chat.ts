@@ -18,7 +18,7 @@ function safeArgs(raw:Record<string,unknown>):Record<string,unknown>|null{
  return out;
 }
 export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string; userMessageId?:string }
-export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat")):Promise<string>{
+export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat"),guard?:{toolsStarted:boolean}):Promise<string>{
  const connected=connectors(root).filter(c=>c.enabled&&!!process.env[c.tokenEnv]&&(!connectorId||c.id===connectorId));
  if(!connected.length)throw Error(connectorId?"Profile connector unavailable":"No configured MCP connector credentials");
  // Without a profile pin, only one connector may be live for chat; never silently route across tenants.
@@ -73,6 +73,9 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
   if(!turn.calls.length)return turn.content??"No response.";
+  // Failover may only happen before any tool runs. Tool calls commit
+  // this route; a later provider error must not replay them elsewhere.
+  if(guard)guard.toolsStarted=true;
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   // Classify in order, then run the round's real calls CONCURRENTLY
   // (S4 latency: independent results requested in one step cost the
