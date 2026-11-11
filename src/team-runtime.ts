@@ -3,7 +3,14 @@ import { executeWorkspaceTool } from "./workspace-tools.js";
 import { searchWeb } from "./web-search.js";
 import { converse, type ModelProvider } from "./model-conversation.js";
 import { runMemoryToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { OperativeRegistry } from "./operatives.js";
+import { AssignmentLeases } from "./assignment-leases.js";
+import { profileToolNames } from "./subagents.js";
+import { recordActivity } from "./activity.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
 
 export interface TeamMember { name:string; role:string }
 export interface TeamRunResult { chatId:string; research:string; review:string; summary:string }
@@ -69,4 +76,273 @@ export async function runResearchTeam(workspace:string,chatId:string,objective:s
   db.addEvent(chatId,"sam","result",summary.message.content.slice(0,12000));
   return {chatId,research:research.message.content,review:review.message.content,summary:summary.message.content};
  } finally { db.close(); }
+}
+
+// Standing team (item 10, expanded). The research exchange above stays.
+// A lead now keeps a roster of profiles, routes a task to one of them
+// by role, and cannot call the work done until a reviewer (a different
+// member, with their own model pin) approves it or the round cap hits.
+// Consequential actions are not executed here. They stay on the gate.
+
+export const TEAM_ROLES = ["builder", "researcher", "qa", "reviewer"] as const;
+export type TeamRole = (typeof TEAM_ROLES)[number];
+export interface StandingMember {
+  name: string;
+  role: TeamRole;
+  capabilities: string[];
+  tools: string[];
+  model: string | null;
+  budget: { maxCalls: number };
+}
+export interface TeamMessage { at: string; runId: string; from: string; to: string; kind: "assignment" | "work" | "review" | "result"; text: string }
+export interface TeamRunRecord {
+  id: string;
+  lead: string;
+  task: string;
+  status: "running" | "done" | "blocked" | "failed";
+  worker: string;
+  reviewer: string;
+  workerModel: string;
+  reviewerModel: string;
+  rounds: number;
+  calls: number;
+  budget: { maxRounds: number; maxCalls: number };
+  verdict: "approve" | "request-changes" | null;
+  result: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  chatId: string | null;
+}
+export interface ReviewVerdict { verdict: "approve" | "request-changes"; reasons: string }
+export type StandingCompleter = (input: { member: StandingMember; model: string; messages: Array<{ role: "system" | "user"; content: string }> }) => Promise<string>;
+
+const nameRe = /^[a-z][a-z0-9._-]{0,63}$/;
+
+function membersPath(root: string) { return join(resolve(root), ".sam", "team-members.json"); }
+function runsPath(root: string) { return join(resolve(root), ".sam", "team-runs.json"); }
+function messagesPath(root: string) { return join(resolve(root), ".sam", "team-messages.jsonl"); }
+function registryPath(root: string) { return join(resolve(root), ".sam", "missions.db"); }
+
+function readMembers(root: string): StandingMember[] {
+  if (!existsSync(membersPath(root))) return [];
+  try {
+    const data = JSON.parse(readFileSync(membersPath(root), "utf8")) as unknown;
+    return Array.isArray(data) ? data as StandingMember[] : [];
+  } catch { return []; }
+}
+function saveMembers(root: string, items: StandingMember[]): void {
+  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+  writeFileSync(membersPath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+}
+function readRuns(root: string): TeamRunRecord[] {
+  if (!existsSync(runsPath(root))) return [];
+  try {
+    const data = JSON.parse(readFileSync(runsPath(root), "utf8")) as unknown;
+    return Array.isArray(data) ? data as TeamRunRecord[] : [];
+  } catch { return []; }
+}
+function saveRuns(root: string, items: TeamRunRecord[]): void {
+  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+  writeFileSync(runsPath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+}
+
+export function listTeamMembers(root: string): StandingMember[] { return readMembers(root); }
+export function listTeamRuns(root: string): TeamRunRecord[] { return readRuns(root); }
+export function listTeamMessages(root: string, limit = 40): TeamMessage[] {
+  if (!existsSync(messagesPath(root))) return [];
+  try {
+    return readFileSync(messagesPath(root), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as TeamMessage).slice(-limit);
+  } catch { return []; }
+}
+export function teamStatus(root: string): { members: StandingMember[]; runs: TeamRunRecord[]; messages: TeamMessage[] } {
+  return { members: listTeamMembers(root), runs: listTeamRuns(root).slice(-10), messages: listTeamMessages(root) };
+}
+
+function ledger(root: string, message: TeamMessage, chatId: string | null): void {
+  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+  writeFileSync(messagesPath(root), JSON.stringify(message) + "\n", { flag: "a", mode: 0o600 });
+  recordActivity(root, message.from, "team-" + message.kind, message.from + " -> " + message.to + ": " + message.text.replace(/\s+/g, " ").slice(0, 220));
+  if (!chatId) return;
+  try {
+    const db = new ChatStore(root);
+    try { db.addEvent(chatId, message.from, message.kind === "work" || message.kind === "review" ? "message" : message.kind === "assignment" ? "assignment" : "result", message.to + ": " + message.text.slice(0, 4000)); }
+    finally { db.close(); }
+  } catch { /* the jsonl is the record the status API reads */ }
+}
+
+export function parseReview(text: string): ReviewVerdict {
+  const first = (text.split("\n")[0] ?? "").trim();
+  if (/^verdict:\s*approve\b/i.test(first)) return { verdict: "approve", reasons: text.trim() };
+  if (/^verdict:\s*request-changes\b/i.test(first)) return { verdict: "request-changes", reasons: text.trim() };
+  return { verdict: "request-changes", reasons: "Reviewer did not return a clear approve verdict.\n" + text.trim() };
+}
+
+export function routeTask(members: readonly StandingMember[], task: string): { worker: StandingMember; reviewer: StandingMember } {
+  const reviewer = members.find(m => m.role === "reviewer");
+  if (!reviewer) throw new Error("A standing team needs a reviewer");
+  const producers = members.filter(m => m.name !== reviewer.name && m.role !== "reviewer");
+  let worker = producers.find(m => m.role === "builder") ?? producers[0];
+  if (/research|find|compare|look up/i.test(task)) worker = producers.find(m => m.role === "researcher") ?? worker;
+  if (/\bqa\b|test|bug/i.test(task)) worker = producers.find(m => m.role === "qa") ?? worker;
+  if (!worker) throw new Error("No team member can take this task");
+  if (worker.name === reviewer.name) throw new Error("The reviewer cannot review their own work");
+  return { worker, reviewer };
+}
+
+export function addTeamMember(root: string, input: { name: string; role: string; tools?: string[]; model?: string | null; capabilities?: string[]; maxCalls?: number }): StandingMember {
+  if (!nameRe.test(input.name)) throw new Error("Invalid member name");
+  if (!TEAM_ROLES.includes(input.role as TeamRole)) throw new Error("Role must be one of: " + TEAM_ROLES.join(", "));
+  const known = new Set(profileToolNames());
+  const tools = [...new Set(input.tools ?? [])];
+  const widened = tools.filter(name => !known.has(name));
+  if (widened.length) throw new Error("Unknown tool in allowlist: " + widened.join(", "));
+  const maxCalls = input.maxCalls ?? 4;
+  if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 8) throw new Error("Member call budget must be 1 to 8");
+  const role = input.role as TeamRole;
+  const capabilities = [...new Set(input.capabilities ?? [role === "builder" ? "build" : role === "researcher" ? "research" : role === "qa" ? "qa" : "review"])];
+  if (capabilities.some(c => !nameRe.test(c))) throw new Error("Invalid capability");
+  const items = readMembers(root);
+  if (items.some(m => m.name === input.name)) throw new Error("Team member already exists: " + input.name);
+  const db = new ChatStore(root);
+  try {
+    if (!db.agents().some(a => a.name === input.name)) db.createAgent(input.name, "Standing team " + role + ". Own memory, own model pin, own tool list.");
+    if (input.model) db.setAgentModel(input.name, input.model);
+  } finally { db.close(); }
+  const reg = new OperativeRegistry(registryPath(root));
+  try {
+    if (!reg.list().some(o => o.name === input.name)) reg.register({ name: input.name, adapter: "team", capabilities, maxConcurrency: 1 });
+  } finally { reg.close(); }
+  const member: StandingMember = { name: input.name, role, capabilities, tools, model: input.model ?? null, budget: { maxCalls } };
+  saveMembers(root, [...items, member]);
+  recordActivity(root, "sam", "team-member", "Added " + member.name + " as " + member.role + (member.model ? " on " + member.model : ""));
+  return member;
+}
+
+export function removeTeamMember(root: string, name: string): boolean {
+  const items = readMembers(root);
+  if (!items.some(m => m.name === name)) return false;
+  saveMembers(root, items.filter(m => m.name !== name));
+  const reg = new OperativeRegistry(registryPath(root));
+  try {
+    const found = reg.list().find(o => o.name === name);
+    if (found) reg.setState(found.id, "offline");
+  } finally { reg.close(); }
+  recordActivity(root, "sam", "team-member", "Removed team member " + name);
+  return true;
+}
+
+function modelFor(member: StandingMember, fallback: string): string { return member.model?.trim() || fallback; }
+
+async function defaultStandingComplete(env: NodeJS.ProcessEnv): Promise<StandingCompleter> {
+  const providerName = env.SAM_MODEL_PROVIDER ?? "";
+  const endpoint = env.SAM_MODEL_ENDPOINT?.trim() || (providerName === "minimax" ? "https://api.minimax.io/v1/chat/completions" : "");
+  const key = env.SAM_MODEL_API_KEY?.trim() || (providerName === "minimax" ? env.MINIMAX_API_KEY?.trim() : "") || "";
+  const fallback = env.SAM_MODEL?.trim() || "";
+  if (!endpoint || !fallback) throw new Error("Model not configured");
+  const provider = new OpenAICompatibleProvider(endpoint, key, 60_000);
+  return async (input) => {
+    const response = await provider.complete({ model: input.model || fallback, messages: input.messages });
+    return response.message.content;
+  };
+}
+
+export async function runStandingTeam(root: string, task: string, opts?: { lead?: string; maxRounds?: number; complete?: StandingCompleter; env?: NodeJS.ProcessEnv }): Promise<TeamRunRecord> {
+  const text = task.trim();
+  if (!text || text.length > 2000) throw new Error("Team task must be 1 to 2000 characters");
+  const maxRounds = opts?.maxRounds ?? 3;
+  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 4) throw new Error("Review rounds must be 1 to 4");
+  const members = readMembers(root);
+  const { worker, reviewer } = routeTask(members, text);
+  const env = opts?.env ?? process.env;
+  const fallback = env.SAM_MODEL?.trim() || "offline-test";
+  const workerModel = modelFor(worker, fallback);
+  const reviewerModel = modelFor(reviewer, fallback);
+  const lead = opts?.lead?.trim() || "sam";
+  const run: TeamRunRecord = {
+    id: randomUUID(), lead, task: text, status: "running", worker: worker.name, reviewer: reviewer.name,
+    workerModel, reviewerModel, rounds: 0, calls: 0, budget: { maxRounds, maxCalls: worker.budget.maxCalls + reviewer.budget.maxCalls },
+    verdict: null, result: null, createdAt: new Date().toISOString(), finishedAt: null, chatId: null,
+  };
+  const db = new ChatStore(root);
+  try { run.chatId = db.create("Team · " + text.slice(0, 80), lead === "sam" ? null : lead).id; }
+  finally { db.close(); }
+  saveRuns(root, [...readRuns(root), run]);
+  const reg = new OperativeRegistry(registryPath(root));
+  let leaseId: string | null = null;
+  let operativeId = "";
+  let generation = 0;
+  try {
+    const operative = reg.list().find(o => o.name === worker.name);
+    if (!operative) throw new Error("Worker is not a registered operative");
+    operativeId = operative.id;
+    if (!reg.setState(operative.id, "available")) throw new Error("Worker operative could not be marked available");
+    if (!reg.heartbeat(operative.id)) throw new Error("Worker operative could not heartbeat");
+    if (!reg.reserve(operative.id)) throw new Error("Worker operative is at capacity");
+    const leases = new AssignmentLeases(registryPath(root));
+    try {
+      const lease = leases.claim(operative.id, run.id, Date.now(), 120_000);
+      if (!lease) throw new Error("No assignment lease for the worker");
+      leaseId = lease.id;
+      generation = lease.generation;
+    } finally { leases.close(); }
+    ledger(root, { at: new Date().toISOString(), runId: run.id, from: lead, to: worker.name, kind: "assignment", text: text }, run.chatId);
+    const complete = opts?.complete ?? await defaultStandingComplete(env);
+    let product = "";
+    let notes = "";
+    let workerCalls = 0;
+    let reviewerCalls = 0;
+    for (let round = 1; round <= maxRounds; round++) {
+      if (workerCalls >= worker.budget.maxCalls || reviewerCalls >= reviewer.budget.maxCalls || run.calls >= run.budget.maxCalls) {
+        run.status = "blocked";
+        run.result = "Team run stopped: member or team call budget exhausted.";
+        break;
+      }
+      const workerText = await complete({
+        member: worker, model: workerModel,
+        messages: [
+          { role: "system", content: "You are " + worker.name + ", the team's " + worker.role + ". Tools you may use, and no others: " + (worker.tools.join(", ") || "(none)") + ". Do the task. Do not approve your own work. Do not claim a consequential action ran; propose it and wait." },
+          { role: "user", content: round === 1 ? text : "Revise this work.\n\nPrevious work:\n" + product + "\n\nReviewer requested changes:\n" + notes },
+        ],
+      });
+      workerCalls++; run.calls++; product = workerText.trim();
+      ledger(root, { at: new Date().toISOString(), runId: run.id, from: worker.name, to: reviewer.name, kind: "work", text: product }, run.chatId);
+      const reviewText = await complete({
+        member: reviewer, model: reviewerModel,
+        messages: [
+          { role: "system", content: "You are " + reviewer.name + ", the team's reviewer, on model " + reviewerModel + ". You did not write this work. Reply with a first line of exactly `VERDICT: approve` or `VERDICT: request-changes`, then the reasons. Approve only when the work meets the task. You have no tools." },
+          { role: "user", content: "Task: " + text + "\n\nWork from " + worker.name + ":\n" + product },
+        ],
+      });
+      reviewerCalls++; run.calls++; run.rounds = round;
+      const verdict = parseReview(reviewText);
+      run.verdict = verdict.verdict;
+      notes = verdict.reasons;
+      ledger(root, { at: new Date().toISOString(), runId: run.id, from: reviewer.name, to: worker.name, kind: "review", text: notes }, run.chatId);
+      if (verdict.verdict === "approve") {
+        run.status = "done";
+        run.result = product;
+        break;
+      }
+    }
+    if (run.status === "running") {
+      run.status = "blocked";
+      run.result = "Review did not approve within " + maxRounds + " rounds.\n\nLast work:\n" + product + "\n\nLast review:\n" + notes;
+    }
+    ledger(root, { at: new Date().toISOString(), runId: run.id, from: lead, to: lead, kind: "result", text: (run.result ?? "").slice(0, 2000) }, run.chatId);
+  } catch (error) {
+    run.status = "failed";
+    run.result = error instanceof Error ? error.message : "Team run failed";
+    recordActivity(root, lead, "team-failed", run.result.slice(0, 220));
+  } finally {
+    try { if (operativeId) reg.release(operativeId); } catch { /* capacity release is best-effort */ }
+    reg.close();
+    if (leaseId && operativeId) {
+      const leases = new AssignmentLeases(registryPath(root));
+      try { leases.finish(leaseId, operativeId, generation); } finally { leases.close(); }
+    }
+  }
+  run.finishedAt = new Date().toISOString();
+  saveRuns(root, readRuns(root).map(item => item.id === run.id ? run : item));
+  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")");
+  return run;
 }

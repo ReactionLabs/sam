@@ -41,7 +41,7 @@ import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
-import { runResearchTeam } from "./team-runtime.js";
+import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamStatus } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill, setSkillAllowlist, skillAllowlist, skillsForProfile } from "./skills.js";
@@ -463,16 +463,38 @@ chats.command("react").argument("<chatId>").argument("<messageId>").argument("<e
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
 chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
-const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
-teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").action(async(o:{chat:string;objective:string;live:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean})=>{
- const selected=process.env.SAM_MODEL_PROVIDER??"";
- const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
- const model=process.env.SAM_MODEL;
- if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
- const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
- if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
- const provider=new OpenAICompatibleProvider(endpoint,key,60000);
- output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined,agentTools:!!o.agentTools}));
+const teams=program.command("team").description("Standing team: a lead routes a task to a role member, then a reviewer must approve it. The older research exchange remains when --chat and --objective are set");
+const teamMembers=teams.command("member").description("Standing members: each is a profile with a role, its own memory, a model pin, and a tool allowlist");
+teamMembers.command("add").argument("<name>").argument("<role>","builder, researcher, qa, or reviewer").option("--tools <names>","Comma-separated tool allowlist").option("--model <id>","Model pin for this member").option("--calls <n>","Max model calls this member may spend on one run","4").action((name:string,role:string,o:{tools?:string;model?:string;calls:string})=>{
+  output(addTeamMember(program.opts().workspace,{name,role,tools:o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):[],model:o.model??null,maxCalls:Number(o.calls)}));
+});
+teamMembers.command("list").action(()=>output(listTeamMembers(program.opts().workspace)));
+teamMembers.command("remove").argument("<name>").action((name:string)=>output({removed:removeTeamMember(program.opts().workspace,name)}));
+teams.command("run").argument("[task]").option("--chat <uuid>","Existing chat id for the legacy research exchange").option("--objective <text>","Mission objective for the legacy research exchange").option("--live","Explicitly authorize model calls for the legacy research exchange").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").option("--lead <name>","Lead profile for a standing-team run","sam").option("--rounds <n>","Review rounds before the run stops unapproved","3").description("Standing team: sam team run <task>. Legacy research exchange: sam team run --chat --objective --live").action(async(task:string|undefined,o:{chat?:string;objective?:string;live?:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean;lead:string;rounds:string})=>{
+ if(o.chat||o.objective||o.live){
+  if(!o.chat||!o.objective||!o.live)throw new Error("The research exchange needs --chat, --objective, and --live");
+  const selected=process.env.SAM_MODEL_PROVIDER??"";
+  const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+  const model=process.env.SAM_MODEL;
+  if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
+  const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+  if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
+  const provider=new OpenAICompatibleProvider(endpoint,key,60000);
+  output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined,agentTools:!!o.agentTools}));
+  return;
+ }
+ if(!task)throw new Error("Usage: sam team run <task>");
+ output(await runStandingTeam(program.opts().workspace,task,{lead:o.lead,maxRounds:Number(o.rounds)}));
+});
+teams.command("status").description("Standing members, recent runs, and agent-to-agent messages").action(()=>output(teamStatus(program.opts().workspace)));
+const reviewCmd=program.command("review").description("Reviewer verdicts from standing team runs");
+reviewCmd.command("list").description("Recent runs with their verdict").action(()=>output(listTeamRuns(program.opts().workspace).map(run=>({id:run.id,status:run.status,worker:run.worker,reviewer:run.reviewer,rounds:run.rounds,verdict:run.verdict,workerModel:run.workerModel,reviewerModel:run.reviewerModel}))));
+reviewCmd.command("show").argument("[id]").description("One run's review trail, or the latest").action((id?:string)=>{
+  const runs=listTeamRuns(program.opts().workspace);
+  const run=id?runs.find(item=>item.id===id):runs.at(-1);
+  if(!run)throw new Error(id?"Unknown team run":"No team runs yet");
+  const messages=teamStatus(program.opts().workspace).messages.filter(message=>message.runId===run.id);
+  output({run,messages});
 });
 const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
 schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
