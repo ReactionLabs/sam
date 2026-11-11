@@ -8,6 +8,7 @@ import { engineBinary } from "./engine.js";
 import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { recordActivity } from "./activity.js";
+import { codexAuthState, type CodexAuthState } from "./codex-auth.js";
 
 // CLI dressing item 2 (Dip, 2026-11-10; OpenClaw borrow, research doc
 // section 6 item 3): an auth status / probe surface over the routes
@@ -65,6 +66,7 @@ export interface AuthStatus {
   senses: { installed: boolean; binary: string | null };
   lastProbeAt: string | null;
   healthy: boolean;
+  codex: CodexAuthState;
 }
 
 // The env NAME that carries the model key for this install - the
@@ -138,6 +140,7 @@ export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): 
     senses: sensesStatus(env),
     lastProbeAt: store?.at ?? null,
     healthy: authCheckOk({ routes: routeRows }),
+    codex: codexAuthState(root),
   };
 }
 
