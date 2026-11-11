@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
-import { addHeartbeatJob, consolidatePreferences, heartbeatFactSignature, heartbeatFactSignatureString, heartbeatJobs, heartbeatLog, heartbeatOutputHash, heartbeatOutputsEquivalent, normalizeHeartbeatOutput, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
+import { addHeartbeatJob, consolidatePreferences, heartbeatFactSignature, heartbeatFactSignatureString, heartbeatJobs, heartbeatLog, heartbeatOutputHash, heartbeatOutputsEquivalent, heartbeatState, normalizeHeartbeatOutput, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
 import { PreferenceStore } from "./preferences.js";
 import { readActivity } from "./activity.js";
 
@@ -164,8 +164,8 @@ test("heartbeat diffing: a paraphrased repeat stays silent, a fact change delive
   const third=await runHeartbeat(root,deps);
   assert.deepEqual(third.changed,["stack watch"]);
   assert.equal(deliveries.length,2);
-  const state=JSON.parse(readFileSync(join(root,".sam","heartbeat-state.json"),"utf8")) as {outputs:Record<string,{hash:string;sig:string}>};
-  assert.equal(Object.values(state.outputs)[0].sig,heartbeatFactSignatureString(reply));
+  const state=heartbeatState(root);
+  assert.equal(Object.values(state.outputs??{})[0].sig,heartbeatFactSignatureString(reply));
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 
@@ -207,7 +207,7 @@ test("heartbeat diffing: unchanged output stays silent, changed output delivers 
   assert.deepEqual(third.changed,["stack watch"]);
   assert.equal(deliveries.length,2);
   assert.equal(readActivity(root,50).filter(a=>a.kind==="heartbeat").length,2);
-  const state=JSON.parse(readFileSync(join(root,".sam","heartbeat-state.json"),"utf8")) as {outputs:Record<string,{hash:string}>};
-  assert.equal(Object.values(state.outputs)[0].hash,heartbeatOutputHash(reply));
+  const state=heartbeatState(root);
+  assert.equal(Object.values(state.outputs??{})[0].hash,heartbeatOutputHash(reply));
  }finally{rmSync(root,{recursive:true,force:true});}
 });

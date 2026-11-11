@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
@@ -44,6 +44,7 @@ export interface HeartbeatJob { id:string; name:string; minutes:number; profile:
 function jobsPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.json");}
 function jobsDbPath(root:string){return join(resolve(root),".sam","heartbeat-jobs.db");}
 function statePath(root:string){return join(resolve(root),".sam","heartbeat-state.json");}
+function stateDbPath(root:string){return join(resolve(root),".sam","heartbeat-state.db");}
 function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl");}
 // State convergence (UNIFICATION item 4, second store): the job
 // store is SQLite (.sam/heartbeat-jobs.db, the actions pattern),
@@ -190,14 +191,80 @@ export function removeHeartbeatJob(root:string,id:string):boolean{
 }
 export interface HeartbeatOutputRecord { hash:string; at:string; preview:string; sig?:string }
 interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; outputs?:Record<string,HeartbeatOutputRecord> }
-function loadState(root:string):HeartbeatState{
- if(!existsSync(statePath(root)))return {chats:{},lastTick:null,outputs:{}};
- const value:unknown=JSON.parse(readFileSync(statePath(root),"utf8"));
- if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid heartbeat state");
- const state=value as HeartbeatState;
- if(!state.outputs||typeof state.outputs!=="object"||Array.isArray(state.outputs))state.outputs={};
- return state;
+// State convergence (UNIFICATION item 4, third store): the tick's
+// diff/watermark state is SQLite (.sam/heartbeat-state.db, the
+// actions/jobs pattern), one keyed row per part - "meta" holds
+// lastTick, "chat:<id>" one consolidation watermark, "output:<id>"
+// one job's P3 diff record (its JSON). The old
+// heartbeat-state.json was rewritten whole on every consolidation
+// and every tick that recorded an output, and two tick processes
+// (the systemd timer's, a manual CLI tick's) holding the same
+// snapshot silently lost the second writer's parts: watermarks
+// reverted (consolidation re-scans and re-notes captured
+// messages) or a job's diff baseline reverted (an unchanged stack
+// re-announces as changed - the noise P3 killed). Here each save
+// upserts exactly the parts the in-memory state carries, in one
+// transaction, and connections carry a busy_timeout (the F1
+// cross-process lock seam) so a writer waits out a peer's
+// transaction instead of dying on "database is locked". First
+// open imports a legacy heartbeat-state.json and renames it
+// heartbeat-state.json.migrated - imported, never deleted; a
+// malformed file imports nothing and is left in place (the
+// actions/jobs contract; the old reader threw on one, which
+// killed the whole tick). A pure read on an install with neither
+// file creates nothing, so read-only audits stay read-only. The
+// P9 backup snapshots every .sam/*.db generically, so the
+// migrated store is carried with no backup change.
+function openStateStore(root:string):Database.Database{
+ mkdirSync(join(resolve(root),".sam"),{recursive:true});
+ const db=new Database(stateDbPath(root));
+ db.pragma("journal_mode = WAL");
+ db.pragma("busy_timeout = 5000");
+ db.exec("CREATE TABLE IF NOT EXISTS heartbeat_state (key TEXT PRIMARY KEY, data TEXT NOT NULL)");
+ migrateLegacyState(db,root);
+ return db;
 }
+function migrateLegacyState(db:Database.Database,root:string):void{
+ const {n}=db.prepare("SELECT COUNT(*) AS n FROM heartbeat_state").get() as {n:number};
+ if(n>0)return;
+ const file=statePath(root);
+ if(!existsSync(file))return;
+ let value:unknown;
+ try{value=JSON.parse(readFileSync(file,"utf8"));}catch{return;}
+ if(!value||typeof value!=="object"||Array.isArray(value))return;
+ const legacy=value as Partial<HeartbeatState>;
+ const upsert=db.prepare("INSERT OR IGNORE INTO heartbeat_state (key, data) VALUES (?, ?)");
+ const importAll=db.transaction(()=>{
+  if(typeof legacy.lastTick==="string")upsert.run("meta",JSON.stringify({lastTick:legacy.lastTick}));
+  if(legacy.chats&&typeof legacy.chats==="object"&&!Array.isArray(legacy.chats)){
+   for(const [chatId,watermark] of Object.entries(legacy.chats))if(typeof watermark==="string")upsert.run("chat:"+chatId,JSON.stringify(watermark));
+  }
+  if(legacy.outputs&&typeof legacy.outputs==="object"&&!Array.isArray(legacy.outputs)){
+   for(const [jobId,record] of Object.entries(legacy.outputs))if(record&&typeof record==="object")upsert.run("output:"+jobId,JSON.stringify(record));
+  }
+ });
+ importAll();
+ renameSync(file,file+".migrated");
+}
+function loadState(root:string):HeartbeatState{
+ if(!existsSync(stateDbPath(root))&&!existsSync(statePath(root)))return {chats:{},lastTick:null,outputs:{}};
+ const db=openStateStore(root);
+ try{
+  const state:HeartbeatState={chats:{},lastTick:null,outputs:{}};
+  const rows=db.prepare("SELECT key, data FROM heartbeat_state").all() as Array<{key:string;data:string}>;
+  for(const row of rows){
+   try{
+    if(row.key==="meta"){const meta=JSON.parse(row.data) as {lastTick?:unknown};if(typeof meta.lastTick==="string")state.lastTick=meta.lastTick;}
+    else if(row.key.startsWith("chat:")){const watermark:unknown=JSON.parse(row.data);if(typeof watermark==="string")(state.chats as Record<string,string>)[row.key.slice(5)]=watermark;}
+    else if(row.key.startsWith("output:")){const record:unknown=JSON.parse(row.data);if(record&&typeof record==="object")(state.outputs as Record<string,HeartbeatOutputRecord>)[row.key.slice(7)]=record as HeartbeatOutputRecord;}
+   }catch{/* a torn row never kills a tick; its part reads as absent */}
+  }
+  return state;
+ }finally{db.close();}
+}
+// The store's read door (tests and audits read the state through
+// the store's own shape, never around it - the actions precedent).
+export function heartbeatState(root:string):HeartbeatState{return loadState(root);}
 // Heartbeat diffing (program P3): a job's reply is compared with its last one
 // before anything is announced. The comparison is over a normalized form, not
 // the raw text, so the model rephrasing the same facts (markdown, casing,
@@ -284,7 +351,18 @@ export function heartbeatOutputsEquivalent(prior:{hash:string;sig?:string}|undef
  if(!prior.sig)return false;
  return heartbeatFactBagsCompatible(prior.sig,sig);
 }
-function saveState(root:string,state:HeartbeatState){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(statePath(root),JSON.stringify(state,null,2),{mode:0o600});}
+function saveState(root:string,state:HeartbeatState){
+ const db=openStateStore(root);
+ try{
+  const upsert=db.prepare("INSERT INTO heartbeat_state (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data");
+  const writeAll=db.transaction(()=>{
+   upsert.run("meta",JSON.stringify({lastTick:state.lastTick}));
+   for(const [chatId,watermark] of Object.entries(state.chats))upsert.run("chat:"+chatId,JSON.stringify(watermark));
+   for(const [jobId,record] of Object.entries(state.outputs??{}))upsert.run("output:"+jobId,JSON.stringify(record));
+  });
+  writeAll();
+ }finally{db.close();}
+}
 export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
  if(!existsSync(logPath(root)))return [];
  return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
