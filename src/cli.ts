@@ -65,6 +65,7 @@ import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
 import { authStatus, probeAuth } from "./auth-status.js";
+import { addProvider, listProviders, removeProvider } from "./providers.js";
 import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
@@ -383,7 +384,11 @@ corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat
 const modelsCmd=program.command("models").description("Model routing (P11) + auth status (CLI dressing item 2): which model each route tier runs, and whether the routes and profile pins actually work - bare `sam models` prints the routing table");
 modelsCmd.action(()=>output(modelRoutingTable()));
 modelsCmd.command("status").description("Auth status over every detected route: per route tier and per profile (pin wins) - resolved model, source, the key env NAME as present/absent (values never print), endpoint, the setup baseline, the engine CLI-reuse route, and the last probe verdicts").option("--probe","Probe every distinct resolved model with ONE real completion each, bucket the results (ok/auth/rate_limit/billing/timeout/network/empty/missing), and persist them for later status reads").option("--live","Explicitly allow the probe's model API requests (may incur charges); required with --probe").option("--check","Exit non-zero when the chat route is unhealthy (no model/key, or its latest probe is not ok) - for scripts").action(async(o:{probe?:boolean;live?:boolean;check?:boolean})=>{const root=resolve(program.opts().workspace);if(o.probe&&!o.live)throw new Error("--probe makes real model API requests; pass --live to allow them (the explicit network opt-in)");let probe=null;if(o.probe)probe=await probeAuth(root);const status=authStatus(root);output({auth:status,probe});if(o.check&&!status.healthy)process.exitCode=1;});
-modelsCmd.command("list").description("The routing table plus every profile's resolved model and key state, as one read").action(()=>{const root=resolve(program.opts().workspace);const status=authStatus(root);output({routes:modelRoutingTable(),profiles:status.profiles});});
+modelsCmd.command("list").description("The routing table plus every profile's resolved model and key state, as one read").action(()=>{const root=resolve(program.opts().workspace);const status=authStatus(root);output({routes:modelRoutingTable(),profiles:status.profiles,providers:status.providers});});
+const providersCmd=program.command("providers").description("Model providers configured at once: the environment provider plus entries in .sam/providers.json (endpoint and key ENV NAME only - never a key value). A profile pins one with `sam agents set-provider`");
+providersCmd.command("list").description("Every configured provider: id, endpoint, key env name as present/absent, and the models it serves. Values are never printed").action(()=>output(listProviders(program.opts().workspace)));
+providersCmd.command("add").argument("<id>").requiredOption("--endpoint <url>","OpenAI-compatible /chat/completions URL").requiredOption("--key-env <NAME>","Environment variable NAME that holds this provider's key").requiredOption("--model <id>","Default model").option("--cheap <id>","Cheap-tier model (heartbeat)").option("--deep <id>","Deep-tier model (background)").description("Register an additional provider. The id is not a secret; the key stays in the environment").action((id:string,o:{endpoint:string;keyEnv:string;model:string;cheap?:string;deep?:string})=>{const root=program.opts().workspace as string;const added=addProvider(root,{id,endpoint:o.endpoint,keyEnv:o.keyEnv,model:o.model,cheapModel:o.cheap??null,deepModel:o.deep??null});recordActivity(root,"owner","provider-add","Provider "+added.id+" registered (key env "+added.keyEnv+", "+added.key+")");output(added);});
+providersCmd.command("remove").argument("<id>").description("Remove a file-configured provider. The environment provider is not stored here and cannot be removed").action((id:string)=>{const root=program.opts().workspace as string;const removed=removeProvider(root,id);if(removed)recordActivity(root,"owner","provider-remove","Provider "+id+" removed");output({removed});});
 const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
 agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
 agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
@@ -394,6 +399,19 @@ agentCmd.command("set-model").argument("<name>").argument("<model>").description
     const updated=db.setAgentModel(name,model==="none"?null:model);
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
     recordActivity(root,name,"agent-repin","Model pin "+(updated.model?("set to "+updated.model):"cleared (route tier decides)"));
+    output(updated);
+  }finally{db.close();}
+});
+agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider").action((name:string,provider:string)=>{
+  const root=program.opts().workspace as string;
+  if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its provider is the environment provider");
+  const providerId=provider==="none"?null:provider;
+  if(providerId&&!listProviders(root).some(p=>p.id===providerId))throw new Error("Unknown provider \""+providerId+"\". Configured providers: "+listProviders(root).map(p=>p.id).join(", "));
+  const db=new ChatStore(root);
+  try{
+    const updated=db.setAgentProvider(name,providerId);
+    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    recordActivity(root,name,"agent-repin","Provider pin "+(updated.provider?("set to "+updated.provider):"cleared (environment provider)"));
     output(updated);
   }finally{db.close();}
 });

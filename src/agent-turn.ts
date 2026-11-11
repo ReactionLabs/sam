@@ -8,7 +8,7 @@ import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./co
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
-import { resolveModelForRoute, tierForRoute } from "./model-routing.js";
+import { readProviderKey, resolveTurnConnection } from "./providers.js";
 import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
@@ -76,22 +76,22 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
 async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
   const route=opts?.route??"chat";
   const budget=toolBudget(route);
-  const providerName=process.env.SAM_MODEL_PROVIDER??"";
-  const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
-  if(!endpoint)throw Error("Model not configured");
-  const key=process.env.SAM_MODEL_API_KEY??(providerName==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
-  const provider=new OpenAICompatibleProvider(endpoint,key,60000);
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
   try{const found=look.list().find(c=>c.id===chatId);chatAgent=found?.agent_name??null;visitor=found?.visitor===1;profiles=look.agents();}finally{look.close();}
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
-  // Model routing (P11): the route picks the tier's model; a profile pin
-  // wins. Spend is recorded against the model that actually ran.
-  const resolved=resolveModelForRoute({route,profileModel:active?.model});
-  const model=resolved.model;
+  // Model routing (P11) plus multi-provider: the route picks the tier's
+  // model on the env provider; a profile model pin wins; a profile
+  // provider pin selects that provider's endpoint and key name. Spend
+  // is recorded against the model that actually ran.
+  const conn=resolveTurnConnection(root,process.env,active?{provider:active.provider??null,model:active.model??null}:null,route);
+  if(conn.unavailable)throw Error(conn.unavailable);
+  if(!conn.endpoint)throw Error("Model not configured");
+  const model=conn.model;
   if(!model)throw Error("Model not configured");
-  const tier=tierForRoute(route);
+  const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",60000);
+  const tier=conn.tier;
   let turnTokens=0;
   provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
   // Session caps (harness item 3): a chat that has spent today's

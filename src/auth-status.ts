@@ -1,13 +1,17 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
-import { modelRoutingTable, resolveModelForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
+import { modelRoutingTable, type ModelSource, type ModelTier } from "./model-routing.js";
 import { parseSamConfig } from "./config.js";
 import { modelEndpoint, modelApiKey, readSetupRecord, defaultCompleter, type Completer } from "./config-wizard.js";
 import { engineBinary } from "./engine.js";
 import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { recordActivity } from "./activity.js";
+import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { listProviders, modelKeyEnvName, readProviderKey, resolveTurnConnection, type ConfiguredProvider } from "./providers.js";
+
+export { modelKeyEnvName };
 
 // CLI dressing item 2 (Dip, 2026-11-10; OpenClaw borrow, research doc
 // section 6 item 3): an auth status / probe surface over the routes
@@ -31,12 +35,16 @@ export type ProbeBucket = "ok" | "auth" | "rate_limit" | "billing" | "timeout" |
 
 export interface ProbeRecord {
   target: string;
-  kind: "route" | "profile";
+  kind: "route" | "profile" | "provider";
   model: string | null;
   bucket: ProbeBucket;
   reason: string;
   at: string;
   latencyMs: number | null;
+}
+
+export interface ProviderHealth extends ConfiguredProvider {
+  lastProbe: ProbeRecord | null;
 }
 
 export interface AuthTarget {
@@ -61,20 +69,11 @@ export interface AuthStatus {
   setupVerified: { model: string; verifiedAt: string; current: boolean } | null;
   routes: AuthTarget[];
   profiles: AuthTarget[];
+  providers: ProviderHealth[];
   engine: { route: "cli-reuse"; installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null };
   senses: { installed: boolean; binary: string | null };
   lastProbeAt: string | null;
   healthy: boolean;
-}
-
-// The env NAME that carries the model key for this install - the
-// generic name when it is the one in play, else the provider's own
-// (modelApiKey's resolution order, mirrored so the name we print is
-// the name whose value the turn would actually spend).
-export function modelKeyEnvName(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.SAM_MODEL_API_KEY?.trim()) return "SAM_MODEL_API_KEY";
-  if (env.SAM_MODEL_PROVIDER === "minimax") return "MINIMAX_API_KEY";
-  return "SAM_MODEL_API_KEY";
 }
 
 function targets(root: string, env: NodeJS.ProcessEnv): { routes: Array<Omit<AuthTarget, "lastProbe">>; profiles: Array<Omit<AuthTarget, "lastProbe">> } {
@@ -86,17 +85,20 @@ function targets(root: string, env: NodeJS.ProcessEnv): { routes: Array<Omit<Aut
     target: "route:" + r.route, kind: "route" as const, route: r.route, profile: null,
     tier: r.tier, source: r.source, model: r.model, ...base,
   }));
-  const chatModel = routes.find(r => r.route === "chat")?.model ?? null;
-  const profiles: Array<Omit<AuthTarget, "lastProbe">> = [
-    { target: "profile:sam", kind: "profile", route: null, profile: "sam", tier: "main", source: "main-env", model: chatModel, ...base },
-  ];
+  const profiles: Array<Omit<AuthTarget, "lastProbe">> = [];
+  const pushProfile = (name: string, profile: { provider?: string | null; model?: string | null } | null) => {
+    const conn = resolveTurnConnection(root, env, profile, "chat");
+    profiles.push({
+      target: "profile:" + name, kind: "profile", route: null, profile: name,
+      tier: conn.tier, source: conn.source, model: conn.model,
+      keyEnv: conn.keyEnv || base.keyEnv, key: conn.key, endpoint: conn.endpoint,
+    });
+  };
+  pushProfile("sam", null);
   try {
     const db = new ChatStore(root);
     try {
-      for (const a of db.agents()) {
-        const r = resolveModelForRoute({ route: "chat", profileModel: a.model ?? null, env });
-        profiles.push({ target: "profile:" + a.name, kind: "profile", route: null, profile: a.name, tier: r.tier, source: r.source, model: r.model, ...base });
-      }
+      for (const a of db.agents()) pushProfile(a.name, { provider: a.provider ?? null, model: a.model ?? null });
     } finally { db.close(); }
   } catch { /* a workspace whose chat store cannot open yet reads as core-only */ }
   return { routes, profiles };
@@ -134,6 +136,7 @@ export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): 
     setupVerified: setup ? { model: setup.model, verifiedAt: setup.verifiedAt, current: !!chat && setup.model === chat.model } : null,
     routes: routeRows,
     profiles: profileRows,
+    providers: listProviders(root, env).map(p => ({ ...p, lastProbe: byTarget.get("provider:" + p.id) ?? null })),
     engine: (() => { const c = engineConnectStatus(root, env); return { route: "cli-reuse" as const, installed: !!engineBinary(env), binary: engineBinary(env), connected: c.connected, stale: c.stale, connection: c.connection }; })(),
     senses: sensesStatus(env),
     lastProbeAt: store?.at ?? null,
@@ -174,34 +177,51 @@ export interface ProbeRun { at: string; results: ProbeRecord[]; ok: boolean; cal
 // Probe every route + profile target, spending at most one real
 // completion per distinct resolved model (routes and pins that
 // resolve to the same model share one call and one verdict).
+function providerCompleter(endpoint: string, apiKey: string): Completer {
+  const provider = new OpenAICompatibleProvider(endpoint, apiKey, 30_000);
+  return async (model: string) => {
+    const res = await provider.complete({ model, messages: [{ role: "user", content: "Reply with the single word: ready" }] });
+    return res.message.content;
+  };
+}
+
 export async function probeAuth(root: string, env: NodeJS.ProcessEnv = process.env, complete?: Completer): Promise<ProbeRun> {
   const { routes, profiles } = targets(root, env);
-  const all = [...routes, ...profiles];
+  // One probe target per configured provider, in addition to the
+  // route and profile rows. A provider whose model was already probed
+  // on the same endpoint and key shares that call.
+  const providerTargets = listProviders(root, env).map(p => ({
+    target: "provider:" + p.id, kind: "provider" as const, model: p.model, endpoint: p.endpoint, key: p.key, keyEnv: p.keyEnv,
+  }));
+  const all = [...routes, ...profiles, ...providerTargets];
   const at = new Date().toISOString();
-  const run = complete ?? defaultCompleter(env);
-  const endpoint = modelEndpoint(env);
-  const key = modelApiKey(env);
+  const envEndpoint = modelEndpoint(env);
+  const envKeyEnv = modelKeyEnvName(env);
   const verdicts = new Map<string, { bucket: ProbeBucket; reason: string; latencyMs: number | null }>();
   let calls = 0;
-  for (const model of [...new Set(all.map(t => t.model).filter((m): m is string => !!m))]) {
-    if (!endpoint) { verdicts.set(model, { bucket: "missing", reason: "No model endpoint resolved: set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT.", latencyMs: null }); continue; }
-    if (!key) { verdicts.set(model, { bucket: "auth", reason: "No model API key in the environment (" + modelKeyEnvName(env) + ").", latencyMs: null }); continue; }
-    if (!run) { verdicts.set(model, { bucket: "error", reason: "Model connection could not be constructed from the environment.", latencyMs: null }); continue; }
+  for (const t of all) {
+    if (!t.model) continue;
+    const cacheKey = (t.endpoint ?? "") + "\n" + t.model + "\n" + t.keyEnv;
+    if (verdicts.has(cacheKey)) continue;
+    if (!t.endpoint) { verdicts.set(cacheKey, { bucket: "missing", reason: "No model endpoint resolved: set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT.", latencyMs: null }); continue; }
+    if (t.key !== "present") { verdicts.set(cacheKey, { bucket: "auth", reason: "No model API key in the environment (" + t.keyEnv + ").", latencyMs: null }); continue; }
+    const run = complete ?? (t.endpoint === envEndpoint && t.keyEnv === envKeyEnv ? defaultCompleter(env) : providerCompleter(t.endpoint, readProviderKey(env, t.keyEnv) ?? ""));
+    if (!run) { verdicts.set(cacheKey, { bucket: "error", reason: "Model connection could not be constructed from the environment.", latencyMs: null }); continue; }
     calls++;
     const started = Date.now();
     try {
-      const reply = (await run(model)).trim();
-      verdicts.set(model, reply
+      const reply = (await run(t.model)).trim();
+      verdicts.set(cacheKey, reply
         ? { bucket: "ok", reason: "Verified with one real completion.", latencyMs: Date.now() - started }
         : { bucket: "empty", reason: "The model answered with an empty completion.", latencyMs: Date.now() - started });
     } catch (err) {
       const { bucket, reason } = classifyProbeError(err);
-      verdicts.set(model, { bucket, reason, latencyMs: Date.now() - started });
+      verdicts.set(cacheKey, { bucket, reason, latencyMs: Date.now() - started });
     }
   }
   const results: ProbeRecord[] = all.map(t => {
     if (!t.model) return { target: t.target, kind: t.kind, model: null, bucket: "missing" as const, reason: "No model resolved for this target: set SAM_MODEL or a profile pin.", at, latencyMs: null };
-    const v = verdicts.get(t.model)!;
+    const v = verdicts.get((t.endpoint ?? "") + "\n" + t.model + "\n" + t.keyEnv)!;
     return { target: t.target, kind: t.kind, model: t.model, bucket: v.bucket, reason: v.reason, at, latencyMs: v.latencyMs };
   });
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });

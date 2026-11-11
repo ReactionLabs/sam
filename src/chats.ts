@@ -5,7 +5,7 @@ import { join,resolve } from "node:path";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
-export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
+export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null; provider:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null }
 // A reaction is a single emoji or a short emoji sequence (flags, ZWJ
 // families, keycaps, skin tones) - never text. This one validator
@@ -50,6 +50,7 @@ export class ChatStore {
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
+    if(!acols.some(c=>c.name==="provider"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN provider TEXT");
     const mcols=this.db.pragma("table_info(chat_messages)") as Array<{name:string}>;
     if(!mcols.some(c=>c.name==="reaction"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN reaction TEXT");
     // Full-text chat search (Plan Phase B item 4): an FTS5 external-content
@@ -96,14 +97,15 @@ export class ChatStore {
     return item;
   }
   agents():AgentProfile[]{return this.db.prepare("SELECT * FROM agent_profiles ORDER BY name LIMIT 100").all() as AgentProfile[];}
-  createAgent(name:string,instructions:string,opts?:{model?:string|null;connectorId?:string|null}):AgentProfile{
+  createAgent(name:string,instructions:string,opts?:{model?:string|null;connectorId?:string|null;provider?:string|null}):AgentProfile{
     if(!/^[a-z][a-z0-9._-]{0,63}$/.test(name)||!instructions.trim()||instructions.length>4000)throw new Error("Invalid agent profile");
-    const model=opts?.model??null,connectorId=opts?.connectorId??null;
+    const model=opts?.model??null,connectorId=opts?.connectorId??null,provider=opts?.provider??null;
     if(model!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(model))throw new Error("Invalid agent profile");
+    if(provider!==null&&!/^[a-z][a-z0-9._-]{0,31}$/.test(provider))throw new Error("Invalid agent profile");
     if(connectorId!==null&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectorId))throw new Error("Invalid agent profile");
     if(this.agents().length>=100)throw new Error("Agent limit reached");
-    const agent={id:randomUUID(),name,instructions:instructions.trim(),created_at:new Date().toISOString(),model,connector_id:connectorId};
-    this.db.prepare("INSERT INTO agent_profiles (id,name,instructions,created_at,model,connector_id) VALUES (@id,@name,@instructions,@created_at,@model,@connector_id)").run(agent);return agent;
+    const agent={id:randomUUID(),name,instructions:instructions.trim(),created_at:new Date().toISOString(),model,connector_id:connectorId,provider};
+    this.db.prepare("INSERT INTO agent_profiles (id,name,instructions,created_at,model,connector_id,provider) VALUES (@id,@name,@instructions,@created_at,@model,@connector_id,@provider)").run(agent);return agent;
   }
   // Re-pinning (found live 2026-11-09): profiles were create-only, so moving
   // a profile to a new model meant a direct UPDATE on chats.db. These are
@@ -114,6 +116,11 @@ export class ChatStore {
   setAgentModel(name:string,model:string|null):AgentProfile|null{
     if(model!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(model))throw new Error("Invalid agent profile");
     if(this.db.prepare("UPDATE agent_profiles SET model=? WHERE name=?").run(model,name).changes!==1)return null;
+    return this.agents().find(a=>a.name===name)??null;
+  }
+  setAgentProvider(name:string,provider:string|null):AgentProfile|null{
+    if(provider!==null&&!/^[a-z][a-z0-9._-]{0,31}$/.test(provider))throw new Error("Invalid agent profile");
+    if(this.db.prepare("UPDATE agent_profiles SET provider=? WHERE name=?").run(provider,name).changes!==1)return null;
     return this.agents().find(a=>a.name===name)??null;
   }
   setAgentConnector(name:string,connectorId:string|null):AgentProfile|null{
