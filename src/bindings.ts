@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { channels, type Channel } from "./channels.js";
 import { recordActivity } from "./activity.js";
 
@@ -13,7 +14,7 @@ import { recordActivity } from "./activity.js";
 //   1. a binding for this channel AND this peer
 //   2. a binding for this channel with no peer (channel-wide)
 //   3. the channel's own profile (the pre-bindings behavior, unchanged)
-// Bindings are operator-set records in .sam/bindings.json; a profile the
+// Bindings are operator-set records in .sam/bindings.db; a profile the
 // registry no longer knows is refused at write time by the CLI, and a
 // binding whose channel disappears resolves to nothing (the caller falls
 // back to the channel it already holds).
@@ -23,15 +24,114 @@ export interface BindingResolution { profile: string; via: "peer" | "channel" | 
 const profilePattern = /^[a-z][a-z0-9._-]{0,63}$/;
 const MAX_BINDINGS = 64;
 function storePath(root: string): string { return join(resolve(root), ".sam", "bindings.json"); }
-export function listBindings(root: string): Binding[] {
-  if (!existsSync(storePath(root))) return [];
-  const value: unknown = JSON.parse(readFileSync(storePath(root), "utf8"));
-  if (!Array.isArray(value) || value.length > MAX_BINDINGS) throw Error("Invalid bindings store");
-  return value as Binding[];
+function bindingsDbFile(root: string): string { return join(resolve(root), ".sam", "bindings.db"); }
+// State convergence (UNIFICATION item 4, seventeenth store): the bindings
+// registry is SQLite (.sam/bindings.db, the contacts pattern), one row per
+// binding keyed by its id holding the binding's full JSON, rowid order =
+// the old file order. The old bindings.json was rewritten whole on every
+// set and every remove, and its writers (the CLI) ran beside
+// resolveBindingProfile readers on every incoming Telegram and webhook
+// message and listBindings readers in the dashboard status build, so two
+// writers holding the same snapshot silently lost the second one's
+// change - routing-shaped here: a binding that sends a person to their
+// own scoped SAM could vanish or revert under a concurrent save and that
+// person's messages land on the channel's default profile instead. Here
+// each mutation is a single-row INSERT, UPDATE, or DELETE, and
+// connections carry a busy_timeout so a writer waits out a peer's
+// transaction instead of dying on "database is locked". First open
+// imports a legacy bindings.json in file order and renames it
+// bindings.json.migrated - imported, never deleted; a malformed file, a
+// non-array payload, or an over-cap payload imports nothing and is left
+// in place (the migrated shape reads it as no bindings instead of
+// throwing "Invalid bindings store", the channels/minis precedent -
+// strictly more forgiving for a registry the console and the bridges
+// read on every message, and the resolver's routing outcome is unchanged
+// because it already fell back to the channel default on a throw). A
+// pure read on an install with neither file creates nothing. The P9
+// backup snapshots every .sam/*.db generically, so the migrated store
+// is carried with no backup change.
+function openBindingsStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(bindingsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS bindings (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyBindings(db, root);
+  return db;
 }
-function saveBindings(root: string, items: Binding[]): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(storePath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+function migrateLegacyBindings(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM bindings").get() as { n: number };
+  if (n > 0) return;
+  const file = storePath(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data) || data.length > MAX_BINDINGS) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO bindings (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const binding = raw as Partial<Binding>;
+      if (typeof binding.id !== "string" || !binding.id) continue;
+      insert.run(binding.id, JSON.stringify(binding));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function rowToBinding(data: string): Binding | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as Binding : null; }
+  catch { return null; }
+}
+function storeExists(root: string): boolean {
+  return existsSync(bindingsDbFile(root)) || existsSync(storePath(root));
+}
+export function listBindings(root: string): Binding[] {
+  if (!storeExists(root)) return [];
+  const db = openBindingsStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM bindings ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: Binding[] = [];
+    for (const row of rows) { const binding = rowToBinding(row.data); if (binding) items.push(binding); }
+    return items;
+  } finally { db.close(); }
+}
+function findBindingRow(root: string, id: string): Binding | null {
+  if (!storeExists(root)) return null;
+  const db = openBindingsStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM bindings WHERE id = ?").get(id) as { data: string } | undefined;
+    return row ? rowToBinding(row.data) : null;
+  } finally { db.close(); }
+}
+function findPairRow(root: string, channelId: string, peer: string | null): Binding | null {
+  if (!storeExists(root)) return null;
+  const db = openBindingsStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM bindings ORDER BY rowid").all() as Array<{ data: string }>;
+    for (const row of rows) { const binding = rowToBinding(row.data); if (binding && binding.channelId === channelId && binding.peer === peer) return binding; }
+    return null;
+  } finally { db.close(); }
+}
+function countBindings(root: string): number {
+  if (!storeExists(root)) return 0;
+  const db = openBindingsStore(root);
+  try {
+    const { n } = db.prepare("SELECT COUNT(*) AS n FROM bindings").get() as { n: number };
+    return n;
+  } finally { db.close(); }
+}
+function insertBindingRow(root: string, item: Binding): void {
+  const db = openBindingsStore(root);
+  try { db.prepare("INSERT INTO bindings (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  finally { db.close(); }
+}
+function updateBindingRow(root: string, item: Binding): void {
+  const db = openBindingsStore(root);
+  try { db.prepare("UPDATE bindings SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  finally { db.close(); }
 }
 export function validPeer(peer: string): string {
   const trimmed = peer.trim();
@@ -46,25 +146,43 @@ export function setBinding(root: string, input: { channelId: string; peer: strin
   if (!channel) throw Error("Channel not found: " + input.channelId);
   if (!profilePattern.test(input.profile)) throw Error("Invalid profile: " + input.profile);
   const peer = input.peer === null ? null : validPeer(input.peer);
-  const items = listBindings(root);
-  const existing = items.find(b => b.channelId === channel.id && b.peer === peer);
+  const existing = findPairRow(root, channel.id, peer);
   if (existing) {
-    existing.profile = input.profile;
-    saveBindings(root, items);
+    const moved: Binding = { ...existing, profile: input.profile };
+    updateBindingRow(root, moved);
     recordActivity(root, input.profile, "binding-set", "Binding updated: channel " + channel.name + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + input.profile);
-    return existing;
+    return moved;
   }
-  if (items.length >= MAX_BINDINGS) throw Error("Binding limit reached (" + MAX_BINDINGS + ")");
+  if (countBindings(root) >= MAX_BINDINGS) throw Error("Binding limit reached (" + MAX_BINDINGS + ")");
   const item: Binding = { id: randomUUID(), channelId: channel.id, peer, profile: input.profile, createdAt: new Date().toISOString() };
-  saveBindings(root, [...items, item]);
+  insertBindingRow(root, item);
   recordActivity(root, input.profile, "binding-set", "Binding set: channel " + channel.name + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + input.profile);
   return item;
 }
+// The store's update door (the contacts precedent): patch one binding by
+// id through the store's own shape. The id never changes; a peer patch is
+// validated exactly as setBinding validates it. Returns the updated
+// binding, or null when no such binding exists - and a miss on an install
+// with no store at all creates nothing.
+export function updateBinding(root: string, id: string, patch: Partial<Binding>): Binding | null {
+  if (!storeExists(root)) return null;
+  const current = findBindingRow(root, id);
+  if (!current) return null;
+  const next: Binding = { ...current, ...patch, id: current.id };
+  if (patch.profile !== undefined && !profilePattern.test(next.profile)) throw Error("Invalid profile: " + next.profile);
+  if (patch.peer !== undefined && next.peer !== null) next.peer = validPeer(next.peer);
+  updateBindingRow(root, next);
+  return next;
+}
 export function removeBinding(root: string, id: string): boolean {
-  const items = listBindings(root), rest = items.filter(b => b.id !== id);
-  if (rest.length === items.length) return false;
-  const gone = items.find(b => b.id === id) as Binding;
-  saveBindings(root, rest);
+  if (!storeExists(root)) return false;
+  const gone = findBindingRow(root, id);
+  if (!gone) return false;
+  const db = openBindingsStore(root);
+  try {
+    const result = db.prepare("DELETE FROM bindings WHERE id = ?").run(id);
+    if (result.changes === 0) return false;
+  } finally { db.close(); }
   recordActivity(root, gone.profile, "binding-removed", "Binding removed: channel " + gone.channelId + (gone.peer ? ", peer " + gone.peer : " (all peers)") + " -> profile " + gone.profile);
   return true;
 }
