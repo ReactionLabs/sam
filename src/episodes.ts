@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 
 // Episodic memory (program P4): a dated summary record per profile of what
@@ -12,7 +13,7 @@ import { MemoryStore, type MemoryRecord } from "./memory.js";
 // fence as everything else and one profile's day never leaks into another's.
 //
 // Consolidation is incremental (it only sees messages past its watermark),
-// so the day's evidence accumulates in .sam/episodes.json and the summary is
+// so the day's evidence accumulates in .sam/episodes.db and the summary is
 // regenerated from the full day every tick: one live record per profile per
 // date, the earlier version archived, so a day reads as one story, not
 // fragments. An episode is a derived summary, never a fact source about
@@ -61,50 +62,116 @@ export function summarizeEpisode(profile: string, date: string, chats: EpisodeCh
 
 // Evidence store: profile:date -> the day's chats with bounded excerpts.
 // Bounded on every axis (dates per profile, chats per day, messages per
-// chat, excerpt length) so the file can never grow without limit.
-type EvidenceMap = Record<string, EpisodeChat[]>;
-function evidencePath(root: string) { return join(resolve(root), ".sam", "episodes.json"); }
-function loadEvidence(root: string): EvidenceMap {
-  if (!existsSync(evidencePath(root))) return {};
-  const value: unknown = JSON.parse(readFileSync(evidencePath(root), "utf8"));
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid episodes evidence file");
-  return value as EvidenceMap;
-}
-function saveEvidence(root: string, map: EvidenceMap) {
+// chat, excerpt length) so the store can never grow without limit.
+//
+// State convergence (UNIFICATION item 4, fifth store): the evidence is
+// SQLite (.sam/episodes.db, the actions/jobs pattern), one keyed row per
+// profile:date holding that day's chats JSON. The old episodes.json was
+// rewritten whole on every writeEpisode - at 73KB live it was the largest
+// remaining JSON store - and its writers overlap the heartbeat-state way:
+// the systemd timer's tick and a manual CLI tick are separate processes,
+// and two ticks holding the same snapshot lost the second one's evidence
+// permanently (its messages were already watermarked as consolidated, so
+// they never re-entered the day's episode). A malformed file threw out of
+// loadEvidence and killed the tick outright. Here each write upserts
+// exactly the one row it merges, plus the bounded prune of that profile's
+// oldest dates, in one transaction, and connections carry a busy_timeout
+// (the F1 cross-process lock seam). First open imports a legacy
+// episodes.json key by key and renames it episodes.json.migrated -
+// imported, never deleted; a malformed file imports nothing and is left
+// in place. A pure read on an install with neither file creates nothing.
+// The P9 backup snapshots every .sam/*.db generically, so the migrated
+// store is carried with no backup change.
+function evidenceFile(root: string) { return join(resolve(root), ".sam", "episodes.json"); }
+function evidenceDbFile(root: string) { return join(resolve(root), ".sam", "episodes.db"); }
+function openEvidenceStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(evidencePath(root), JSON.stringify(map, null, 2), { mode: 0o600 });
+  const db = new Database(evidenceDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS episode_evidence (key TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyEvidence(db, root);
+  return db;
 }
-function mergeEvidence(map: EvidenceMap, profile: string, date: string, chats: EpisodeChat[]): EpisodeChat[] {
-  const key = profile + ":" + date;
-  const byId = new Map<string, EpisodeChat>((map[key] ?? []).map(c => [c.chatId, c]));
+function migrateLegacyEvidence(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM episode_evidence").get() as { n: number };
+  if (n > 0) return;
+  const file = evidenceFile(root);
+  if (!existsSync(file)) return;
+  let value: unknown;
+  try { value = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO episode_evidence (key, data) VALUES (?, ?)");
+  const importAll = db.transaction((entries: Array<[string, unknown]>) => {
+    for (const [key, chats] of entries) {
+      if (!Array.isArray(chats)) continue;
+      insert.run(key, JSON.stringify(chats));
+    }
+  });
+  importAll(Object.entries(value as Record<string, unknown>));
+  renameSync(file, file + ".migrated");
+}
+function rowToChats(data: string): EpisodeChat[] {
+  try { const value: unknown = JSON.parse(data); return Array.isArray(value) ? value as EpisodeChat[] : []; }
+  catch { return []; }
+}
+// The store's read door (the heartbeatState precedent): one profile:date's
+// accumulated evidence, or [] when none exists. A read on an install with
+// neither store creates nothing.
+export function episodeEvidence(root: string, profile: string, date: string): EpisodeChat[] {
+  if (!validProfile(profile)) throw new Error("Invalid profile");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Invalid episode date");
+  if (!existsSync(evidenceDbFile(root)) && !existsSync(evidenceFile(root))) return [];
+  const db = openEvidenceStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM episode_evidence WHERE key = ?").get(profile + ":" + date) as { data: string } | undefined;
+    return row ? rowToChats(row.data) : [];
+  } finally { db.close(); }
+}
+function mergeEvidenceChats(existing: EpisodeChat[], chats: EpisodeChat[]): EpisodeChat[] {
+  const byId = new Map<string, EpisodeChat>(existing.map(c => [c.chatId, c]));
   for (const chat of chats) {
-    const existing = byId.get(chat.chatId) ?? { chatId: chat.chatId, title: chat.title, messages: [] };
-    existing.title = chat.title;
-    const seen = new Set(existing.messages.map(m => m.created_at + "\n" + m.role + "\n" + m.content));
+    const prior = byId.get(chat.chatId) ?? { chatId: chat.chatId, title: chat.title, messages: [] };
+    prior.title = chat.title;
+    const seen = new Set(prior.messages.map(m => m.created_at + "\n" + m.role + "\n" + m.content));
     for (const m of chat.messages) {
       const stored = { role: m.role, content: excerpt(m.content, 200), created_at: m.created_at };
       const k = stored.created_at + "\n" + stored.role + "\n" + stored.content;
-      if (!seen.has(k)) { existing.messages.push(stored); seen.add(k); }
+      if (!seen.has(k)) { prior.messages.push(stored); seen.add(k); }
     }
-    existing.messages.sort((a, b) => a.created_at.localeCompare(b.created_at));
-    existing.messages = existing.messages.slice(-100);
-    byId.set(chat.chatId, existing);
+    prior.messages.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    prior.messages = prior.messages.slice(-100);
+    byId.set(chat.chatId, prior);
   }
-  const merged = [...byId.values()].slice(0, 50);
-  map[key] = merged;
-  // Keep only the newest 31 dates per profile.
-  const dates = Object.keys(map).filter(k => k.startsWith(profile + ":")).sort();
-  for (const old of dates.slice(0, Math.max(0, dates.length - 31))) delete map[old];
-  return merged;
+  return [...byId.values()].slice(0, 50);
 }
 
 export function writeEpisode(root: string, profile: string, date: string, chats: EpisodeChat[]): MemoryRecord | null {
   if (!validProfile(profile)) throw new Error("Invalid profile");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Invalid episode date");
   if (!chats.some(c => c.messages.length)) return null;
-  const map = loadEvidence(root);
-  const merged = mergeEvidence(map, profile, date, chats);
-  saveEvidence(root, map);
+  const key = profile + ":" + date;
+  let merged: EpisodeChat[] = [];
+  const db = openEvidenceStore(root);
+  try {
+    const prefix = profile + ":";
+    // Read-merge-write in ONE immediate transaction: a peer tick merging
+    // the same profile:date waits on the write lock (busy_timeout) and
+    // then reads this write's result, so neither merge can revert the
+    // other - the whole-file disease in miniature, closed the same way.
+    const write = db.transaction(() => {
+      const row = db.prepare("SELECT data FROM episode_evidence WHERE key = ?").get(key) as { data: string } | undefined;
+      merged = mergeEvidenceChats(row ? rowToChats(row.data) : [], chats);
+      db.prepare("INSERT INTO episode_evidence (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data")
+        .run(key, JSON.stringify(merged));
+      // Keep only the newest 31 dates per profile.
+      const keys = db.prepare("SELECT key FROM episode_evidence WHERE substr(key, 1, ?) = ? ORDER BY key")
+        .all(prefix.length, prefix) as Array<{ key: string }>;
+      const drop = db.prepare("DELETE FROM episode_evidence WHERE key = ?");
+      for (const old of keys.slice(0, Math.max(0, keys.length - 31))) drop.run(old.key);
+    });
+    write.immediate();
+  } finally { db.close(); }
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
     const scope = episodeScope(profile), source = episodeSource(profile, date);
