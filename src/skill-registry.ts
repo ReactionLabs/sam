@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { discoverSkills, parseSkillMetadata } from "./skills.js";
 import { recordActivity } from "./activity.js";
 
@@ -60,15 +61,103 @@ export function parseSkillRef(ref: string): { owner: string; repo: string; skill
 }
 
 function installsFile(root: string): string { return join(resolve(root), ".sam", "skill-installs.json"); }
-export function installedSkills(root: string): InstalledSkill[] {
-  const file = installsFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? data as InstalledSkill[] : []; }
-  catch { return []; }
+function installsDbFile(root: string): string { return join(resolve(root), ".sam", "skill-installs.db"); }
+// State convergence (UNIFICATION item 4, twentieth store): the skill
+// provenance registry is SQLite (.sam/skill-installs.db, the drafts
+// pattern), one row per installed skill keyed by its name holding the
+// record's full JSON, rowid order = the old file order. The old
+// skill-installs.json was rewritten whole on every install and every
+// remove, with writers in the CLI and in every process that executes
+// an approved or smart-auto skill proposal through the ONE gate, so
+// two writers holding the same snapshot silently lost the second
+// one's change: an installed skill's provenance could vanish (its
+// files orphaned from the registry the curator checks), or a removed
+// skill's record could resurrect, claiming provenance for a directory
+// that is gone. Here each mutation is a single-row INSERT or DELETE,
+// and connections carry a busy_timeout so a writer waits out a peer's
+// transaction instead of dying on "database is locked". First open
+// imports a legacy skill-installs.json in file order and renames it
+// skill-installs.json.migrated - imported, never deleted; a malformed
+// file or a non-array payload imports nothing and is left in place
+// (the migrated shape reads it as no installs, exactly the old
+// forgiving contract). A pure read on an install with neither file
+// creates nothing. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup change.
+function openInstallsStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(installsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS skill_installs (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyInstalls(db, root);
+  return db;
 }
-function saveInstalled(root: string, items: InstalledSkill[]): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(installsFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+function migrateLegacyInstalls(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM skill_installs").get() as { n: number };
+  if (n > 0) return;
+  const file = installsFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO skill_installs (name, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Partial<InstalledSkill>;
+      if (typeof rec.name !== "string" || !rec.name) continue;
+      insert.run(rec.name, JSON.stringify(rec));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function rowToInstalled(data: string): InstalledSkill | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as InstalledSkill : null; }
+  catch { return null; }
+}
+function storeExists(root: string): boolean {
+  return existsSync(installsDbFile(root)) || existsSync(installsFile(root));
+}
+export function installedSkills(root: string): InstalledSkill[] {
+  if (!storeExists(root)) return [];
+  const db = openInstallsStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM skill_installs ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: InstalledSkill[] = [];
+    for (const row of rows) { const rec = rowToInstalled(row.data); if (rec) items.push(rec); }
+    return items;
+  } finally { db.close(); }
+}
+function findInstalledRow(root: string, name: string): InstalledSkill | null {
+  if (!storeExists(root)) return null;
+  const db = openInstallsStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM skill_installs WHERE name = ?").get(name) as { data: string } | undefined;
+    return row ? rowToInstalled(row.data) : null;
+  } finally { db.close(); }
+}
+function insertInstalledRow(root: string, rec: InstalledSkill): void {
+  const db = openInstallsStore(root);
+  try { db.prepare("INSERT INTO skill_installs (name, data) VALUES (?, ?)").run(rec.name, JSON.stringify(rec)); }
+  finally { db.close(); }
+}
+// The store's update door (the drafts precedent): patch one installed
+// skill record by name through the store's own shape. The name is
+// immutable. Returns the updated record, or null when no such record
+// exists - and a miss on an install with no store at all creates
+// nothing.
+export function updateInstalledSkill(root: string, name: string, patch: Partial<InstalledSkill>): InstalledSkill | null {
+  if (!name || !storeExists(root)) return null;
+  const current = findInstalledRow(root, name);
+  if (!current) return null;
+  const next: InstalledSkill = { ...current, ...patch, name: current.name };
+  const db = openInstallsStore(root);
+  try { db.prepare("UPDATE skill_installs SET data = ? WHERE name = ?").run(JSON.stringify(next), current.name); }
+  finally { db.close(); }
+  return next;
 }
 
 interface TreeEntry { path: string; type: string; mode?: string; size?: number }
@@ -140,7 +229,6 @@ export async function scanSkillRef(ref: string): Promise<Array<{ name: string; h
 export async function installSkill(root: string, ref: string, opts: { actor: string }): Promise<{ installed: InstalledSkill[]; skipped: string[] }> {
   const { source, owner, repo, entries, selected } = await fetchSkillCandidates(ref);
   const existing = new Set(discoverSkills(root).map(s => s.name));
-  const records = installedSkills(root);
   const installed: InstalledSkill[] = [];
   const skipped: string[] = [];
   const skillsRoot = join(resolve(root), ".agents", "skills");
@@ -182,20 +270,24 @@ export async function installSkill(root: string, ref: string, opts: { actor: str
       continue;
     }
     const record: InstalledSkill = { name: cand.name, source, ref, files: written, installedAt: new Date().toISOString(), actor: opts.actor };
-    records.push(record); installed.push(record); existing.add(cand.name);
+    insertInstalledRow(root, record); installed.push(record); existing.add(cand.name);
     skipped.push(...notes.map(n => cand.name + ": " + n));
     recordActivity(root, opts.actor, "skill", "Installed skill " + cand.name + " from " + source + " (" + written + " files)");
   }
-  if (installed.length) saveInstalled(root, records);
   return { installed, skipped };
 }
 
 export function removeInstalledSkill(root: string, name: string): boolean {
-  const records = installedSkills(root);
-  const rec = records.find(r => r.name === name);
+  const rec = findInstalledRow(root, name);
   if (!rec) return false;
   rmSync(join(resolve(root), ".agents", "skills", name), { recursive: true, force: true });
-  saveInstalled(root, records.filter(r => r.name !== name));
+  const db = openInstallsStore(root);
+  let removed = false;
+  try {
+    const result = db.prepare("DELETE FROM skill_installs WHERE name = ?").run(name);
+    removed = result.changes > 0;
+  } finally { db.close(); }
+  if (!removed) return false;
   recordActivity(root, "operator", "skill", "Removed skill " + name + " (was from " + rec.source + ")");
   return true;
 }
