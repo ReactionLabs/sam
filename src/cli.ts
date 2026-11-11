@@ -61,6 +61,7 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
+import { cancelSubagent, getSubagent, listSubagents, spawnSubagent } from "./subagents.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
@@ -702,6 +703,14 @@ operative.command("candidates").argument("<capabilities>").action((capabilities:
   try{ output(reg.candidates(capabilities.split(",").map(x=>x.trim()).filter(Boolean))); }
   finally{reg.close();}
 });
+const subagentCmd=program.command("subagent").description("Sub-agents: a profile spawns a child turn with a scoped prompt, a tool allowlist inherited or narrowed from the parent, and a budget carved from the parent's pool. Consequential proposals still wait for the owner. Children are checkpointed and can be listed or cancelled");
+subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
+  const tools=o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):undefined;
+  output(await spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)}));
+});
+subagentCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listSubagents(program.opts().workspace,o.profile)));
+subagentCmd.command("status").argument("<id>").action((id:string)=>{const found=getSubagent(program.opts().workspace,id);if(!found)throw new Error("Unknown sub-agent: "+id);output(found);});
+subagentCmd.command("cancel").argument("<id>").action((id:string)=>output(cancelSubagent(program.opts().workspace,id)));
 
 const assignment=program.command("assignment").description("Durable operative assignment leases (a lease is not execution permission)");
 assignment.command("claim").argument("<operative-id>").argument("<task-id>").option("--ttl <ms>","Lease TTL in milliseconds").action((operativeId:string,taskId:string,options:{ttl?:string})=>{
