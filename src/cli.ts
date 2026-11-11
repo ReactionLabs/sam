@@ -508,6 +508,22 @@ chats.command("unarchive").argument("<id>").option("--profile <name>","Acting pr
 chats.command("activity").description("Every chat with its last-message time and message count, newest activity first").action(()=>{const db=new ChatStore(program.opts().workspace);try{const act=new Map(db.lastActivity().map(a=>[a.chat_id,a] as const));output(db.list({includeArchived:true}).map(c=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0})).sort((x,y)=>String(y.lastMessageAt??"").localeCompare(String(x.lastMessageAt??""))));}finally{db.close();}});
 chats.command("search").argument("<query>").option("--profile <name>","Acting profile (default sam)").option("--limit <n>","Max hits (default 20)").description("Full-text search (FTS5, relevance-ranked, multi-term prefix) across the acting profile's own chats - the engine behind the sam_search_chats chat tool").action((query:string,o:{profile?:string;limit?:string})=>output(searchManagedChats(program.opts().workspace,o.profile??"sam",query,o.limit?Number(o.limit):20)));
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
+chats.command("resume").argument("<id>").description("Resume a killed turn from the saved partial assistant reply. The row stays partial until the continuation finishes, and is never presented as a complete answer before that").action(async(id:string)=>{
+  const root=program.opts().workspace as string;
+  const db=new ChatStore(root);
+  let content="";
+  try{
+    const open=db.openPartial(id);
+    if(!open)throw new Error("No partial reply to resume");
+    const prev=[...db.messages(id)].reverse().find(m=>m.role==="user");
+    if(!prev)throw new Error("No partial reply to resume");
+    content=prev.content;
+  }finally{db.close();}
+  const reply=await runChatTurn(root,id,content);
+  const check=new ChatStore(root);
+  try{const last=[...check.messages(id)].reverse().find(m=>m.role==="assistant");output({reply,partial:last?.partial===1,content:last?.content??null});}
+  finally{check.close();}
+});
 chats.command("react").argument("<chatId>").argument("<messageId>").argument("<emoji>").description("Set an emoji reaction on a message (or clear it with 'none') - the operator parity for sam_react and the dashboard badges").action((chatId:string,messageId:string,emoji:string)=>{const db=new ChatStore(program.opts().workspace);try{const set=db.setReaction(chatId,messageId,emoji==="none"?null:emoji);output({set,message:db.messages(chatId).find(m=>m.id===messageId)??null});}finally{db.close();}});
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
 chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});
