@@ -1,5 +1,6 @@
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync, lstatSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, mkdirSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 
 /**
  * Deferred tool loading (Harness Implementation Order item 4, Dip
@@ -16,7 +17,7 @@ import { join, resolve } from "node:path";
  * one meta-tool, sam_load_tools. The rest are named in a bounded
  * deferred catalog line in the system message (names + short
  * descriptions, never hidden), and the model loads what it needs
- * by name. Loads persist per chat in .sam/tool-loads.json, so a
+ * by name. Loads persist per chat in .sam/tool-loads.db, so a
  * tool loaded once stays loaded for that chat's session.
  *
  * Executing a deferred tool without loading it first returns a
@@ -143,35 +144,89 @@ export function notLoadedStubContent(name: string): string {
   });
 }
 
-// --- per-chat loaded set, persisted at .sam/tool-loads.json ---
+// --- per-chat loaded set, persisted at .sam/tool-loads.db ---
 
-interface ToolLoadsFile { version: 1; chats: Record<string, string[]> }
-
-function loadsPath(root: string): string {
+function loadsFile(root: string): string { return join(resolve(root), ".sam", "tool-loads.json"); }
+function loadsDbFile(root: string): string { return join(resolve(root), ".sam", "tool-loads.db"); }
+// State convergence (UNIFICATION item 4, ninth store): the
+// per-chat loaded set is SQLite (.sam/tool-loads.db, the
+// actions/jobs pattern), one keyed row per chat holding that
+// chat's loaded-names JSON. The old tool-loads.json
+// ({version, chats}) was rewritten whole on every
+// recordToolLoad that loaded a new tool, and every process
+// that runs a turn writes it (the dashboard/chat process,
+// the Telegram bridge, the web door - own-tools and
+// connector turns alike), so two turns in different
+// processes holding the same snapshot silently lost the
+// second one's load: a tool loaded in one chat could
+// vanish, and that chat paid the loader round again next
+// turn. Here each record is an upsert of exactly the one
+// chat row it merges, and connections carry a busy_timeout
+// (the F1 cross-process lock seam) so a writer waits out a
+// peer's transaction instead of dying on "database is
+// locked". First open imports a legacy tool-loads.json
+// entry by entry and renames it tool-loads.json.migrated -
+// imported, never deleted; a malformed file imports
+// nothing and is left in place (the old reader read a
+// corrupt file as empty, so the shape matches). A pure
+// read on an install with neither file creates nothing -
+// the old read path even created the .sam directory as a
+// side effect; that is gone for reads, and a record that
+// loads nothing new writes nothing and creates no store.
+// The P9 backup snapshots every .sam/*.db generically, so
+// the migrated store is carried with no backup change.
+function openToolLoadsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  return join(dir, "tool-loads.json");
+  const db = new Database(loadsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS tool_loads (chat_id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyToolLoads(db, root);
+  return db;
 }
-
-function readLoads(root: string): ToolLoadsFile {
-  const path = loadsPath(root);
-  if (!existsSync(path)) return { version: 1, chats: {} };
+function migrateLegacyToolLoads(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM tool_loads").get() as { n: number };
+  if (n > 0) return;
+  const file = loadsFile(root);
+  if (!existsSync(file)) return;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!parsed || typeof parsed !== "object") return;
+  const chats = (parsed as { chats?: unknown }).chats;
+  if (!chats || typeof chats !== "object" || Array.isArray(chats)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO tool_loads (chat_id, data) VALUES (?, ?)");
+  const importAll = db.transaction((entries: Array<[string, unknown]>) => {
+    for (const [chatId, names] of entries) {
+      if (!chatId || !Array.isArray(names)) continue;
+      insert.run(chatId, JSON.stringify(names.filter(n => typeof n === "string")));
+    }
+  });
+  importAll(Object.entries(chats as Record<string, unknown>));
+  renameSync(file, file + ".migrated");
+}
+function toolLoadsStoreExists(root: string): boolean {
+  return existsSync(loadsDbFile(root)) || existsSync(loadsFile(root));
+}
+function parseLoadedNames(data: string): string[] {
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as ToolLoadsFile;
-    if (parsed && typeof parsed === "object" && parsed.chats && typeof parsed.chats === "object") return { version: 1, chats: parsed.chats };
-  } catch { /* corrupt state reads as empty, never fatal */ }
-  return { version: 1, chats: {} };
+    const value: unknown = JSON.parse(data);
+    return Array.isArray(value) ? value.filter(n => typeof n === "string") as string[] : [];
+  } catch { return []; }
 }
 
 export function loadedTools(root: string, chatId: string): string[] {
-  const names = readLoads(root).chats[chatId];
-  return Array.isArray(names) ? names.filter(n => typeof n === "string") : [];
+  if (!toolLoadsStoreExists(root)) return [];
+  const db = openToolLoadsStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM tool_loads WHERE chat_id = ?").get(chatId) as { data: string } | undefined;
+    return row ? parseLoadedNames(row.data) : [];
+  } finally { db.close(); }
 }
 
 export function recordToolLoad(root: string, chatId: string, requested: string[], validNames: Set<string>): { loaded: string[]; unknown: string[] } {
-  const file = readLoads(root);
-  const current = new Set(Array.isArray(file.chats[chatId]) ? file.chats[chatId] : []);
+  const current = new Set(loadedTools(root, chatId));
   const loaded: string[] = [];
   const unknown: string[] = [];
   for (const name of requested) {
@@ -179,11 +234,11 @@ export function recordToolLoad(root: string, chatId: string, requested: string[]
     if (!current.has(name)) { current.add(name); loaded.push(name); }
   }
   if (loaded.length) {
-    file.chats[chatId] = [...current];
-    const path = loadsPath(root);
-    const temp = path + ".tmp";
-    writeFileSync(temp, JSON.stringify(file, null, 2), { mode: 0o600 });
-    renameSync(temp, path);
+    const db = openToolLoadsStore(root);
+    try {
+      db.prepare("INSERT INTO tool_loads (chat_id, data) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET data = excluded.data")
+        .run(chatId, JSON.stringify([...current]));
+    } finally { db.close(); }
   }
   return { loaded, unknown };
 }
