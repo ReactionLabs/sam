@@ -1,5 +1,5 @@
 import { ChatStore } from "./chats.js";
-import { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { OpenAICompatibleProvider, stripModelMarkup } from "./openai-compatible.js";
 import { connectorChat } from "./connector-chat.js";
 import { ownToolsChat } from "./own-tools.js";
 import { connectors } from "./connectors.js";
@@ -8,7 +8,9 @@ import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./co
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
-import { resolveModelForRoute, tierForRoute } from "./model-routing.js";
+import { readProviderKey } from "./providers.js";
+import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
+import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
@@ -34,6 +36,12 @@ const DASHBOARD_NOTE="This dashboard supports creating chats, branching the sele
 // words never become preference, law, or confirmed fact.
 // Reactions never break a turn: a failed stamp is swallowed here,
 // the same discipline as recall and the session ledger.
+function joinPartial(base:string,next:string):string{
+  if(!base)return next;
+  if(!next)return base;
+  if(/\s$/.test(base)||/^\s/.test(next))return base+next;
+  return base+" "+next;
+}
 function setReactionSafe(root:string,chatId:string,messageId:string,reaction:string|null):void{
   try{const db=new ChatStore(root);try{db.setReaction(chatId,messageId,reaction);}finally{db.close();}}catch{/* a reaction is garnish, never the meal */}
 }
@@ -76,24 +84,38 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
 async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
   const route=opts?.route??"chat";
   const budget=toolBudget(route);
-  const providerName=process.env.SAM_MODEL_PROVIDER??"";
-  const endpoint=process.env.SAM_MODEL_ENDPOINT??(providerName==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
-  if(!endpoint)throw Error("Model not configured");
-  const key=process.env.SAM_MODEL_API_KEY??(providerName==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
-  const provider=new OpenAICompatibleProvider(endpoint,key,60000);
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
   try{const found=look.list().find(c=>c.id===chatId);chatAgent=found?.agent_name??null;visitor=found?.visitor===1;profiles=look.agents();}finally{look.close();}
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
-  // Model routing (P11): the route picks the tier's model; a profile pin
-  // wins. Spend is recorded against the model that actually ran.
-  const resolved=resolveModelForRoute({route,profileModel:active?.model});
-  const model=resolved.model;
-  if(!model)throw Error("Model not configured");
-  const tier=tierForRoute(route);
+  // /relay is chat-reachable: the same prompt goes to every configured
+  // route for this profile and the labeled answers are the reply. It
+  // does not run tools, and it does not capture the prompt as law.
+  const relayText=relayCommandPrompt(content);
+  if(relayText){
+    const capStatus=sessionCapStatus(root,chatId);
+    if(capStatus.capped){
+      const capText=sessionCapReply(capStatus);
+      try{const db=new ChatStore(root);try{db.add(chatId,"user",content);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
+      return capText;
+    }
+    const targets=relayTargetsForProfile(root,profileName,active?{provider:active.provider??null,model:active.model??null}:null);
+    let note:string;
+    if(targets.length<2)note="Relay needs at least two configured routes. Add one with `sam agents add-fallback "+profileName+" <provider> <model>`.";
+    else note=(await relayPrompt(root,relayText,targets,{actor:profileName})).text;
+    if(note.length>20000)note=note.slice(0,19900)+"\n[truncated]";
+    const db=new ChatStore(root);
+    try{db.add(chatId,"user",content);db.add(chatId,"assistant",note);}finally{db.close();}
+    recordActivity(root,profileName,"turn","Relay answered in chat "+chatId.slice(0,8));
+    return note;
+  }
+  // Primary route, then the profile's configured fallbacks. With no
+  // fallback, a missing primary still dies here - before the user
+  // message is stored - exactly as a single-provider turn always did.
+  const routes=turnRoutes(root,process.env,profileName,active?{provider:active.provider??null,model:active.model??null}:null,route);
+  if(routes.length===1&&(routes[0].unavailable||!routes[0].endpoint||!routes[0].model))throw Error(routes[0].unavailable??"Model not configured");
   let turnTokens=0;
-  provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
   // Session caps (harness item 3): a chat that has spent today's
   // turn or token cap closes this turn gracefully with NO model
   // call. The exchange still persists, so the owner sees the pause
@@ -109,8 +131,18 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const db=new ChatStore(root);let history;
   // No history limit anymore (Phase A item 2): a long chat compacts
   // below instead of dying at 100 messages.
+  // A killed turn left an assistant row marked partial. Repeating the
+  // same user text resumes that row instead of starting the call over.
   let userMessageId:string|null=null;
-  try{history=db.messages(chatId);userMessageId=db.add(chatId,"user",content).id;}finally{db.close();}
+  let resuming:{id:string;content:string}|null=null;
+  try{
+    history=db.messages(chatId);
+    const open=db.openPartial(chatId);
+    const prevUser=[...history].reverse().find(m=>m.role==="user");
+    if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;}
+    else userMessageId=db.add(chatId,"user",content).id;
+    if(!resuming)history=db.messages(chatId);
+  }finally{db.close();}
   // Reactions (Dip, 2026-11-10): on a live owner chat turn the
   // owner's message gets an eyes stamp while SAM works and a heart
   // once the reply lands - the texting acknowledgement, on the
@@ -131,13 +163,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // background turn text is SAM's own prompting, not a fresh correction.
       let correctionNote="";
       const correction=detectCorrection(content);
-      if(correction&&(opts?.route??"chat")==="chat"){
+      if(!resuming&&correction&&(opts?.route??"chat")==="chat"){
         try{
           const routed=proposeCorrection(root,{actor:profileName,chatId,text:content});
           if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
         }catch{/* correction plumbing never breaks a turn */}
       }
-      for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
+      if(!resuming)for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
     }else{
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName));
@@ -172,41 +204,74 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // replaced here by their summary; the newest exchanges stay
   // verbatim. Compaction never breaks a turn - on any error the raw
   // tail rides, exactly the pre-compaction behavior.
-  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string}>=history.slice(-24).map(m=>({role:m.role,content:m.content}));
+  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string}>=history.slice(-24).map(m=>({role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content}));
   try{
     const ctx=buildChatContext(root,{chatId,profile:profileName,visitor,history});
     contextSummary=ctx.summary;keptHistory=ctx.kept;
+    const partialText=new Set(history.filter(m=>m.partial===1).map(m=>m.content));
+    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{role:m.role,content:"[partial, incomplete reply]\n"+m.content}:m);
   }catch{/* fail open to the raw tail */}
-  const messages=[{role:"system" as const,content:systemContent},
+  const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
-    ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content}];
-  let reply:string;
+    ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:resuming?"Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.":content}];
+  let partialId:string|null=resuming?.id??null;
+  let reply="";
+  let answered=false;
+  for(let i=0;i<routes.length;i++){
+    const conn=routes[i];
+    const guard:TurnToolGuard={toolsStarted:false};
+    try{
+      if(conn.unavailable)throw Error(conn.unavailable);
+      if(!conn.endpoint||!conn.model)throw Error("Model not configured");
+      const model=conn.model;
+      const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",60000);
+      const tier=conn.tier;
+      provider.onPartial=(accumulated)=>{
+        const visible=stripModelMarkup(accumulated);
+        if(!visible)return;
+        const text=resuming?joinPartial(resuming.content,visible):visible;
+        try{const store=new ChatStore(root);try{partialId=store.savePartial(chatId,partialId,text);}finally{store.close();}}catch{/* a partial write never breaks the read */}
+      };
+      provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
+      if(active?.connector_id){
+        const pinned=connectors(root).find(c=>c.id===active.connector_id);
+        if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
+        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
+      }else if(chatAgent){
+        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+      }else{
+        const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
+        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+      }
+      answered=true;
+      break;
+    }catch(error){
+      const next=routes[i+1];
+      if(!next||!failoverEligible(error,guard)){
+        // A turn that dies mid-flight still spent what it spent; the
+        // session ledger records it so the caps see the true total.
+        if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
+        recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+        throw error;
+      }
+      const reason=error instanceof Error?error.message:String(error);
+      recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+    }
+  }
+  if(!answered)throw Error("Model not configured");
+  const finalText=resuming?joinPartial(resuming.content,reply):reply;
+  const saved=new ChatStore(root);
   try{
-  if(active?.connector_id){
-    const pinned=connectors(root).find(c=>c.id===active.connector_id);
-    if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
-    reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
-  }else if(chatAgent){
-    reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
-  }else{
-    const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
-    if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget);
-    else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined);
-  }
-  }catch(error){
-    // A turn that dies mid-flight still spent what it spent; the
-    // session ledger records it so the caps see the true total.
-    if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
-    recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-    throw error;
-  }
-  const saved=new ChatStore(root);try{saved.add(chatId,"assistant",reply);}finally{saved.close();}
+    if(partialId){if(!saved.finishPartial(chatId,partialId,finalText))saved.add(chatId,"assistant",finalText);}
+    else saved.add(chatId,"assistant",finalText);
+  }finally{saved.close();}
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is
   // SAM's/the owner's choice and is never overwritten by the
   // automatic acknowledgement.
   if(reactable&&userMessageId){try{const db=new ChatStore(root);try{const msg=db.messages(chatId).find(m=>m.id===userMessageId);if(msg&&msg.reaction==="\uD83D\uDC40")db.setReaction(chatId,userMessageId,"\u2764\uFE0F");}finally{db.close();}}catch{/* reactions never break a turn */}}
   recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-  recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8));
-  return reply;
+  recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8)+(resuming?" (resumed from partial)":""));
+  return finalText;
 }

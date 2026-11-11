@@ -30,6 +30,7 @@ import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
 import { authStatus, type AuthStatus } from "./auth-status.js";
 import { stackWatchStatus } from "./stack-watch.js";
 import { unificationReport, type UnificationReport } from "./unification.js";
+import { observabilityReport, type ObservabilityReport } from "./observability.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -80,6 +81,7 @@ export function statusSnapshot(root: string): {
   auth: AuthStatus;
   stackWatch: { connector: string | null; script: string };
   unification: UnificationReport;
+  observability: ObservabilityReport;
 } {
   return {
     at: new Date().toISOString(),
@@ -112,5 +114,6 @@ export function statusSnapshot(root: string): {
     auth: authStatus(root),
     stackWatch: stackWatchStatus(root),
     unification: unificationReport(root),
+    observability: observabilityReport(root),
   };
 }

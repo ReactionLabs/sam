@@ -67,6 +67,9 @@ import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
 import { authStatus, probeAuth } from "./auth-status.js";
+import { addProvider, listProviders, removeProvider } from "./providers.js";
+import { addFallbackRoute, clearFallbackRoutes, fallbackRoutes } from "./failover.js";
+import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
@@ -77,6 +80,7 @@ import { loadApprovalPolicy, saveApprovalPolicy, scanNeverList, neverListSummary
 import { listContacts, getContact, upsertContact, removeContact } from "./contacts.js";
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
+import { observabilityReport } from "./observability.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
@@ -389,7 +393,11 @@ corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat
 const modelsCmd=program.command("models").description("Model routing (P11) + auth status (CLI dressing item 2): which model each route tier runs, and whether the routes and profile pins actually work - bare `sam models` prints the routing table");
 modelsCmd.action(()=>output(modelRoutingTable()));
 modelsCmd.command("status").description("Auth status over every detected route: per route tier and per profile (pin wins) - resolved model, source, the key env NAME as present/absent (values never print), endpoint, the setup baseline, the engine CLI-reuse route, and the last probe verdicts").option("--probe","Probe every distinct resolved model with ONE real completion each, bucket the results (ok/auth/rate_limit/billing/timeout/network/empty/missing), and persist them for later status reads").option("--live","Explicitly allow the probe's model API requests (may incur charges); required with --probe").option("--check","Exit non-zero when the chat route is unhealthy (no model/key, or its latest probe is not ok) - for scripts").action(async(o:{probe?:boolean;live?:boolean;check?:boolean})=>{const root=resolve(program.opts().workspace);if(o.probe&&!o.live)throw new Error("--probe makes real model API requests; pass --live to allow them (the explicit network opt-in)");let probe=null;if(o.probe)probe=await probeAuth(root);const status=authStatus(root);output({auth:status,probe});if(o.check&&!status.healthy)process.exitCode=1;});
-modelsCmd.command("list").description("The routing table plus every profile's resolved model and key state, as one read").action(()=>{const root=resolve(program.opts().workspace);const status=authStatus(root);output({routes:modelRoutingTable(),profiles:status.profiles});});
+modelsCmd.command("list").description("The routing table plus every profile's resolved model and key state, as one read").action(()=>{const root=resolve(program.opts().workspace);const status=authStatus(root);output({routes:modelRoutingTable(),profiles:status.profiles,providers:status.providers});});
+const providersCmd=program.command("providers").description("Model providers configured at once: the environment provider plus entries in .sam/providers.json (endpoint and key ENV NAME only - never a key value). A profile pins one with `sam agents set-provider`");
+providersCmd.command("list").description("Every configured provider: id, endpoint, key env name as present/absent, and the models it serves. Values are never printed").action(()=>output(listProviders(program.opts().workspace)));
+providersCmd.command("add").argument("<id>").requiredOption("--endpoint <url>","OpenAI-compatible /chat/completions URL").requiredOption("--key-env <NAME>","Environment variable NAME that holds this provider's key").requiredOption("--model <id>","Default model").option("--cheap <id>","Cheap-tier model (heartbeat)").option("--deep <id>","Deep-tier model (background)").description("Register an additional provider. The id is not a secret; the key stays in the environment").action((id:string,o:{endpoint:string;keyEnv:string;model:string;cheap?:string;deep?:string})=>{const root=program.opts().workspace as string;const added=addProvider(root,{id,endpoint:o.endpoint,keyEnv:o.keyEnv,model:o.model,cheapModel:o.cheap??null,deepModel:o.deep??null});recordActivity(root,"owner","provider-add","Provider "+added.id+" registered (key env "+added.keyEnv+", "+added.key+")");output(added);});
+providersCmd.command("remove").argument("<id>").description("Remove a file-configured provider. The environment provider is not stored here and cannot be removed").action((id:string)=>{const root=program.opts().workspace as string;const removed=removeProvider(root,id);if(removed)recordActivity(root,"owner","provider-remove","Provider "+id+" removed");output({removed});});
 const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
 agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
 agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
@@ -403,6 +411,29 @@ agentCmd.command("set-model").argument("<name>").argument("<model>").description
     output(updated);
   }finally{db.close();}
 });
+agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider").action((name:string,provider:string)=>{
+  const root=program.opts().workspace as string;
+  if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its provider is the environment provider");
+  const providerId=provider==="none"?null:provider;
+  if(providerId&&!listProviders(root).some(p=>p.id===providerId))throw new Error("Unknown provider \""+providerId+"\". Configured providers: "+listProviders(root).map(p=>p.id).join(", "));
+  const db=new ChatStore(root);
+  try{
+    const updated=db.setAgentProvider(name,providerId);
+    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    recordActivity(root,name,"agent-repin","Provider pin "+(updated.provider?("set to "+updated.provider):"cleared (environment provider)"));
+    output(updated);
+  }finally{db.close();}
+});
+agentCmd.command("fallbacks").argument("<name>").description("Failover routes for a profile, tried in order after the primary provider+model when a turn fails before any tool has run").action((name:string)=>output({profile:name,fallbacks:fallbackRoutes(program.opts().workspace,name)}));
+agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argument("<model>").description("Append a failover route (configured provider id + model). The turn uses it only when the previous route fails before any tool runs").action((name:string,provider:string,model:string)=>{
+  const root=program.opts().workspace as string;
+  const known=knownProfileNames(root);
+  if(!known.includes(name))throw new Error("Unknown profile \""+name+"\". Known profiles: "+known.join(", "));
+  const fallbacks=addFallbackRoute(root,name,{provider,model});
+  recordActivity(root,name,"failover-route","Fallback route added: "+provider+"/"+model);
+  output({profile:name,fallbacks});
+});
+agentCmd.command("clear-fallbacks").argument("<name>").description("Remove every failover route for a profile. The primary pin is left alone").action((name:string)=>{const root=program.opts().workspace as string;output({profile:name,cleared:clearFallbackRoutes(root,name)});});
 agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; use 'none' to clear the pin").action((name:string,connector:string)=>{
   const root=program.opts().workspace as string;
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; it uses no pinned connector");
@@ -431,8 +462,29 @@ filesCmd.command("clear").argument("<name>").argument("<file>").description("Rem
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
+program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
+  const root=program.opts().workspace as string;
+  let targets;
+  if(o.route.length)targets=o.route.map(parseRelayRoute);
+  else{
+    let profile: {provider?:string|null;model?:string|null}|null=null;
+    if(o.profile!=="sam"){
+      const db=new ChatStore(root);
+      try{const found=db.agents().find(a=>a.name===o.profile);if(!found)throw new Error("Unknown profile \""+o.profile+"\"");profile={provider:found.provider??null,model:found.model??null};}finally{db.close();}
+    }
+    targets=relayTargetsForProfile(root,o.profile,profile);
+  }
+  const result=await relayPrompt(root,prompt,targets,{actor:o.profile});
+  if(o.chat){
+    const db=new ChatStore(root);
+    try{db.add(o.chat,"user",prompt);db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
+  }
+  output(result);
+  if(result.answers.every(a=>!a.ok))process.exitCode=1;
+});
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
+program.command("observe").description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability").action(()=>output(observabilityReport(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")
@@ -464,6 +516,22 @@ chats.command("unarchive").argument("<id>").option("--profile <name>","Acting pr
 chats.command("activity").description("Every chat with its last-message time and message count, newest activity first").action(()=>{const db=new ChatStore(program.opts().workspace);try{const act=new Map(db.lastActivity().map(a=>[a.chat_id,a] as const));output(db.list({includeArchived:true}).map(c=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0})).sort((x,y)=>String(y.lastMessageAt??"").localeCompare(String(x.lastMessageAt??""))));}finally{db.close();}});
 chats.command("search").argument("<query>").option("--profile <name>","Acting profile (default sam)").option("--limit <n>","Max hits (default 20)").description("Full-text search (FTS5, relevance-ranked, multi-term prefix) across the acting profile's own chats - the engine behind the sam_search_chats chat tool").action((query:string,o:{profile?:string;limit?:string})=>output(searchManagedChats(program.opts().workspace,o.profile??"sam",query,o.limit?Number(o.limit):20)));
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
+chats.command("resume").argument("<id>").description("Resume a killed turn from the saved partial assistant reply. The row stays partial until the continuation finishes, and is never presented as a complete answer before that").action(async(id:string)=>{
+  const root=program.opts().workspace as string;
+  const db=new ChatStore(root);
+  let content="";
+  try{
+    const open=db.openPartial(id);
+    if(!open)throw new Error("No partial reply to resume");
+    const prev=[...db.messages(id)].reverse().find(m=>m.role==="user");
+    if(!prev)throw new Error("No partial reply to resume");
+    content=prev.content;
+  }finally{db.close();}
+  const reply=await runChatTurn(root,id,content);
+  const check=new ChatStore(root);
+  try{const last=[...check.messages(id)].reverse().find(m=>m.role==="assistant");output({reply,partial:last?.partial===1,content:last?.content??null});}
+  finally{check.close();}
+});
 chats.command("react").argument("<chatId>").argument("<messageId>").argument("<emoji>").description("Set an emoji reaction on a message (or clear it with 'none') - the operator parity for sam_react and the dashboard badges").action((chatId:string,messageId:string,emoji:string)=>{const db=new ChatStore(program.opts().workspace);try{const set=db.setReaction(chatId,messageId,emoji==="none"?null:emoji);output({set,message:db.messages(chatId).find(m=>m.id===messageId)??null});}finally{db.close();}});
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
 chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});

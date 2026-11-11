@@ -5,8 +5,8 @@ import { join,resolve } from "node:path";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
-export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null }
-export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null }
+export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null; provider:string|null }
+export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null; partial:number }
 // A reaction is a single emoji or a short emoji sequence (flags, ZWJ
 // families, keycaps, skin tones) - never text. This one validator
 // fences the sam_react tool, the dashboard badges, and the CLI verb.
@@ -50,8 +50,10 @@ export class ChatStore {
     const acols=this.db.pragma("table_info(agent_profiles)") as Array<{name:string}>;
     if(!acols.some(c=>c.name==="model"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN model TEXT");
     if(!acols.some(c=>c.name==="connector_id"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN connector_id TEXT");
+    if(!acols.some(c=>c.name==="provider"))this.db.exec("ALTER TABLE agent_profiles ADD COLUMN provider TEXT");
     const mcols=this.db.pragma("table_info(chat_messages)") as Array<{name:string}>;
     if(!mcols.some(c=>c.name==="reaction"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN reaction TEXT");
+    if(!mcols.some(c=>c.name==="partial"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN partial INTEGER NOT NULL DEFAULT 0");
     // Full-text chat search (Plan Phase B item 4): an FTS5 external-content
     // index over chat_messages, the MemoryStore pattern - triggers keep it
     // in step with inserts, and a DB that predates the index gets one
@@ -91,19 +93,20 @@ export class ChatStore {
       item.visitor=parent.visitor===1?1:0;
       this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,parent_chat_id,agent_name,visitor) VALUES (@id,@title,@created_at,@updated_at,@parent_chat_id,@agent_name,@visitor)").run(item);
       const history=this.messages(parentId);
-      for(const m of history){this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at) VALUES (?,?,?,?,?)").run(randomUUID(),item.id,m.role,m.content,m.created_at);}
+      for(const m of history){this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at,partial) VALUES (?,?,?,?,?,?)").run(randomUUID(),item.id,m.role,m.content,m.created_at,m.partial?1:0);}
     })();
     return item;
   }
   agents():AgentProfile[]{return this.db.prepare("SELECT * FROM agent_profiles ORDER BY name LIMIT 100").all() as AgentProfile[];}
-  createAgent(name:string,instructions:string,opts?:{model?:string|null;connectorId?:string|null}):AgentProfile{
+  createAgent(name:string,instructions:string,opts?:{model?:string|null;connectorId?:string|null;provider?:string|null}):AgentProfile{
     if(!/^[a-z][a-z0-9._-]{0,63}$/.test(name)||!instructions.trim()||instructions.length>4000)throw new Error("Invalid agent profile");
-    const model=opts?.model??null,connectorId=opts?.connectorId??null;
+    const model=opts?.model??null,connectorId=opts?.connectorId??null,provider=opts?.provider??null;
     if(model!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(model))throw new Error("Invalid agent profile");
+    if(provider!==null&&!/^[a-z][a-z0-9._-]{0,31}$/.test(provider))throw new Error("Invalid agent profile");
     if(connectorId!==null&&!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connectorId))throw new Error("Invalid agent profile");
     if(this.agents().length>=100)throw new Error("Agent limit reached");
-    const agent={id:randomUUID(),name,instructions:instructions.trim(),created_at:new Date().toISOString(),model,connector_id:connectorId};
-    this.db.prepare("INSERT INTO agent_profiles (id,name,instructions,created_at,model,connector_id) VALUES (@id,@name,@instructions,@created_at,@model,@connector_id)").run(agent);return agent;
+    const agent={id:randomUUID(),name,instructions:instructions.trim(),created_at:new Date().toISOString(),model,connector_id:connectorId,provider};
+    this.db.prepare("INSERT INTO agent_profiles (id,name,instructions,created_at,model,connector_id,provider) VALUES (@id,@name,@instructions,@created_at,@model,@connector_id,@provider)").run(agent);return agent;
   }
   // Re-pinning (found live 2026-11-09): profiles were create-only, so moving
   // a profile to a new model meant a direct UPDATE on chats.db. These are
@@ -114,6 +117,11 @@ export class ChatStore {
   setAgentModel(name:string,model:string|null):AgentProfile|null{
     if(model!==null&&!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(model))throw new Error("Invalid agent profile");
     if(this.db.prepare("UPDATE agent_profiles SET model=? WHERE name=?").run(model,name).changes!==1)return null;
+    return this.agents().find(a=>a.name===name)??null;
+  }
+  setAgentProvider(name:string,provider:string|null):AgentProfile|null{
+    if(provider!==null&&!/^[a-z][a-z0-9._-]{0,31}$/.test(provider))throw new Error("Invalid agent profile");
+    if(this.db.prepare("UPDATE agent_profiles SET provider=? WHERE name=?").run(provider,name).changes!==1)return null;
     return this.agents().find(a=>a.name===name)??null;
   }
   setAgentConnector(name:string,connectorId:string|null):AgentProfile|null{
@@ -166,13 +174,41 @@ export class ChatStore {
   }
   add(id:string,role:"user"|"assistant",content:string):ChatMessage {
     if(!["user","assistant"].includes(role)||!content.trim()||content.length>20000)throw new Error("Invalid chat message");
-    const now=new Date().toISOString(),item={id:randomUUID(),chat_id:id,role,content,created_at:now,reaction:null as string|null};
+    const now=new Date().toISOString(),item={id:randomUUID(),chat_id:id,role,content,created_at:now,reaction:null as string|null,partial:0};
     this.db.transaction(()=>{
       if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
       this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at) VALUES (@id,@chat_id,@role,@content,@created_at)").run(item);
       this.db.prepare("UPDATE chats SET updated_at=? WHERE id=?").run(now,id);
     })();
     return item;
+  }
+  // A partial assistant row is an interrupted reply. partial=1 until
+  // the turn finishes; readers must not treat it as a complete answer.
+  openPartial(chatId:string):ChatMessage|null{
+    const rows=this.messages(chatId);
+    const last=rows[rows.length-1];
+    return last&&last.role==="assistant"&&last.partial===1?last:null;
+  }
+  savePartial(chatId:string,messageId:string|null,content:string):string{
+    const text=content.slice(0,20000);
+    if(!text.trim())throw new Error("Invalid chat message");
+    if(messageId){
+      const changed=this.db.prepare("UPDATE chat_messages SET content=?,partial=1 WHERE id=? AND chat_id=? AND role='assistant'").run(text,messageId,chatId).changes;
+      if(changed===1)return messageId;
+    }
+    const now=new Date().toISOString();
+    const item={id:randomUUID(),chat_id:chatId,role:"assistant" as const,content:text,created_at:now,reaction:null as string|null,partial:1};
+    this.db.transaction(()=>{
+      if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(chatId))throw new Error("Chat not found");
+      this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at,partial) VALUES (@id,@chat_id,@role,@content,@created_at,@partial)").run(item);
+      this.db.prepare("UPDATE chats SET updated_at=? WHERE id=?").run(now,chatId);
+    })();
+    return item.id;
+  }
+  finishPartial(chatId:string,messageId:string,content:string):boolean{
+    const text=content.slice(0,20000);
+    if(!text.trim())return false;
+    return this.db.prepare("UPDATE chat_messages SET content=?,partial=0 WHERE id=? AND chat_id=? AND role='assistant'").run(text,messageId,chatId).changes===1;
   }
   // Reactions (Dip, 2026-11-10): an emoji stamped on one message -
   // SAM's automatic seen/acknowledged marks and its deliberate

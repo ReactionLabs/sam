@@ -398,7 +398,7 @@ export function ownToolsFor(root:string):Array<Record<string,unknown>>{
   return {type:"function",function:{...fn,description:(fn.description??"")+" For kind heartbeat, detail.profile MUST be exactly one of these profile names: "+names+". A connector's display name (for example \"Second Shift\") is NOT a profile name; use the profile name from this list."}};
  });
 }
-export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string):Promise<string>{
+export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean}):Promise<string>{
  // Deferred tool loading (harness item 4): the full set is partitioned
  // per round - below the threshold everything rides upfront exactly as
  // before; above it, only the upfront tier plus the loader are sent,
@@ -434,6 +434,9 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
     turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
   if(!turn.calls.length)return turn.content??"No response.";
+  // Failover may only happen before any tool runs. The moment this
+  // round has tool calls, later provider errors stay on this route.
+  if(guard)guard.toolsStarted=true;
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   // Classify in order (budget + tier stubs are loop-local and instant),
   // then run the round's real calls CONCURRENTLY (S4 latency: independent

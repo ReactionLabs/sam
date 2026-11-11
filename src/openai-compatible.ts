@@ -50,6 +50,66 @@ export function parseTokenUsage(payload: unknown): TokenUsage | null {
   return { promptTokens: promptTokens ?? 0, completionTokens: completionTokens ?? 0, totalTokens };
 }
 
+export interface AssembledSse {
+  content: string;
+  toolCalls: Array<{ id: string; type: "function"; function: { name: string; arguments: string } }>;
+  usage: TokenUsage | null;
+}
+
+// Fold an OpenAI-compatible SSE body into one completion. Incomplete
+// trailing events are ignored so a killed stream still yields the text
+// that already arrived. Tool-call deltas are joined by index.
+export function assembleSse(raw: string): AssembledSse {
+  let content = "";
+  const calls: Array<{ id: string; name: string; arguments: string }> = [];
+  let usage: TokenUsage | null = null;
+  for (const event of raw.split(/\n\n/)) {
+    const dataLine = event.split("\n").filter(line => line.startsWith("data:")).map(line => line.slice(5).trim()).join("");
+    if (!dataLine || dataLine === "[DONE]") continue;
+    let json: unknown;
+    try { json = JSON.parse(dataLine); } catch { continue; }
+    const parsed = parseTokenUsage(json);
+    if (parsed) usage = parsed;
+    const choice = (json as { choices?: Array<{ delta?: Record<string, unknown>; message?: Record<string, unknown> }> })?.choices?.[0];
+    const delta = choice?.delta ?? choice?.message;
+    if (!delta) continue;
+    if (typeof delta.content === "string") content += delta.content;
+    const toolCalls = delta.tool_calls;
+    if (!Array.isArray(toolCalls)) continue;
+    for (const call of toolCalls) {
+      if (!call || typeof call !== "object") continue;
+      const row = call as { index?: unknown; id?: unknown; function?: { name?: unknown; arguments?: unknown } };
+      const index = typeof row.index === "number" ? row.index : calls.length;
+      if (!calls[index]) calls[index] = { id: "", name: "", arguments: "" };
+      if (typeof row.id === "string") calls[index].id = row.id;
+      if (typeof row.function?.name === "string") calls[index].name += row.function.name;
+      if (typeof row.function?.arguments === "string") calls[index].arguments += row.function.arguments;
+    }
+  }
+  return {
+    content,
+    toolCalls: calls.filter(call => call && (call.id || call.name)).map(call => ({
+      id: call.id || "call",
+      type: "function" as const,
+      function: { name: call.name, arguments: call.arguments || "{}" },
+    })),
+    usage,
+  };
+}
+
+function payloadFromSse(assembled: AssembledSse): unknown {
+  return {
+    choices: [{
+      message: {
+        role: "assistant",
+        content: assembled.content || null,
+        ...(assembled.toolCalls.length ? { tool_calls: assembled.toolCalls } : {}),
+      },
+    }],
+    ...(assembled.usage ? { usage: { prompt_tokens: assembled.usage.promptTokens, completion_tokens: assembled.usage.completionTokens, total_tokens: assembled.usage.totalTokens } } : {}),
+  };
+}
+
 /** Opt-in OpenAI-compatible chat completions transport. No tools or automatic calls. */
 export class OpenAICompatibleProvider implements ModelProvider {
   readonly id = "openai-compatible";
@@ -57,6 +117,11 @@ export class OpenAICompatibleProvider implements ModelProvider {
   // provider usage object is reported here. Best-effort - a failing sink
   // never breaks a model call.
   onUsage?: (usage: TokenUsage, model: string) => void;
+  // Set by a chat turn that persists partial output as it arrives.
+  // When set, connector completions request a stream and report the
+  // visible text so far. JSON responses (tests, non-streaming hosts)
+  // still parse, and report once.
+  onPartial?: (accumulated: string) => void;
   private reportUsage(payload: unknown, model: string): void {
     try {
       const usage = parseTokenUsage(payload);
@@ -163,14 +228,31 @@ export class OpenAICompatibleProvider implements ModelProvider {
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
     try{
+      const stream=!!this.onPartial;
       const response=await fetch(this.endpoint,{method:"POST",redirect:"error",signal:controller.signal,
         headers:{"Content-Type":"application/json",...(this.apiKey?{Authorization:"Bearer "+this.apiKey}:{})},
-        body:JSON.stringify({model,messages,...(tools.length?{tools,tool_choice:"auto"}:{tool_choice:"none"}),stream:false})});
+        body:JSON.stringify({model,messages,...(tools.length?{tools,tool_choice:"auto"}:{tool_choice:"none"}),stream})});
       if(!response.ok)throw Error("Model connector request failed (HTTP "+response.status+")");
       const reader=response.body?.getReader();if(!reader)throw Error("Empty model response");
       const chunks:Uint8Array[]=[];let length=0;
-      try{for(;;){const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(value);}}finally{reader.releaseLock();}
-      const data=JSON.parse(Buffer.concat(chunks).toString("utf8")) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
+      let reported="";
+      const decoder=new TextDecoder();
+      try{for(;;){
+        const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(value);
+        if(stream&&this.onPartial){
+          const raw=decoder.decode(Buffer.concat(chunks));
+          if(!raw.trimStart().startsWith("{")){
+            const snap=assembleSse(raw).content;
+            if(snap&&snap!==reported){reported=snap;try{this.onPartial(snap);}catch{/* persistence never breaks the read */}}
+          }
+        }
+      }}finally{reader.releaseLock();}
+      const rawText=Buffer.concat(chunks).toString("utf8");
+      const data=(stream&&!rawText.trimStart().startsWith("{")?payloadFromSse(assembleSse(rawText)):JSON.parse(rawText)) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
+      if(stream&&this.onPartial){
+        const visible=typeof data.choices?.[0]?.message?.content==="string"?data.choices[0].message.content:"";
+        if(visible&&visible!==reported){try{this.onPartial(visible);}catch{/* persistence never breaks the read */}}
+      }
       this.reportUsage(data, model);
       const msg=data.choices?.[0]?.message;
       if(!msg)throw Error("Invalid model response");
