@@ -10,6 +10,7 @@ import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
 import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
+import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { recordUsage } from "./usage.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
@@ -82,6 +83,27 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
+  // /relay is chat-reachable: the same prompt goes to every configured
+  // route for this profile and the labeled answers are the reply. It
+  // does not run tools, and it does not capture the prompt as law.
+  const relayText=relayCommandPrompt(content);
+  if(relayText){
+    const capStatus=sessionCapStatus(root,chatId);
+    if(capStatus.capped){
+      const capText=sessionCapReply(capStatus);
+      try{const db=new ChatStore(root);try{db.add(chatId,"user",content);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
+      return capText;
+    }
+    const targets=relayTargetsForProfile(root,profileName,active?{provider:active.provider??null,model:active.model??null}:null);
+    let note:string;
+    if(targets.length<2)note="Relay needs at least two configured routes. Add one with `sam agents add-fallback "+profileName+" <provider> <model>`.";
+    else note=(await relayPrompt(root,relayText,targets,{actor:profileName})).text;
+    if(note.length>20000)note=note.slice(0,19900)+"\n[truncated]";
+    const db=new ChatStore(root);
+    try{db.add(chatId,"user",content);db.add(chatId,"assistant",note);}finally{db.close();}
+    recordActivity(root,profileName,"turn","Relay answered in chat "+chatId.slice(0,8));
+    return note;
+  }
   // Primary route, then the profile's configured fallbacks. With no
   // fallback, a missing primary still dies here - before the user
   // message is stored - exactly as a single-provider turn always did.

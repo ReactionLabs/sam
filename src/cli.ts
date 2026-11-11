@@ -67,6 +67,7 @@ import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfi
 import { authStatus, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, removeProvider } from "./providers.js";
 import { addFallbackRoute, clearFallbackRoutes, fallbackRoutes } from "./failover.js";
+import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { join,resolve } from "node:path";
@@ -454,6 +455,26 @@ filesCmd.command("clear").argument("<name>").argument("<file>").description("Rem
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
+program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
+  const root=program.opts().workspace as string;
+  let targets;
+  if(o.route.length)targets=o.route.map(parseRelayRoute);
+  else{
+    let profile: {provider?:string|null;model?:string|null}|null=null;
+    if(o.profile!=="sam"){
+      const db=new ChatStore(root);
+      try{const found=db.agents().find(a=>a.name===o.profile);if(!found)throw new Error("Unknown profile \""+o.profile+"\"");profile={provider:found.provider??null,model:found.model??null};}finally{db.close();}
+    }
+    targets=relayTargetsForProfile(root,o.profile,profile);
+  }
+  const result=await relayPrompt(root,prompt,targets,{actor:o.profile});
+  if(o.chat){
+    const db=new ChatStore(root);
+    try{db.add(o.chat,"user",prompt);db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
+  }
+  output(result);
+  if(result.answers.every(a=>!a.ok))process.exitCode=1;
+});
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
