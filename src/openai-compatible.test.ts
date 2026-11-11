@@ -143,6 +143,43 @@ test("provider reports token usage from complete and connector turns (P11)", asy
   } finally { server.close(); await once(server, "close"); }
 });
 
+test("streamed connector turns request and report usage (F2 regression)", async () => {
+  // A real provider sends a usage event in an SSE stream ONLY when the
+  // request sets stream_options.include_usage. The fake behaves the
+  // same, so this test fails if the request ever drops the option.
+  const server = createServer((req, res) => {
+    let raw = "";
+    req.on("data", (c) => { raw += c; });
+    req.on("end", () => {
+      const body = JSON.parse(raw) as { stream?: boolean; stream_options?: { include_usage?: boolean } };
+      res.setHeader("Content-Type", "text/event-stream");
+      const events = [
+        "data: " + JSON.stringify({ choices: [{ delta: { content: "streamed " } }] }),
+        "data: " + JSON.stringify({ choices: [{ delta: { content: "answer" } }] }),
+      ];
+      if (body.stream_options?.include_usage === true)
+        events.push("data: " + JSON.stringify({ choices: [], usage: { prompt_tokens: 13, completion_tokens: 4, total_tokens: 17 } }));
+      events.push("data: [DONE]");
+      res.end(events.join("\n\n") + "\n\n");
+    });
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("No port");
+    const provider = new OpenAICompatibleProvider(`http://127.0.0.1:${addr.port}/v1/chat/completions`, "");
+    const seen: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; model: string }> = [];
+    provider.onUsage = (usage, model) => { seen.push({ ...usage, model }); };
+    const partials: string[] = [];
+    provider.onPartial = (accumulated) => { partials.push(accumulated); };
+    const turn = await provider.completeConnectorTurn("mock", [{ role: "user", content: "hi" }], []);
+    assert.equal(turn.content, "streamed answer");
+    assert.equal(partials[partials.length - 1], "streamed answer");
+    assert.deepEqual(seen, [{ promptTokens: 13, completionTokens: 4, totalTokens: 17, model: "mock" }]);
+  } finally { server.close(); await once(server, "close"); }
+});
+
 test("provider hides embedded reasoning and rejects reasoning-only replies", async () => {
   let body = "<think>private planning</think>Visible answer";
   const server = createServer((_req, res) => {

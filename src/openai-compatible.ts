@@ -229,9 +229,14 @@ export class OpenAICompatibleProvider implements ModelProvider {
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
     try{
       const stream=!!this.onPartial;
+      // Streamed turns must ASK for usage: providers only emit a usage
+      // event in SSE when include_usage is set. Without it every chat
+      // turn (all of them stream since partial persistence landed)
+      // metered nothing and the spend surfaces read zero (smoke F2,
+      // 2026-11-10).
       const response=await fetch(this.endpoint,{method:"POST",redirect:"error",signal:controller.signal,
         headers:{"Content-Type":"application/json",...(this.apiKey?{Authorization:"Bearer "+this.apiKey}:{})},
-        body:JSON.stringify({model,messages,...(tools.length?{tools,tool_choice:"auto"}:{tool_choice:"none"}),stream})});
+        body:JSON.stringify({model,messages,...(tools.length?{tools,tool_choice:"auto"}:{tool_choice:"none"}),stream,...(stream?{stream_options:{include_usage:true}}:{})})});
       if(!response.ok)throw Error("Model connector request failed (HTTP "+response.status+")");
       const reader=response.body?.getReader();if(!reader)throw Error("Empty model response");
       const chunks:Uint8Array[]=[];let length=0;
