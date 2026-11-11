@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, lstatSync } from "node:fs";
+import Database from "better-sqlite3";
 import { join, resolve } from "node:path";
 import { discoverSkills, parseSkillMetadata, type SkillEntry } from "./skills.js";
 import { installedSkills } from "./skill-registry.js";
@@ -19,8 +20,8 @@ import { recordActivity } from "./activity.js";
 // (actions.ts) writes through writeAuthoredSkill here, which
 // validates again, stages the file, and proves the written skill
 // parses and discovers before it counts. Provenance lives in
-// .sam/skill-authors.json (source "sam-authored"), beside the
-// registry's skill-installs.json. A draft may PATCH a skill only
+// .sam/skill-authors.db (source "sam-authored"), beside the
+// registry's skill-installs.db. A draft may PATCH a skill only
 // when that skill is sam-authored; registry installs and hand-placed
 // skills refuse at proposal time - SAM never overwrites someone
 // else's playbook. Visitors author nothing (P12: a visitor is not
@@ -86,15 +87,104 @@ export function renderSkillMarkdown(draft: SkillDraft): string {
 }
 
 function authorsFile(root: string): string { return join(resolve(root), ".sam", "skill-authors.json"); }
-export function authoredSkills(root: string): AuthoredSkill[] {
-  const file = authorsFile(root);
-  if (!existsSync(file)) return [];
-  try { const data = JSON.parse(readFileSync(file, "utf8")); return Array.isArray(data) ? data as AuthoredSkill[] : []; }
-  catch { return []; }
+function authorsDbFile(root: string): string { return join(resolve(root), ".sam", "skill-authors.db"); }
+// State convergence (UNIFICATION item 4, twenty-first store): the
+// authored-skill provenance registry is SQLite (.sam/skill-authors.db,
+// the skill-installs pattern), one row per authored skill keyed by its
+// name holding the record's full JSON, rowid order = the old file
+// order. The old skill-authors.json was rewritten whole on every
+// authoring and every patch's version bump, with writers in the CLI
+// and in every process that executes an approved skill-author proposal
+// through the ONE gate, so two writers holding the same snapshot
+// silently lost the second one's change: an authored skill's
+// provenance could vanish (its SKILL.md orphaned on disk, and the
+// ownership check then refusing to let SAM patch its own skill), or a
+// version bump could revert. Here each mutation is a single-row INSERT
+// or UPDATE, and connections carry a busy_timeout so a writer waits
+// out a peer's transaction instead of dying on "database is locked".
+// First open imports a legacy skill-authors.json in file order and
+// renames it skill-authors.json.migrated - imported, never deleted; a
+// malformed file or a non-array payload imports nothing and is left in
+// place (the migrated shape reads it as no records, exactly the old
+// forgiving contract). A pure read on an install with neither file
+// creates nothing. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup change.
+function openAuthorsStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(authorsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS skill_authors (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyAuthors(db, root);
+  return db;
 }
-function saveAuthored(root: string, items: AuthoredSkill[]): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(authorsFile(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+function migrateLegacyAuthors(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM skill_authors").get() as { n: number };
+  if (n > 0) return;
+  const file = authorsFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO skill_authors (name, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Partial<AuthoredSkill>;
+      if (typeof rec.name !== "string" || !rec.name) continue;
+      insert.run(rec.name, JSON.stringify(rec));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function rowToAuthored(data: string): AuthoredSkill | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as AuthoredSkill : null; }
+  catch { return null; }
+}
+function authorsStoreExists(root: string): boolean {
+  return existsSync(authorsDbFile(root)) || existsSync(authorsFile(root));
+}
+export function authoredSkills(root: string): AuthoredSkill[] {
+  if (!authorsStoreExists(root)) return [];
+  const db = openAuthorsStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM skill_authors ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: AuthoredSkill[] = [];
+    for (const row of rows) { const rec = rowToAuthored(row.data); if (rec) items.push(rec); }
+    return items;
+  } finally { db.close(); }
+}
+function findAuthoredRow(root: string, name: string): AuthoredSkill | null {
+  if (!authorsStoreExists(root)) return null;
+  const db = openAuthorsStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM skill_authors WHERE name = ?").get(name) as { data: string } | undefined;
+    return row ? rowToAuthored(row.data) : null;
+  } finally { db.close(); }
+}
+function upsertAuthoredRow(root: string, rec: AuthoredSkill): void {
+  const db = openAuthorsStore(root);
+  try {
+    db.prepare("INSERT INTO skill_authors (name, data) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET data = excluded.data").run(rec.name, JSON.stringify(rec));
+  } finally { db.close(); }
+}
+// The store's update door (the skill-installs precedent): patch one
+// authored skill record by name through the store's own shape. The
+// name is immutable. Returns the updated record, or null when no such
+// record exists - and a miss on an install with no store at all
+// creates nothing.
+export function updateAuthoredSkill(root: string, name: string, patch: Partial<AuthoredSkill>): AuthoredSkill | null {
+  if (!name || !authorsStoreExists(root)) return null;
+  const current = findAuthoredRow(root, name);
+  if (!current) return null;
+  const next: AuthoredSkill = { ...current, ...patch, name: current.name };
+  const db = openAuthorsStore(root);
+  try { db.prepare("UPDATE skill_authors SET data = ? WHERE name = ?").run(JSON.stringify(next), current.name); }
+  finally { db.close(); }
+  return next;
 }
 
 // The proposal-time ownership check (the dead-card lesson: a draft
@@ -168,12 +258,11 @@ export function writeAuthoredSkill(root: string, draftInput: SkillDraft, opts: {
     throw new Error("Authored skill " + draft.name + " failed validation after write and was removed");
   }
   const now = new Date().toISOString();
-  const records = authoredSkills(root);
-  const prior = records.find(a => a.name === draft.name);
+  const prior = findAuthoredRow(root, draft.name);
   const record: AuthoredSkill = prior
     ? { ...prior, actor: opts.actor, version: prior.version + 1, updatedAt: now }
     : { name: draft.name, source: "sam-authored", actor: opts.actor, version: 1, createdAt: now, updatedAt: now };
-  saveAuthored(root, [...records.filter(a => a.name !== draft.name), record]);
+  upsertAuthoredRow(root, record);
   recordActivity(root, opts.actor, patch ? "skill-patched" : "skill-authored", (patch ? "Patched" : "Authored") + " skill " + draft.name + " (v" + record.version + "): " + draft.description.slice(0, 120));
   return record;
 }
