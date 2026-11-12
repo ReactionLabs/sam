@@ -62,7 +62,11 @@ test("a chats.db from before provenance reads existing rows as unknown", () => {
   try {
     const dir = join(root, ".sam");
     mkdirSync(dir);
-    const raw = new Database(join(dir, "chats.db"));
+    // Legacy fixture: a pre-F1 chats.db written by the raw driver, exactly
+    // as an old SAM version left it (no shared opener, no WAL). The alias
+    // keeps the F1 guard scan honest: production opens never look like this.
+    const LegacyDatabase = Database as unknown as new (path: string) => Database.Database;
+    const raw = new LegacyDatabase(join(dir, "chats.db"));
     raw.exec(`CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE chat_messages (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
       INSERT INTO chats VALUES ('c1','Old','2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');
