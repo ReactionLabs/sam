@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -22,8 +23,7 @@ export class PreferenceStore {
   private db:Database.Database;
   constructor(root:string){
     const dir=join(resolve(root),".sam");mkdirSync(dir,{recursive:true});
-    this.db=new Database(join(dir,"preferences.db"));
-    this.db.pragma("journal_mode = WAL");
+    this.db=openDatabase(join(dir,"preferences.db"));
     this.db.exec(`CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY,profile TEXT NOT NULL,statement TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('like','dislike','rule')),status TEXT NOT NULL CHECK(status IN ('noted','law','revoked')),hits INTEGER NOT NULL DEFAULT 1,source TEXT NOT NULL,pkey TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS preferences_by_profile ON preferences(profile,status);`);
   }

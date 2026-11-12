@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore, extractPreferences } from "./preferences.js";
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
@@ -68,9 +69,7 @@ function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl
 // is carried with no backup change.
 function openJobsStore(root:string):Database.Database{
  mkdirSync(join(resolve(root),".sam"),{recursive:true});
- const db=new Database(jobsDbPath(root));
- db.pragma("journal_mode = WAL");
- db.pragma("busy_timeout = 5000");
+ const db=openDatabase(jobsDbPath(root));
  db.exec("CREATE TABLE IF NOT EXISTS heartbeat_jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
  migrateLegacyJobs(db,root);
  return db;
@@ -217,9 +216,7 @@ interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; ou
 // migrated store is carried with no backup change.
 function openStateStore(root:string):Database.Database{
  mkdirSync(join(resolve(root),".sam"),{recursive:true});
- const db=new Database(stateDbPath(root));
- db.pragma("journal_mode = WAL");
- db.pragma("busy_timeout = 5000");
+ const db=openDatabase(stateDbPath(root));
  db.exec("CREATE TABLE IF NOT EXISTS heartbeat_state (key TEXT PRIMARY KEY, data TEXT NOT NULL)");
  migrateLegacyState(db,root);
  return db;

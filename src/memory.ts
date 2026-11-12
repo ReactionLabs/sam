@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -20,8 +21,7 @@ export class MemoryStore {
   private db:Database.Database;
   constructor(path:string) {
     mkdirSync(dirname(path),{recursive:true});
-    this.db=new Database(path);
-    this.db.pragma("journal_mode = WAL");
+    this.db=openDatabase(path);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS memory_records (
         id TEXT PRIMARY KEY, mission_id TEXT, kind TEXT NOT NULL,

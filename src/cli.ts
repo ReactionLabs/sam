@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { TaskScheduler } from "./tasks.js";
 import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
@@ -112,7 +113,7 @@ function store():MissionStore {
 }
 function withDb<T>(fn:(db:Database.Database,missions:MissionStore)=>T):T {
   const missions=store();
-  const db=new Database(dbPath());
+  const db=openDatabase(dbPath());
   db.pragma("foreign_keys = ON");
   try { return fn(db,missions); }
   finally { db.close(); missions.close(); }
@@ -627,7 +628,7 @@ task.command("list").argument("<mission>").action((code:string)=>{
   }));
 });
 task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network").action(async(code:string)=>{
-  const missions=store(), db=new Database(dbPath());
+  const missions=store(), db=openDatabase(dbPath());
   db.pragma("foreign_keys = ON");
   try {
     const m=missionOrThrow(missions,code);

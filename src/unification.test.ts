@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -71,7 +71,7 @@ test("unification audit: a missions db without an approvals table stays table-le
     assert.equal(report.legacyGate.approvals, 0);
     // Read-only proof: opening the audit must not run the legacy
     // store's constructor, so the table still does not exist.
-    const db = new Database(dbPath, { readonly: true });
+    const db = openDatabase(dbPath, { readonly: true });
     try {
       const names = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map(r => r.name);
       assert.equal(names.includes("approvals"), false);
@@ -85,7 +85,7 @@ test("unification audit: legacy approvals are counted by status when the table e
     const dbPath = join(dir, ".sam", "missions.db");
     const missions = new MissionStore(dbPath);
     const mission = missions.create("Audit fixture");
-    const db = new Database(dbPath);
+    const db = openDatabase(dbPath);
     const approvals = new ApprovalStore(db);
     const action = { tool: "demo", args: { title: "x" } };
     const first = approvals.request(mission.id, "EXTERNAL_WRITE", action, 1000, 5000);

@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { discoverSkills, parseSkillMetadata } from "./skills.js";
 import { recordActivity } from "./activity.js";
 
@@ -87,9 +88,7 @@ function openInstallsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(installsDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(installsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS skill_installs (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyInstalls(db, root);
   return db;

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, codeWrites, type CodeWriteRecord } from "./code.js";
@@ -119,9 +120,7 @@ function codingDbFile(root: string): string { return join(resolve(root), ".sam",
 // change.
 function openCodingStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  const db = new Database(codingDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(codingDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS coding_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyCoding(db, root);
   return db;

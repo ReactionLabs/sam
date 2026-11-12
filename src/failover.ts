@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
 
@@ -50,9 +51,7 @@ function openFallbacksStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(fallbacksDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(fallbacksDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS fallbacks (profile TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyFallbacks(db, root);
   return db;

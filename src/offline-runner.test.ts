@@ -4,6 +4,7 @@ import {mkdtempSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import {MissionStore} from "./storage.js";
 import {TaskScheduler} from "./tasks.js";
 import {OfflineMissionRunner} from "./offline-runner.js";
@@ -12,7 +13,7 @@ import {LocalEchoAdapter,type ExecutionAdapter} from "./execution.js";
 function fixture(fn:(db:Database.Database,store:MissionStore,tasks:TaskScheduler,runner:OfflineMissionRunner)=>Promise<void>) {
   return async()=>{
     const dir=mkdtempSync(join(tmpdir(),"sam-runner-"));
-    const path=join(dir,"missions.db"),store=new MissionStore(path),db=new Database(path);
+    const path=join(dir,"missions.db"),store=new MissionStore(path),db=openDatabase(path);
     db.pragma("foreign_keys = ON");
     const tasks=new TaskScheduler(db),runner=new OfflineMissionRunner(db);
     try { await fn(db,store,tasks,runner); }

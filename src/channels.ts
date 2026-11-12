@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 // Channels are how the outside world talks to SAM: a messaging surface (Telegram
 // first) bound to one profile. Like connectors, a channel stores only an env
@@ -43,9 +44,7 @@ function openChannelsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(channelsDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(channelsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS channels (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyChannels(db, root);
   return db;

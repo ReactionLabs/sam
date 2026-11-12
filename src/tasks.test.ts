@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {mkdtempSync,rmSync} from "node:fs";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import {MissionStore} from "./storage.js";
 import {TaskScheduler} from "./tasks.js";
 test("dependency ordering, fenced leases, crash recovery and mission gate",()=>{
@@ -13,7 +13,7 @@ test("dependency ordering, fenced leases, crash recovery and mission gate",()=>{
     const m=store.create("Build mission");
     store.transition(m.code,"PLANNING");
     store.transition(m.code,"READY");
-    const db=new Database(path), tasks=new TaskScheduler(db);
+    const db=openDatabase(path), tasks=new TaskScheduler(db);
     const first=tasks.add(m.id,"inspect");
     const second=tasks.add(m.id,"fix",[first.id]);
     assert.equal(tasks.claim(m.id,"worker-a",1000),undefined);
@@ -38,7 +38,7 @@ test("cross-mission dependency rejected",()=>{
   const dir=mkdtempSync(join(tmpdir(),"sam-deps-"));
   try{
     const store=new MissionStore(join(dir,"db.sqlite"));
-    const db=new Database(join(dir,"db.sqlite"));const tasks=new TaskScheduler(db);
+    const db=openDatabase(join(dir,"db.sqlite"));const tasks=new TaskScheduler(db);
     const a=store.create("A"),b=store.create("B");
     const task=tasks.add(a.id,"first");
     assert.throws(()=>tasks.add(b.id,"second",[task.id]),/Dependency/);
@@ -50,7 +50,7 @@ test("lease timestamps reject non-integer, negative and overflowing values",()=>
   const dir=mkdtempSync(join(tmpdir(),"sam-lease-bounds-"));
   const path=join(dir,"missions.db");
   const store=new MissionStore(path);
-  const db=new Database(path);
+  const db=openDatabase(path);
   try {
     const mission=store.create("Lease bounds");
     store.transition(mission.code,"PLANNING");
@@ -83,7 +83,7 @@ test("heartbeat cannot extend a lease while mission is paused or cancelled",()=>
   const dir=mkdtempSync(join(tmpdir(),"sam-heartbeat-gate-"));
   const path=join(dir,"missions.db");
   const store=new MissionStore(path);
-  const db=new Database(path);
+  const db=openDatabase(path);
   try {
     const mission=store.create("Mission gate");
     store.transition(mission.code,"PLANNING");
@@ -114,7 +114,7 @@ test("heartbeat never shortens an existing lease and stale workers cannot comple
   const dir=mkdtempSync(join(tmpdir(),"sam-lease-monotonic-"));
   const path=join(dir,"missions.db");
   const store=new MissionStore(path);
-  const db=new Database(path);
+  const db=openDatabase(path);
   try {
     const mission=store.create("Monotonic leases");
     store.transition(mission.code,"PLANNING");
@@ -143,7 +143,7 @@ test("paused and cancelled missions reject completion without mutating task",()=
   const dir=mkdtempSync(join(tmpdir(),"sam-complete-gate-"));
   const path=join(dir,"missions.db");
   const store=new MissionStore(path);
-  const db=new Database(path);
+  const db=openDatabase(path);
   try {
     const mission=store.create("Completion gate");
     store.transition(mission.code,"PLANNING");
@@ -172,7 +172,7 @@ test("cancelled and failed missions fence completion without mutating the lease"
     const dir=mkdtempSync(join(tmpdir(),"sam-terminal-fence-"));
     const path=join(dir,"missions.db");
     const store=new MissionStore(path);
-    const db=new Database(path);
+    const db=openDatabase(path);
     try {
       const mission=store.create("Terminal fence "+terminal);
       store.transition(mission.code,"PLANNING");
@@ -199,7 +199,7 @@ test("expired lease cannot complete until a new generation is claimed",()=>{
   const dir=mkdtempSync(join(tmpdir(),"sam-expired-complete-"));
   const path=join(dir,"missions.db");
   const store=new MissionStore(path);
-  const db=new Database(path);
+  const db=openDatabase(path);
   try {
     const mission=store.create("Expired completion");
     store.transition(mission.code,"PLANNING");

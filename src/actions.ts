@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
@@ -85,8 +86,7 @@ function proposalParams(a: ActionProposal): Record<string, string | null> {
 }
 function openActionStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  const db = new Database(actionsDbFile(root));
-  db.pragma("journal_mode = WAL");
+  const db = openDatabase(actionsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS actions (id TEXT PRIMARY KEY, actor TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL, detail TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, decided_at TEXT, result TEXT, chat_id TEXT, supersedes TEXT, risk TEXT, decided_by TEXT)");
   migrateLegacyActions(db, root);
   return db;

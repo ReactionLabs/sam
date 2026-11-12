@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, lstatSync } from "node:fs";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { join, resolve } from "node:path";
 import { discoverSkills, parseSkillMetadata, type SkillEntry } from "./skills.js";
 import { installedSkills } from "./skill-registry.js";
@@ -113,9 +114,7 @@ function openAuthorsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(authorsDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(authorsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS skill_authors (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyAuthors(db, root);
   return db;
@@ -430,9 +429,7 @@ function openCuratorStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(curatorDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(curatorDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS skill_curator (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
   migrateLegacyCurator(db, root);
   return db;
