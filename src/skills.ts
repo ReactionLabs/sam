@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync } from "node:fs";
 import { join, resolve, relative, isAbsolute } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 
 export interface SkillEntry {
@@ -156,9 +157,7 @@ function openAllowlistsStore(workspace: string): Database.Database {
   const dir = join(resolve(workspace), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(allowlistsDbFile(workspace));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(allowlistsDbFile(workspace));
   db.exec("CREATE TABLE IF NOT EXISTS skill_allowlists (profile TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyAllowlists(db, workspace);
   return db;

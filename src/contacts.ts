@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 
 // Per-contact permission notes (P12). SAM works for other people through its
@@ -41,9 +42,7 @@ function openContactsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(contactsDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(contactsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS contacts (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyContacts(db, root);
   return db;

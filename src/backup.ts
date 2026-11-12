@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -43,10 +43,19 @@ function stamp(at: Date): string { return at.toISOString().replace(/[-:]/g, "").
 function sha256File(path: string): string { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
 
 function snapshotDatabase(source: string, dest: string): void {
-  const db = new Database(source);
+  const db = openDatabase(source);
   try {
     db.exec("VACUUM INTO '" + dest.replace(/'/g, "''") + "'");
   } finally { db.close(); }
+  // VACUUM INTO writes a DELETE-mode file. Seal the copy in WAL and
+  // drop the empty sidecars before the manifest hashes it, so the
+  // readonly integrity open (which requires WAL) matches the tarball
+  // and no -wal/-shm file is archived.
+  const copy = openDatabase(dest);
+  try { copy.pragma("wal_checkpoint(TRUNCATE)"); }
+  finally { copy.close(); }
+  rmSync(dest + "-wal", { force: true });
+  rmSync(dest + "-shm", { force: true });
 }
 
 export function createBackup(root: string, destDir: string, keep = 7): BackupInfo {
@@ -139,7 +148,7 @@ function checkExtracted(dir: string, archive: string): VerifyReport {
     const path = join(dir, name);
     if (!existsSync(path)) continue; // already reported as missing above
     try {
-      const db = new Database(path, { readonly: true });
+      const db = openDatabase(path, { readonly: true });
       try {
         const row = db.pragma("integrity_check", { simple: true });
         if (row !== "ok") errors.push("integrity_check failed for " + name + ": " + String(row));

@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { resolveModelForRoute, tierForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
 import type { TurnRoute } from "./budgets.js";
@@ -131,9 +132,7 @@ function openProvidersStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(providersDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(providersDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyProviders(db, root);
   return db;

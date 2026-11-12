@@ -1,4 +1,4 @@
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { listActions } from "./actions.js";
@@ -105,7 +105,7 @@ function readLegacyGate(root: string): UnificationReport["legacyGate"] {
   const dbFile = join(resolve(root), ".sam", "missions.db");
   if (!existsSync(dbFile)) return base;
   base.dbPresent = true;
-  const db = new Database(dbFile, { readonly: true, fileMustExist: true });
+  const db = openDatabase(dbFile, { readonly: true, fileMustExist: true });
   try {
     const tables = new Set(
       (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map(r => r.name),

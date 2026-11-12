@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
@@ -120,9 +121,7 @@ function engineDbFile(root: string): string { return join(resolve(root), ".sam",
 // no backup change.
 function openEngineStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  const db = new Database(engineDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(engineDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS engine_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyEngine(db, root);
   return db;

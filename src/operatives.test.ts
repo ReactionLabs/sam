@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { OperativeRegistry } from "./operatives.js";
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 test("routes only to healthy capable operatives and respects capacity",()=>{
   const dir=mkdtempSync(join(tmpdir(),"sam-operatives-"));
@@ -56,7 +56,7 @@ test("stale or paused operatives cannot be assigned even when capacity exists",(
     assert.equal(db.reserve(worker.id),false);
     db.setState(worker.id,"available");
     db.close();
-    const raw=new Database(path);
+    const raw=openDatabase(path);
     raw.prepare("UPDATE operatives SET last_seen_at=? WHERE id=?").run("2000-01-01T00:00:00.000Z",worker.id);
     raw.close();
     const reopened=new OperativeRegistry(path);

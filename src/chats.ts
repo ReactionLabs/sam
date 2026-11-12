@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join,resolve } from "node:path";
@@ -30,8 +31,7 @@ export class ChatStore {
   private db:Database.Database;
   constructor(workspace:string){
     const root=join(resolve(workspace),".sam");mkdirSync(root,{recursive:true});
-    this.db=new Database(join(root,"chats.db"));
-    this.db.pragma("journal_mode = WAL");
+    this.db=openDatabase(join(root,"chats.db"));
     this.db.exec(`CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES chats(id),role TEXT NOT NULL CHECK(role IN ('user','assistant')),content TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS chat_messages_by_chat ON chat_messages(chat_id,created_at);

@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 
 // Episodic memory (program P4): a dated summary record per profile of what
@@ -86,9 +87,7 @@ function evidenceFile(root: string) { return join(resolve(root), ".sam", "episod
 function evidenceDbFile(root: string) { return join(resolve(root), ".sam", "episodes.db"); }
 function openEvidenceStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  const db = new Database(evidenceDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(evidenceDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS episode_evidence (key TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyEvidence(db, root);
   return db;

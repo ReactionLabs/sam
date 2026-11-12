@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 
@@ -46,9 +47,7 @@ function bgDbFile(root: string): string { return join(resolve(root), ".sam", "ba
 // store is carried with no backup change.
 function openBackgroundStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  const db = new Database(bgDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(bgDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS background_tasks (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacyBackground(db, root);
   return db;
