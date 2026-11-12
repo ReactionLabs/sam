@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore, ftsChatMatch } from "./chats.js";
 import { searchManagedChats } from "./chat-manage.js";
 import { executeOwnTool, OWN_TOOLS } from "./own-tools.js";
@@ -61,7 +61,7 @@ test("chat search: a database that predates the index is rebuilt searchable", ()
     store.add(chat.id, "user", "an old quokka conversation from before the index");
     store.close();
     // Simulate the pre-FTS store: drop the index and its triggers.
-    const raw = new Database(join(root, ".sam", "chats.db"));
+    const raw = openDatabase(join(root, ".sam", "chats.db"));
     raw.exec("DROP TABLE chat_messages_fts; DROP TRIGGER chat_messages_fts_insert; DROP TRIGGER chat_messages_fts_delete; DROP TRIGGER chat_messages_fts_update;");
     raw.close();
     const hits = searchManagedChats(root, "sam", "quokka");

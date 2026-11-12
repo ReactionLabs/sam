@@ -2,6 +2,7 @@
 // fields; this client shows what is present and says when a section was
 // not reported. Unknown keys are ignored.
 
+use crate::boards::{self, Boards};
 use serde_json::Value;
 
 #[derive(Clone, Debug)]
@@ -43,6 +44,7 @@ pub struct Snapshot {
     pub chats: Vec<ChatSummary>,
     pub actions: Vec<Action>,
     pub surfaces: Surfaces,
+    pub boards: Boards,
 }
 
 pub fn parse_snapshot(value: &Value) -> Result<Snapshot, String> {
@@ -71,6 +73,7 @@ pub fn parse_snapshot(value: &Value) -> Result<Snapshot, String> {
         chats,
         actions,
         surfaces: project(value),
+        boards: boards::from_status(value),
     })
 }
 

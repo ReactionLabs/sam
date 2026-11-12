@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 // Approvals engine (Plan Phase D item 1 - lands BEFORE coder hands;
 // the Hermes borrow recorded in the roadmap: named modes plus a
@@ -84,9 +85,7 @@ function openPolicyStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(policyDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(policyDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS approval_policy (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
   migrateLegacyPolicy(db, root);
   return db;
@@ -199,7 +198,7 @@ export function scanNeverList(text: string): NeverHit | null {
 // flagged skill holds for the owner instead of executing.
 // Unknown kinds classify consequential (fail-closed).
 export type ProposalRisk = "internal" | "consequential";
-const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "draft", "skill-author", "git-push", "engine", "spawn"]);
+const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "draft", "skill-author", "git-push", "engine", "spawn", "delegate"]);
 export function classifyProposal(kind: string, supersedes: string | null | undefined): { risk: ProposalRisk; reason: string } {
   if (CONSEQUENTIAL_KINDS.has(kind)) return { risk: "consequential", reason: "kind \"" + kind + "\" has owner-facing effects and always needs the owner's decision in manual and smart modes" };
   if (kind === "skill") return { risk: "internal", reason: "a registry skill install: validated, provenance-logged, curator-watched and removable untrusted reference; content-scanned on the auto path, where a flagged skill holds for the owner" };
@@ -214,6 +213,10 @@ export function classifyProposal(kind: string, supersedes: string | null | undef
 // stamp for an auto-execution, or null when the proposal must wait
 // for the owner.
 export function approvalAutoVia(policy: ApprovalPolicy, kind: string, supersedes: string | null | undefined): { via: string; risk: ProposalRisk } | null {
+  // A coding-operative delegation always cards the owner, including
+  // when the install's mode is off. The process must not start on a
+  // policy setting alone.
+  if (kind === "delegate") return null;
   const { risk } = classifyProposal(kind, supersedes);
   if (policy.mode === "off") return { via: "auto:off", risk };
   if (policy.mode === "smart" && risk === "internal" && policy.autoKinds.includes(kind)) return { via: "auto:smart", risk };

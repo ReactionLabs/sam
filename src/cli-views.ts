@@ -1,38 +1,7 @@
 import { ChatStore } from "./chats.js";
 import { listActions, type ActionProposal } from "./actions.js";
 import { readActivity, type ActivityLine } from "./activity.js";
-import { heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
-import { minis } from "./minis.js";
-import { connectors } from "./connectors.js";
-import { modelRoutingTable, type RoutingRow } from "./model-routing.js";
-import { usageSummary, type UsageSummary } from "./usage.js";
-import { standingSummary } from "./standing-files.js";
-import { listCompactions } from "./compaction.js";
-import type { ChatCompaction } from "./chats.js";
-import { verificationStatus, type VerificationStatus } from "./verification.js";
-import { pairingStatus, type PairingChannelStatus } from "./pairing.js";
-import { goldfishStatus, type GoldfishState } from "./goldfish.js";
-import { sessionCaps, sessionUsageToday } from "./session-caps.js";
-import { dueLoops, openLoopCount } from "./loops.js";
-import { readDeliveryLedger } from "./worthiness.js";
-import { authoredSkills, curatorFindings } from "./skill-author.js";
-import { deliverySummary } from "./delivery-outbox.js";
-import { listBindings, type Binding } from "./bindings.js";
-import { skillAllowlists } from "./skills.js";
-import { loadApprovalPolicy, type ApprovalPolicy } from "./approval-policy.js";
-import { codeSummary } from "./code.js";
-import { codingSummary, type CodingTask } from "./coding.js";
-import { engineStatus, type EngineTask } from "./engine.js";
-import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
-import { sensesStatus } from "./senses.js";
-import { briefStatus } from "./brief.js";
-import { readSelfAudit, type SelfAudit } from "./self-audit.js";
-import { readSelfWork, selfWorkFixViews, type SelfWorkFixView, type SelfWorkRun } from "./self-work.js";
-import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
-import { authStatus, type AuthStatus } from "./auth-status.js";
-import { stackWatchStatus } from "./stack-watch.js";
-import { unificationReport, type UnificationReport } from "./unification.js";
-import { observabilityReport, type ObservabilityReport } from "./observability.js";
+import { buildStatusPayload } from "./status.js";
 
 // CLI-first (Dip's rule): every capability lands on the CLI as a complete,
 // scriptable operation before any surface rides on it. These views are the
@@ -56,72 +25,7 @@ export function chatView(root: string, chatId: string): { messages: unknown; act
 export function turnActions(root: string, chatId: string, sinceISO: string): ActionProposal[] {
   return listActions(root).filter(a => a.chatId === chatId && a.createdAt >= sinceISO);
 }
-export function statusSnapshot(root: string): {
-  at: string; pendingActions: ActionProposal[]; activity: ActivityLine[];
-  heartbeatJobs: HeartbeatJob[]; people: string[];
-  connectors: Array<{ name: string; enabled: boolean; credentialPresent: boolean }>;
-  models: RoutingRow[]; usage: UsageSummary;
-  standingFiles: Array<{ profile: string; files: string[]; chars: number }>;
-  compactions: ChatCompaction[];
-  verification: VerificationStatus;
-  goldfish: { state: GoldfishState; verdict: string | null; uncoveredChanges: number };
-  pairing: PairingChannelStatus[];
-  sessionCaps: { maxTurns: number; maxTokens: number; cappedToday: string[] };
-  loops: { open: number; due: number };
-  deliveries: { delivered: number; suppressed: number };
-  deliveryOutbox: { pending: number; delivered: number; suppressed: number; failed: number; recovered: number };
-  skills: { authored: number; curatorFindings: number };
-  bindings: Binding[];
-  skillAllowlists: Record<string, string[]>;
-  approvals: ApprovalPolicy;
-  code: { root: string | null; writes: number; commands: string[] };
-  coding: { root: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: CodingTask[] };
-  engine: { installed: boolean; binary: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[]; connection: { route: "cli-reuse"; connected: boolean; stale: boolean; record: EngineConnection | null } };
-  senses: { installed: boolean; binary: string | null; coreOnly: true; senses: string[] };
-  brief: { installed: boolean; job: unknown; script: string };
-  selfAudit: SelfAudit | null;
-  selfWork: SelfWorkRun | null;
-  selfWorkFixes: SelfWorkFixView[];
-  setup: SetupRecord | null;
-  auth: AuthStatus;
-  stackWatch: { connector: string | null; script: string };
-  unification: UnificationReport;
-  observability: ObservabilityReport;
-} {
-  return {
-    at: new Date().toISOString(),
-    pendingActions: listActions(root).filter(a => a.status === "pending"),
-    activity: readActivity(root, 10),
-    heartbeatJobs: heartbeatJobs(root),
-    people: minis(root).map(m => m.name),
-    connectors: connectors(root).map(c => ({ name: c.name, enabled: c.enabled, credentialPresent: !!process.env[c.tokenEnv] })),
-    models: modelRoutingTable(),
-    usage: usageSummary(root),
-    standingFiles: standingSummary(root),
-    compactions: listCompactions(root),
-    verification: verificationStatus(root),
-    goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
-    pairing: pairingStatus(root),
-    sessionCaps: (() => { const caps = sessionCaps(); return { maxTurns: caps.maxTurns, maxTokens: caps.maxTokens, cappedToday: sessionUsageToday(root).filter(s => s.capped).map(s => s.chatId) }; })(),
-    loops: { open: openLoopCount(root), due: dueLoops(root).length },
-    deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
-    deliveryOutbox: deliverySummary(root),
-    skills: { authored: authoredSkills(root).length, curatorFindings: curatorFindings(root).length },
-    bindings: listBindings(root),
-    skillAllowlists: skillAllowlists(root),
-    approvals: loadApprovalPolicy(root),
-    code: codeSummary(root),
-    coding: codingSummary(root),
-    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, connected: c.connected, stale: c.stale, record: c.connection } }; })(),
-    senses: sensesStatus(),
-    brief: briefStatus(root),
-    selfAudit: readSelfAudit(root),
-    selfWork: readSelfWork(root),
-    selfWorkFixes: selfWorkFixViews(root),
-    setup: readSetupRecord(root),
-    auth: authStatus(root),
-    stackWatch: stackWatchStatus(root),
-    unification: unificationReport(root),
-    observability: observabilityReport(root),
-  };
+/** CLI overview. The same payload the dashboard route /api/status returns. */
+export function statusSnapshot(root: string) {
+  return buildStatusPayload(root);
 }

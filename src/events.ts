@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
@@ -62,9 +63,7 @@ function openEventsStore(root: string): Database.Database {
   const d = dir(root);
   mkdirSync(d, { recursive: true, mode: 0o700 });
   if (lstatSync(d).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(eventsDbFile(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(eventsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS event_bindings (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
   db.exec("CREATE TABLE IF NOT EXISTS event_seen_ids (id TEXT PRIMARY KEY)");
   migrateLegacyEvents(db, root);

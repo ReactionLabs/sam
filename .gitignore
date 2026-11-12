@@ -1,4 +1,7 @@
-node_modules/
+# Dependencies are installed by npm after a clone. No trailing
+# slash: `node_modules/` matches only a directory, so a symlink of
+# that name was tracked. This pattern ignores the directory and a symlink.
+node_modules
 dist/
 .sam/
 cli-rust/target/

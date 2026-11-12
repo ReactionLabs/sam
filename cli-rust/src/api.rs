@@ -25,12 +25,25 @@ pub struct Message {
     pub content: String,
     pub created_at: String,
     pub reaction: Option<String>,
+    pub partial: bool,
+    /// Client stamp from GET, when the server stored one. Absent on older
+    /// servers, and "unknown" is treated as absent so legacy rows stay quiet.
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TeamEvent {
+    pub agent: String,
+    pub kind: String,
+    pub content: String,
+    pub created_at: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct ChatDetail {
     pub messages: Vec<Message>,
     pub events: Vec<String>,
+    pub team: Vec<TeamEvent>,
     pub actions: Vec<Action>,
     pub images: Vec<InlineImage>,
 }
@@ -49,6 +62,10 @@ pub struct Client {
 }
 
 impl Client {
+    pub fn workspace(&self) -> Option<std::path::PathBuf> {
+        self.workspace.clone()
+    }
+
     pub fn new(endpoint: Endpoint, workspace: Option<std::path::PathBuf>) -> Self {
         let agent = ureq::AgentBuilder::new()
             .timeout(Duration::from_secs(120))
@@ -86,7 +103,7 @@ impl Client {
             "{}/api/{}/chats/{}/messages",
             self.endpoint.origin, self.endpoint.token, id
         );
-        let value = self.post_json(&url, json!({ "content": content }))?;
+        let value = self.post_json(&url, message_body(content))?;
         let reply = value
             .get("reply")
             .and_then(|r| r.get("content"))
@@ -237,6 +254,12 @@ impl Client {
     }
 }
 
+/// Body the Rust CLI posts for one owner message. `source` is the
+/// provenance stamp the dashboard stores on the message record.
+pub fn message_body(content: &str) -> Value {
+    json!({ "content": content, "source": "rust-cli" })
+}
+
 fn read_json(response: ureq::Response) -> Result<Value, String> {
     let text = response
         .into_string()
@@ -287,31 +310,67 @@ fn parse_chat(value: &Value) -> Result<ChatDetail, String> {
                     .get("reaction")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
+                partial: obj
+                    .get("partial")
+                    .map(|v| v.as_bool().unwrap_or(false) || v.as_i64().unwrap_or(0) != 0)
+                    .unwrap_or(false),
+                source: message_source(obj.get("source")),
             })
         })
         .collect();
-    let events = value
+    let team: Vec<TeamEvent> = value
         .get("events")
         .and_then(|v| v.as_array())
         .map(|items| {
             items
                 .iter()
-                .filter_map(|item| {
-                    let agent = item.get("agent").and_then(|v| v.as_str()).unwrap_or("sam");
-                    let kind = item.get("kind").and_then(|v| v.as_str()).unwrap_or("event");
-                    let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    Some(format!("{agent} {kind}: {content}"))
+                .map(|item| TeamEvent {
+                    agent: item
+                        .get("agent")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("sam")
+                        .to_string(),
+                    kind: item
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("event")
+                        .to_string(),
+                    content: item
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    created_at: item
+                        .get("created_at")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let events = team
+        .iter()
+        .map(|event| format!("{} {}: {}", event.agent, event.kind, event.content))
+        .collect();
     let actions = status_view::parse_actions(value.get("actions"));
     Ok(ChatDetail {
         messages,
         events,
+        team,
         actions,
         images: Vec::new(),
     })
+}
+
+/// Known client stamps. Anything else, including a missing field and
+/// "unknown", draws nothing.
+pub fn message_source(value: Option<&Value>) -> Option<String> {
+    let text = value.and_then(|v| v.as_str()).unwrap_or("").trim();
+    match text {
+        "dashboard" | "rust-cli" | "ts-cli" | "telegram" | "api" => Some(text.to_string()),
+        _ => None,
+    }
 }
 
 pub fn resolve_endpoint(base_url: &str, explicit: Option<String>) -> Result<Endpoint, String> {
@@ -426,6 +485,13 @@ mod tests {
     use std::thread;
 
     #[test]
+    fn send_body_stamps_rust_cli() {
+        let body = message_body("hello from the cli");
+        assert_eq!(body["content"], "hello from the cli");
+        assert_eq!(body["source"], "rust-cli");
+    }
+
+    #[test]
     fn dashboard_url_carries_its_own_token() {
         let endpoint = resolve_endpoint(
             "http://127.0.0.1:4317/dashboard/0123456789abcdef0123456789abcdef",
@@ -483,5 +549,36 @@ mod tests {
         let err = client.status().unwrap_err();
         assert!(!err.contains("0123456789abcdef0123456789abcdef"), "{err}");
         assert!(err.contains("<token>") || err.contains("status") || !err.is_empty());
+    }
+
+    #[test]
+    fn outgoing_messages_are_stamped_rust_cli() {
+        let body = message_body("hello");
+        assert_eq!(body["content"], "hello");
+        assert_eq!(body["source"], "rust-cli");
+        assert_eq!(
+            message_source(Some(&serde_json::json!("rust-cli"))).as_deref(),
+            Some("rust-cli")
+        );
+        assert!(message_source(None).is_none());
+        assert!(message_source(Some(&serde_json::json!("unknown"))).is_none());
+        assert!(message_source(Some(&serde_json::json!("browser"))).is_none());
+    }
+
+    #[test]
+    fn partial_messages_and_tool_events_survive_the_parse() {
+        let detail = parse_chat(&serde_json::json!({
+            "messages": [
+                {"id": "a", "role": "assistant", "content": "draft", "created_at": "", "partial": 1}
+            ],
+            "events": [
+                {"agent": "sam", "kind": "tool", "content": "sam_code: requested", "created_at": "t"}
+            ]
+        }))
+        .unwrap();
+        assert!(detail.messages[0].partial);
+        assert!(detail.messages[0].source.is_none());
+        assert_eq!(detail.team[0].kind, "tool");
+        assert!(detail.events[0].contains("sam_code"));
     }
 }

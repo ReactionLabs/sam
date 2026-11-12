@@ -114,3 +114,27 @@ test("dashboard page: skill visibility + reaction badges surface (2026-11-10)", 
   assert.match(dashboardHtml, /\.reaction\{/);
   assert.match(dashboardHtml, /skill: /);
 });
+
+test("dashboard page: calm presentation and working state (sprint 3 item 6)", () => {
+  // The saturated user bubble is gone. One quiet accent, hairline
+  // layers, and a composer that floats over the thread.
+  assert.doesNotMatch(dashboardHtml, /#0864cc/i);
+  assert.match(dashboardHtml, /--accent:#c6b59a/);
+  assert.match(dashboardHtml, /\.composer\{[^}]*position:absolute/);
+  assert.match(dashboardHtml, /\.bubble\.user\{[^}]*#2c2a26/);
+  // The wait matches the CLI treatment: braille frames, rotating
+  // verbs, a live elapsed timer, then "Thought for Ns" when the
+  // reply lands. The reply still arrives through setText.
+  assert.match(dashboardHtml, /const WORK_FRAMES=\['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'\]/);
+  assert.match(dashboardHtml, /const WORK_VERBS=\['Thinking','Reading','Considering','Weighing','Drafting','Checking'\]/);
+  assert.match(dashboardHtml, /Thought for /);
+  assert.match(dashboardHtml, /pending\.beginWork\(\)/);
+  assert.match(dashboardHtml, /setText\(next\)\{holder\.text=next/);
+  assert.match(dashboardHtml, /pending\.setText\(d\.reply\.content\)/);
+  // The controls the restyle must not rewire.
+  assert.match(dashboardHtml, /el\('toBottom'\)\.onclick/);
+  assert.match(dashboardHtml, /function actionCard\(/);
+  assert.match(dashboardHtml, /function openConfigPanel\(/);
+  assert.match(dashboardHtml, /function fallbackCopyText\(text\)/);
+  assert.match(dashboardHtml, /id="configPanel"/);
+});

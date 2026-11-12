@@ -1,44 +1,18 @@
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
-import { MissionStore } from "./storage.js";
 import { ChatStore } from "./chats.js";
-import { recentSkillUse, lastSkillByChat } from "./skill-use.js";
 import { dashboardHtml } from "./dashboard-ui.js";
-import { OpenAICompatibleProvider } from "./openai-compatible.js";
-import { discoverSkills, skillAllowlists } from "./skills.js";
-import { listBindings } from "./bindings.js";
-import { loadApprovalPolicy } from "./approval-policy.js";
-import { codeSummary } from "./code.js";
-import { codingSummary } from "./coding.js";
-import { engineStatus } from "./engine.js";
-import { engineConnectStatus } from "./engine-connect.js";
-import { sensesStatus } from "./senses.js";
-import { briefStatus } from "./brief.js";
-import { readSelfAudit } from "./self-audit.js";
-import { readSelfWork, selfWorkFixViews } from "./self-work.js";
-import { unificationReport } from "./unification.js";
-import { readSetupRecord } from "./config-wizard.js";
-import { authStatus } from "./auth-status.js";
-import { observabilityReport } from "./observability.js";
+import { buildStatusPayload } from "./status.js";
 import { runChatTurn } from "./agent-turn.js";
+import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore } from "./preferences.js";
-import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
-import { doorForKey, doorEnabled, doorHomeLink, doorModeForKey, listDoors, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
-import { listDrafts } from "./drafts.js";
-import { listContacts } from "./contacts.js";
+import { doorForKey, doorHomeLink, doorModeForKey, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { DoorAbuseGuard, screenDoorMessage } from "./door-guard.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { listActions, decideAction } from "./actions.js";
-import { readActivity, recordActivity } from "./activity.js";
+import { recordActivity } from "./activity.js";
 import type { Preference } from "./preferences.js";
-import { listBackgroundTasks } from "./background.js";
-import { modelRoutingTable } from "./model-routing.js";
-import { usageSummary } from "./usage.js";
-import { listCompactions } from "./compaction.js";
-import { pairingStatus } from "./pairing.js";
-import { authoredSkills, curatorFindings } from "./skill-author.js";
-import { deliverySummary } from "./delivery-outbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
@@ -188,8 +162,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       pending.add(id);
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
+        const source=sourceFromApiBody(body.source);
         const turnStart=new Date().toISOString();
-        const reply=await runChatTurn(workspace,id,body.content);
+        const reply=await runChatTurn(workspace,id,body.content,{source});
         const result={message:{role:"assistant" as const,content:reply}};
         let userReaction:string|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"){userReaction=msgs[i].reaction;break;}}}finally{db2.close();}}catch{/* the badge is garnish */}
         json(200,{reply:result.message,userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
@@ -254,21 +229,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       const statusParams=new URLSearchParams(statusParts[1]??"");
       const activityFilter={actor:statusParams.get("actor")||undefined,kind:statusParams.get("kind")||undefined};
       try{
-        const store=new MissionStore(join(workspace,".sam","missions.db"));
-        let missions:unknown;
-        try{missions=store.list().slice(0,100).map(m=>({code:m.code,status:m.status,objective:m.objective}));}finally{store.close();}
         res.setHeader("Content-Type","application/json");
-        const chatStore=new ChatStore(workspace);let chats:unknown;let archivedChats:unknown;try{const act=new Map(chatStore.lastActivity().map(a=>[a.chat_id,a] as const));const skillByChat=lastSkillByChat(workspace);const enrich=(c:{id:string})=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0,lastSkill:skillByChat.get(c.id)??null});chats=chatStore.list().map(enrich);archivedChats=chatStore.list({includeArchived:true}).filter(c=>c.archived).map(enrich);}finally{chatStore.close();}
-        const audit=join(workspace,".sam","execution-audit.jsonl");
-        let logs:string[]=[];
-        if(existsSync(audit)){
-          const raw=readFileSync(audit,"utf8");
-          logs=raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
-        }
-        const prefStore=new PreferenceStore(workspace);let preferences:unknown;try{preferences=prefStore.list();}finally{prefStore.close();}
-const observability=observabilityReport(workspace);
-        res.end(JSON.stringify({ok:true,at:new Date().toISOString(),missions,skills:discoverSkills(workspace),schedules:listSchedules(workspace),chats,archivedChats,skillUse:recentSkillUse(workspace,10),agents:chatStoreAgents(workspace),config:readDashboardConfig(workspace),connectors:connectors(workspace).map(c=>({...c,credentialPresent:!!process.env[c.tokenEnv]})),preferences,heartbeatJobs:heartbeatJobs(workspace),heartbeatLog:heartbeatLog(workspace,8),minis:minis(workspace).map(m=>{const pStore2=new PreferenceStore(workspace);let lawCount=0;try{lawCount=pStore2.lawsFor(m.name).length;}finally{pStore2.close();}return {...m,door:doorEnabled(workspace,m.name),laws:lawCount,chats:(chats as Array<{agent_name?:string|null}>).filter(c=>c.agent_name===m.name).length,heartbeats:heartbeatJobs(workspace).filter(j=>j.profile===m.name).length};}),actions:listActions(workspace),background:listBackgroundTasks(workspace).slice(-20),doors:listDoors(workspace),doorGuard:doorGuard.stats(),models:modelRoutingTable(),usage:usageSummary(workspace),drafts:listDrafts(workspace).slice(-20),contacts:listContacts(workspace),compactions:listCompactions(workspace),pairing:pairingStatus(workspace),skillAuthored:authoredSkills(workspace),skillCurator:curatorFindings(workspace),deliveryOutbox:deliverySummary(workspace),bindings:listBindings(workspace),skillAllowlists:skillAllowlists(workspace),approvals:loadApprovalPolicy(workspace),code:codeSummary(workspace),coding:codingSummary(workspace),engine:(()=>{const s=engineStatus(workspace);const c=engineConnectStatus(workspace);return {...s,connection:{route:c.route,connected:c.connected,stale:c.stale,record:c.connection}};})(),senses:sensesStatus(),brief:briefStatus(workspace),selfAudit:readSelfAudit(workspace),selfWork:readSelfWork(workspace),selfWorkFixes:selfWorkFixViews(workspace),setup:readSetupRecord(workspace),auth:authStatus(workspace),unification:unificationReport(workspace),activity:readActivity(workspace,30,activityFilter),logs,observability,providerHealth:observability.providerHealth,spend:observability.spend,failures:observability.failures}));
-
+        res.end(JSON.stringify(buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()})));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

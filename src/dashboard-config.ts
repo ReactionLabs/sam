@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 // The dashboard config store: which profile the dashboard (and
 // every unbound chat, turn, and heartbeat tick) treats as the
@@ -67,9 +68,7 @@ function openConfigStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(configDbPath(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(configDbPath(root));
   db.exec("CREATE TABLE IF NOT EXISTS dashboard_config (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
   migrateLegacyConfig(db, root);
   return db;

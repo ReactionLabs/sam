@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { TaskScheduler } from "./tasks.js";
 import { OfflineMissionRunner } from "./offline-runner.js";
 import { LocalEchoAdapter } from "./execution.js";
@@ -46,12 +47,12 @@ import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
-import { runResearchTeam } from "./team-runtime.js";
+import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamStatus } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill, setSkillAllowlist, skillAllowlist, skillsForProfile } from "./skills.js";
 import { listBindings, removeBinding, resolveBindingProfile, setBinding } from "./bindings.js";
-import { clearCodeRoot, codeCommandNames, codeCommandSpec, codeRoot, codeSummary, codeWrites, editCodeFile, listCodeFiles, readCodeFile, runCodeCommand, setCodeRoot, writeCodeFile } from "./code.js";
+import { clearCodeRoot, cloneIntoCodeRoot, codeCommandNames, codeCommandSpec, codeRoot, codeSummary, codeWrites, createSandbox, destroySandbox, editCodeFile, installSandboxPackage, listCodeFiles, listSandboxes, readCodeFile, runCodeCommand, runPython, setCodeRoot, writeCodeFile, writeSandboxFile } from "./code.js";
 import { listTaskBranches } from "./git-work.js";
 import { knownProfileNames } from "./actions.js";
 import { searchSkillRegistry, installSkill, installedSkills, removeInstalledSkill } from "./skill-registry.js";
@@ -66,6 +67,8 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
+import { cancelSubagent, getSubagent, listSubagents, spawnSubagent } from "./subagents.js";
+import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
@@ -113,7 +116,7 @@ function store():MissionStore {
 }
 function withDb<T>(fn:(db:Database.Database,missions:MissionStore)=>T):T {
   const missions=store();
-  const db=new Database(dbPath());
+  const db=openDatabase(dbPath());
   db.pragma("foreign_keys = ON");
   try { return fn(db,missions); }
   finally { db.close(); missions.close(); }
@@ -262,7 +265,7 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   if(!botToken)throw new Error("Channel credential missing from environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
-  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"telegram");
   let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
   console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
@@ -494,13 +497,13 @@ program.command("relay").description("Send one prompt to 2 or more configured mo
   const result=await relayPrompt(root,prompt,targets,{actor:o.profile});
   if(o.chat){
     const db=new ChatStore(root);
-    try{db.add(o.chat,"user",prompt);db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
+    try{db.add(o.chat,"user",prompt,"ts-cli");db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
   }
   output(result);
   if(result.answers.every(a=>!a.ok))process.exitCode=1;
 });
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
-program.command("overview").description("One snapshot: pending approvals, recent activity, heartbeats, people, connectors").action(()=>output(statusSnapshot(program.opts().workspace)));
+program.command("overview").description("One status snapshot, the same payload as the dashboard /api/status route").action(()=>output(statusSnapshot(program.opts().workspace)));
 program.command("observe").description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability").action(()=>output(observabilityReport(program.opts().workspace)));
 const eventCmd=program.command("events").description("Event door: a signed local webhook that wakes a profile with one heartbeat-budget turn. The payload is data, never an instruction, and it cannot skip the approval gate");
 eventCmd.command("bind").argument("<name>").argument("<profile>").requiredOption("--secret-env <NAME>","Environment variable NAME holding the HMAC secret").description("Bind an event name to a profile. The secret value stays in the environment").action((name:string,profile:string,o:{secretEnv:string})=>{const root=program.opts().workspace as string;const known=knownProfileNames(root);if(!known.includes(profile))throw new Error("Unknown profile: "+profile);const row=bindEvent(root,{name,profile,secretEnv:o.secretEnv});recordActivity(root,"owner","event-bind","Event "+row.name+" bound to "+row.profile+" (secret env "+row.secretEnv+")");output(row);});
@@ -522,7 +525,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   if(!secret||secret.length<24)throw new Error("Channel secret missing or too short in environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
-  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"api");
   console.log("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port);
   await serveWebhookChannel({channel,sam,secret,port:Number(o.port),root});
  });
@@ -557,18 +560,40 @@ chats.command("resume").argument("<id>").description("Resume a killed turn from 
 });
 chats.command("react").argument("<chatId>").argument("<messageId>").argument("<emoji>").description("Set an emoji reaction on a message (or clear it with 'none') - the operator parity for sam_react and the dashboard badges").action((chatId:string,messageId:string,emoji:string)=>{const db=new ChatStore(program.opts().workspace);try{const set=db.setReaction(chatId,messageId,emoji==="none"?null:emoji);output({set,message:db.messages(chatId).find(m=>m.id===messageId)??null});}finally{db.close();}});
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
-chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});
+chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message,{source:"ts-cli"});output({reply,proposed:turnActions(ws,id,since)});});
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
-const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
-teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").action(async(o:{chat:string;objective:string;live:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean})=>{
- const selected=process.env.SAM_MODEL_PROVIDER??"";
- const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
- const model=process.env.SAM_MODEL;
- if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
- const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
- if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
- const provider=new OpenAICompatibleProvider(endpoint,key,60000);
- output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined,agentTools:!!o.agentTools}));
+const teams=program.command("team").description("Standing team: a lead routes a task to a role member, then a reviewer must approve it. The older research exchange remains when --chat and --objective are set");
+const teamMembers=teams.command("member").description("Standing members: each is a profile with a role, its own memory, a model pin, and a tool allowlist");
+teamMembers.command("add").argument("<name>").argument("<role>","builder, researcher, qa, or reviewer").option("--tools <names>","Comma-separated tool allowlist").option("--model <id>","Model pin for this member").option("--calls <n>","Max model calls this member may spend on one run","4").action((name:string,role:string,o:{tools?:string;model?:string;calls:string})=>{
+  output(addTeamMember(program.opts().workspace,{name,role,tools:o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):[],model:o.model??null,maxCalls:Number(o.calls)}));
+});
+teamMembers.command("list").action(()=>output(listTeamMembers(program.opts().workspace)));
+teamMembers.command("remove").argument("<name>").action((name:string)=>output({removed:removeTeamMember(program.opts().workspace,name)}));
+teams.command("run").argument("[task]").option("--chat <uuid>","Existing chat id for the legacy research exchange").option("--objective <text>","Mission objective for the legacy research exchange").option("--live","Explicitly authorize model calls for the legacy research exchange").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").option("--lead <name>","Lead profile for a standing-team run","sam").option("--rounds <n>","Review rounds before the run stops unapproved","3").description("Standing team: sam team run <task>. Legacy research exchange: sam team run --chat --objective --live").action(async(task:string|undefined,o:{chat?:string;objective?:string;live?:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean;lead:string;rounds:string})=>{
+ if(o.chat||o.objective||o.live){
+  if(!o.chat||!o.objective||!o.live)throw new Error("The research exchange needs --chat, --objective, and --live");
+  const selected=process.env.SAM_MODEL_PROVIDER??"";
+  const endpoint=process.env.SAM_MODEL_ENDPOINT??(selected==="minimax"?"https://api.minimax.io/v1/chat/completions":undefined);
+  const model=process.env.SAM_MODEL;
+  if(!endpoint||!model)throw new Error("Configure model endpoint and SAM_MODEL");
+  const key=process.env.SAM_MODEL_API_KEY??(selected==="minimax"?process.env.MINIMAX_API_KEY:undefined)??"";
+  if(o.web&&!process.env.SAM_WEB_SEARCH_API_KEY)throw new Error("Set SAM_WEB_SEARCH_API_KEY before using --web");
+  const provider=new OpenAICompatibleProvider(endpoint,key,60000);
+  output(await runResearchTeam(program.opts().workspace,o.chat,o.objective,[{name:"research",role:"Research specialist"},{name:"qa",role:"Critical QA reviewer"}],provider,model,{workspaceEvidence:!!o.inspectWorkspace,webSearchKey:o.web?process.env.SAM_WEB_SEARCH_API_KEY:undefined,agentTools:!!o.agentTools}));
+  return;
+ }
+ if(!task)throw new Error("Usage: sam team run <task>");
+ output(await runStandingTeam(program.opts().workspace,task,{lead:o.lead,maxRounds:Number(o.rounds)}));
+});
+teams.command("status").description("Standing members, recent runs, and agent-to-agent messages").action(()=>output(teamStatus(program.opts().workspace)));
+const reviewCmd=program.command("review").description("Reviewer verdicts from standing team runs");
+reviewCmd.command("list").description("Recent runs with their verdict").action(()=>output(listTeamRuns(program.opts().workspace).map(run=>({id:run.id,status:run.status,worker:run.worker,reviewer:run.reviewer,rounds:run.rounds,verdict:run.verdict,workerModel:run.workerModel,reviewerModel:run.reviewerModel}))));
+reviewCmd.command("show").argument("[id]").description("One run's review trail, or the latest").action((id?:string)=>{
+  const runs=listTeamRuns(program.opts().workspace);
+  const run=id?runs.find(item=>item.id===id):runs.at(-1);
+  if(!run)throw new Error(id?"Unknown team run":"No team runs yet");
+  const messages=teamStatus(program.opts().workspace).messages.filter(message=>message.runId===run.id);
+  output({run,messages});
 });
 const schedules=program.command("schedule").description("Store local interval schedules; automatic execution not yet enabled");
 schedules.command("list").action(()=>output(listSchedules(program.opts().workspace)));
@@ -602,7 +627,14 @@ code.command("edit").argument("<path>").requiredOption("--old <text>","The exact
 code.command("writes").option("--limit <n>","How many recent writes to show","20").description("The ledgered code-write history, newest last, each with its diff readable back").action((o:{limit:string})=>output(codeWrites(program.opts().workspace,Math.max(1,Math.min(100,parseInt(o.limit,10)||20)))));
 code.command("commands").description("The C2 verify-hands allowlist: the only command names that can run in the code root (no arbitrary commands, flags, or shell)").action(()=>output({commands:codeCommandNames()}));
 code.command("spec").argument("<name>").description("Show the fixed argv one allowlisted command name builds (refuses for a missing package script or unknown name)").action((name:string)=>output(codeCommandSpec(program.opts().workspace,name)));
-code.command("run").argument("<name>").option("--timeout <ms>","Timeout in milliseconds (1000-120000)").description("Run one allowlisted verify command in the code root (C2): build/test/lint scripts, read-only git, agent-reach read-only reports; build/test verdicts settle the verification ledger").action(async(name:string,o:{timeout?:string})=>output(await runCodeCommand(program.opts().workspace,"operator",name,{timeoutMs:o.timeout?parseInt(o.timeout,10):undefined})));
+code.command("run").argument("<name>").option("--timeout <ms>","Timeout in milliseconds (1000-120000)").description("Run one allowlisted verify command in the code root (C2): build/test/lint scripts, read-only git, agent-reach read-only reports; build/test verdicts settle the verification ledger. git-clone is allowlisted too, but it takes a url and a destination: use code clone").action(async(name:string,o:{timeout?:string})=>output(await runCodeCommand(program.opts().workspace,"operator",name,{timeoutMs:o.timeout?parseInt(o.timeout,10):undefined})));
+code.command("clone").argument("<url>").argument("<destination>").option("--timeout <ms>","Timeout in milliseconds (1000-120000)").description("git-clone: clone a URL into a directory inside the designated code root. The destination is checked (a path that escapes is refused). The URL and destination are ledgered. No shell, no push.").action(async(url:string,destination:string,o:{timeout?:string})=>output(await cloneIntoCodeRoot(program.opts().workspace,"operator",url,destination,{timeoutMs:o.timeout?parseInt(o.timeout,10):undefined})));
+code.command("python").argument("<path>").option("--sandbox <name>","Run a script inside this sandbox instead of the code root").option("--pass-through <names>","Comma-separated environment variable NAMES to keep (connector tokens and model keys are scrubbed otherwise)").option("--timeout <ms>","Timeout in milliseconds (1000-120000)").description("Run one Python script file that already exists in the code root or a sandbox. argv is the interpreter plus that file. The run is ledgered with the script's content hash.").action(async(path:string,o:{sandbox?:string;passThrough?:string;timeout?:string})=>output(await runPython(program.opts().workspace,"operator",path,{sandbox:o.sandbox,passThrough:o.passThrough?o.passThrough.split(",").map(s=>s.trim()).filter(Boolean):[],timeoutMs:o.timeout?parseInt(o.timeout,10):undefined})));
+code.command("sandbox-list").description("List sandboxes SAM created under its sandboxes directory (dependency and filesystem isolation, one venv each)").action(()=>output({sandboxes:listSandboxes(program.opts().workspace)}));
+code.command("sandbox-create").argument("<name>").description("Create a sandbox with its own venv under the SAM-managed sandboxes directory").action(async(name:string)=>output(await createSandbox(program.opts().workspace,"operator",name)));
+code.command("sandbox-destroy").argument("<name>").description("Delete one sandbox SAM created. Anything else under the sandboxes directory is refused").action((name:string)=>output(destroySandbox(program.opts().workspace,"operator",name)));
+code.command("sandbox-write").argument("<name>").argument("<path>").option("--content <text>","The full new file content").option("--file <path>","Read the content from a UTF-8 file instead of --content").description("Write a text file inside a sandbox SAM created").action((name:string,path:string,o:{content?:string;file?:string})=>{if(!!o.content===!!o.file)throw new Error("Give exactly one of --content or --file");output(writeSandboxFile(program.opts().workspace,"operator",name,path,o.file?readFileSync(o.file,"utf8"):(o.content as string)));});
+code.command("sandbox-pip").argument("<name>").argument("<package>").argument("<version>").description("pip install one exact package==version into a sandbox venv. The package and version are ledgered. No pass-through of connector tokens or model keys.").action(async(name:string,pkg:string,version:string)=>output(await installSandboxPackage(program.opts().workspace,"operator",name,pkg,version)));
 code.command("branches").description("Git discipline (C4): the code root's repository, its current branch, and its sam/<task> branches (coding-loop branches; pushing one is an owner-approved git-push proposal, see coding push)").action(()=>output(listTaskBranches(program.opts().workspace)));
 const mission=program.command("mission").description("Manage missions");
 mission.command("create").argument("<objective>").action((objective:string)=>{
@@ -638,7 +670,7 @@ task.command("list").argument("<mission>").action((code:string)=>{
   }));
 });
 task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network").action(async(code:string)=>{
-  const missions=store(), db=new Database(dbPath());
+  const missions=store(), db=openDatabase(dbPath());
   db.pragma("foreign_keys = ON");
   try {
     const m=missionOrThrow(missions,code);
@@ -779,6 +811,15 @@ memory.command("archive").argument("<id>").action((id:string)=>{
   const mem=new MemoryStore(dbPath()); try{output({archived:mem.archive(id)});}finally{mem.close();}
 });
 
+const subagentCmd=program.command("subagent").description("Debug invisible helpers a chat turn started on its own. list, status, and cancel inspect them. The owner-facing path is the sam_spawn_subagent tool: the chat shows Working on it, then the folded answer, never the helper's own text. A child with no pinned connector runs on the plain chat path");
+subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
+  const tools=o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):undefined;
+  output(await spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)}));
+});
+subagentCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listSubagents(program.opts().workspace,o.profile)));
+subagentCmd.command("status").argument("<id>").action((id:string)=>{const found=getSubagent(program.opts().workspace,id);if(!found)throw new Error("Unknown sub-agent: "+id);output(found);});
+subagentCmd.command("cancel").argument("<id>").action((id:string)=>output(cancelSubagent(program.opts().workspace,id)));
+
 const operative=program.command("operative").description("Operative capability registry (declarations, never credentials)");
 operative.command("register").argument("<name>").argument("<adapter>").argument("<capabilities>").option("--max <n>","Max concurrent assignments").action((name:string,adapter:string,capabilities:string,options:{max?:string})=>{
   const reg=new OperativeRegistry(dbPath());
@@ -787,6 +828,10 @@ operative.command("register").argument("<name>").argument("<adapter>").argument(
 });
 operative.command("list").action(()=>{
   const reg=new OperativeRegistry(dbPath()); try{output(reg.list());}finally{reg.close();}
+});
+operative.command("status").description("Each operative with its liveness (fresh, stale, or offline). A stale declaration cannot receive new work").action(()=>{
+  const reg=new OperativeRegistry(dbPath());
+  try{output(reg.list().map(o=>({...o,liveness:operativeLiveness(o)})));}finally{reg.close();}
 });
 operative.command("state").argument("<id>").argument("<state>").action((id:string,state:string)=>{
   const reg=new OperativeRegistry(dbPath()); try{output({updated:reg.setState(id,state as OperativeState)});}finally{reg.close();}
@@ -800,6 +845,25 @@ operative.command("candidates").argument("<capabilities>").action((capabilities:
   finally{reg.close();}
 });
 
+const delegateCmd=program.command("delegate").description("Delegate a repo coding job to a Codex CLI or Claude Code operative. This creates an approval card (adapter, repo, branch, prompt) and runs nothing until the owner approves. The operative works in a worktree on its own branch, never main, and does not push or open a pull request");
+delegateCmd.argument("[adapter]").option("--repo <path>","Git repository to work in").option("--branch <name>","Branch for the worktree (never main or master)").option("--prompt <text>","The job, shown on the approval card").option("--chat <id>","Chat that receives the branch, diff stat, and test result").option("--timeout <ms>","Process budget in milliseconds, 1000 to 600000","120000").option("--actor <name>","Acting profile","sam").action((adapter:string|undefined,o:{repo?:string;branch?:string;prompt?:string;chat?:string;timeout:string;actor:string})=>{
+  if(!adapter||!o.repo||!o.branch||!o.prompt)throw new Error("Usage: sam delegate <codex|claude-code> --repo <path> --branch <name> --prompt <text>");
+  const root=program.opts().workspace as string;
+  const timeoutMs=Number(o.timeout);
+  const job=proposeDelegation(root,{actor:o.actor,adapter,repo:o.repo,branch:o.branch,prompt:o.prompt,timeoutMs,chatId:o.chat??null},(detail,title)=>proposeAction(root,{actor:o.actor,kind:"delegate",title,detail,chatId:o.chat??null}));
+  output({status:"pending_owner_approval",delegation:job.id,action:job.actionId,adapter:job.adapter,repo:job.repo,branch:job.branch,prompt:job.prompt,auth:job.auth,note:"Nothing runs until the owner approves this card."});
+});
+delegateCmd.command("status").argument("[id]").description("One delegation, or every delegation when no id is given").action((id?:string)=>{
+  const root=program.opts().workspace as string;
+  if(!id){output(listDelegations(root));return;}
+  const job=getDelegation(root,id);if(!job)throw new Error("Unknown delegation: "+id);output(job);
+});
+delegateCmd.command("cancel").argument("<id>").description("Cancel a pending card or kill a running operative. Nothing is pushed").action(async(id:string)=>{
+  const root=program.opts().workspace as string;
+  const current=getDelegation(root,id);if(!current)throw new Error("Unknown delegation: "+id);
+  if(current.status==="pending"&&current.actionId){try{await decideAction(root,current.actionId,false);}catch{/* the card may already have been decided */}}
+  output(cancelDelegation(root,current.id));
+});
 const assignment=program.command("assignment").description("Durable operative assignment leases (a lease is not execution permission)");
 assignment.command("claim").argument("<operative-id>").argument("<task-id>").option("--ttl <ms>","Lease TTL in milliseconds").action((operativeId:string,taskId:string,options:{ttl?:string})=>{
   const reg=new OperativeRegistry(dbPath()); reg.close();

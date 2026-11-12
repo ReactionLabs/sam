@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,7 @@ import { connectEngine, disconnectEngine, engineConnectStatus, parseEngineAuth, 
 import { detectSetup, runConfigWizard } from "./config-wizard.js";
 import { authStatus } from "./auth-status.js";
 import { readActivity } from "./activity.js";
+import { installFakeEngine } from "./fake-engine.js";
 
 // CLI dressing item 3: Claude Code connect via CLI reuse. Every probe
 // rides a stub runner (or a fake binary for the CLI tests) - no test
@@ -16,11 +17,8 @@ import { readActivity } from "./activity.js";
 // these fixtures to leak.
 function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-engine-connect-")); }
 
-function fakeBinary(root: string, body: string): string {
-  const bin = join(root, "claude");
-  writeFileSync(bin, body);
-  chmodSync(bin, 0o755);
-  return bin;
+function fakeBinary(root: string, authStatusJson = ""): string {
+  return installFakeEngine(root, { workFile: join(root, "engine-work.mjs"), projectDir: root, authStatusJson });
 }
 function envWith(bin: string): NodeJS.ProcessEnv { return { PATH: "/usr/bin:/bin", SAM_ENGINE_BIN: bin }; }
 const SIGNED_IN_JSON = JSON.stringify({ loggedIn: true, authMethod: "claude.ai", apiProvider: "firstParty", email: "owner@example.test", orgId: "org-secret-id", subscriptionType: "max" });
@@ -53,7 +51,7 @@ test("probe: no binary means not-installed and the runner is never invoked; the 
 
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     const seen: string[][] = [];
     const probe = await probeEngineAuth(envWith(bin), async (_b, args) => { seen.push(args); return { exitCode: 0, output: SIGNED_IN_JSON }; });
     assert.equal(probe.state, "signed-in");
@@ -67,7 +65,7 @@ test("probe: no binary means not-installed and the runner is never invoked; the 
 test("connect: verify-before-save - signed-in records only the marker, every other verdict saves nothing", async () => {
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     const env = envWith(bin);
     const marker = join(root, ".sam", "engine-connection.json");
 
@@ -112,14 +110,14 @@ test("connect: not-installed saves nothing and names the operator's act", async 
 test("status: a marker whose binary is no longer detected reads stale, not connected", async () => {
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     await connectEngine(root, envWith(bin), runnerReturning(SIGNED_IN_JSON));
     const gone = engineConnectStatus(root, { PATH: "/nonexistent-dir" });
     assert.equal(gone.connected, false);
     assert.equal(gone.stale, true);
     assert.ok(gone.connection, "the stale marker is still shown for what it is");
     mkdirSync(join(root, "sub"), { recursive: true });
-    const other = fakeBinary(join(root, "sub"), "#!/bin/sh\nexit 0\n");
+    const other = fakeBinary(join(root, "sub"));
     const moved = engineConnectStatus(root, envWith(other));
     assert.equal(moved.connected, false, "a different binary is a different connection until re-verified");
     assert.equal(moved.stale, true);
@@ -129,7 +127,7 @@ test("status: a marker whose binary is no longer detected reads stale, not conne
 test("disconnect: removes only SAM's marker, and a second disconnect is a clean no-op", async () => {
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     await connectEngine(root, envWith(bin), runnerReturning(SIGNED_IN_JSON));
     const first = disconnectEngine(root);
     assert.equal(first.disconnected, true);
@@ -144,7 +142,7 @@ test("disconnect: removes only SAM's marker, and a second disconnect is a clean 
 test("surfaces: detectSetup and auth status carry the connection state", async () => {
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     const env = { ...envWith(bin), SAM_GOG_BIN: "/nonexistent/gog" };
     assert.equal(detectSetup(root, env).engine.connected, false);
     assert.equal(authStatus(root, env).engine.connected, false);
@@ -162,7 +160,7 @@ test("surfaces: detectSetup and auth status carry the connection state", async (
 test("wizard: the engine section offers the connect and records the marker on a signed-in verdict", async () => {
   const root = scratch();
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nexit 0\n");
+    const bin = fakeBinary(root);
     const prints: string[] = [];
     const answers = ["y"];
     const io = { print: (l: string) => prints.push(l), ask: async () => answers.shift() ?? "" };
@@ -186,7 +184,7 @@ test("CLI: engine connect / auth --probe / status / disconnect ride a fake binar
   const root = scratch();
   const cli = fileURLToPath(new URL("./cli.js", import.meta.url));
   try {
-    const bin = fakeBinary(root, "#!/bin/sh\nif [ \"$1\" = \"auth\" ]; then printf '%s' '" + SIGNED_IN_JSON.replace(/'/g, "") + "'; exit 0; fi\nexit 0\n");
+    const bin = fakeBinary(root, SIGNED_IN_JSON);
     const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", SAM_ENGINE_BIN: bin, SAM_GOG_BIN: "/nonexistent/gog" };
     const run = (...args: string[]) => spawnSync(process.execPath, [cli, "--workspace", root, ...args], { encoding: "utf8", env });
 

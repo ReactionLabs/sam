@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -14,8 +15,7 @@ export class AgentLoopJournal {
   private db: Database.Database;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.pragma("journal_mode = WAL");
+    this.db = openDatabase(path);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS agent_loops (
         id TEXT PRIMARY KEY, goal TEXT NOT NULL, state TEXT NOT NULL,

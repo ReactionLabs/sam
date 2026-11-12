@@ -98,9 +98,16 @@ copy boots before it is trusted.
 
 ## Quick start
 
+Dependencies are not in the repository. A fresh clone has no
+`node_modules`. That path is gitignored, whether it is a directory
+or a symlink, and it is created by `npm install`. Do not commit it.
+
 ```bash
+git clone https://github.com/ReactionLabs/sam.git
+cd sam
 npm install
 npm run build
+npm test
 node dist/cli.js --workspace /path/to/home dashboard
 node dist/cli.js --workspace /path/to/home overview
 ```

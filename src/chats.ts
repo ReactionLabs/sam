@@ -1,12 +1,14 @@
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join,resolve } from "node:path";
+import { normalizeMessageSource, type StoredMessageSource } from "./message-provenance.js";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null; provider:string|null }
-export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null; partial:number }
+export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null; partial:number; source:StoredMessageSource }
 // A reaction is a single emoji or a short emoji sequence (flags, ZWJ
 // families, keycaps, skin tones) - never text. This one validator
 // fences the sam_react tool, the dashboard badges, and the CLI verb.
@@ -30,8 +32,7 @@ export class ChatStore {
   private db:Database.Database;
   constructor(workspace:string){
     const root=join(resolve(workspace),".sam");mkdirSync(root,{recursive:true});
-    this.db=new Database(join(root,"chats.db"));
-    this.db.pragma("journal_mode = WAL");
+    this.db=openDatabase(join(root,"chats.db"));
     this.db.exec(`CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY,title TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chat_messages (id TEXT PRIMARY KEY,chat_id TEXT NOT NULL REFERENCES chats(id),role TEXT NOT NULL CHECK(role IN ('user','assistant')),content TEXT NOT NULL,created_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS chat_messages_by_chat ON chat_messages(chat_id,created_at);
@@ -54,6 +55,11 @@ export class ChatStore {
     const mcols=this.db.pragma("table_info(chat_messages)") as Array<{name:string}>;
     if(!mcols.some(c=>c.name==="reaction"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN reaction TEXT");
     if(!mcols.some(c=>c.name==="partial"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN partial INTEGER NOT NULL DEFAULT 0");
+    // Message provenance. This constructor is the opener of chats.db
+    // on this tip (src/sqlite.ts openDatabase lives on grok/fix-f1,
+    // unmerged). The column is added here so every reader sees it.
+    // Existing rows take the default: unknown.
+    if(!mcols.some(c=>c.name==="source"))this.db.exec("ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'");
     // Full-text chat search (Plan Phase B item 4): an FTS5 external-content
     // index over chat_messages, the MemoryStore pattern - triggers keep it
     // in step with inserts, and a DB that predates the index gets one
@@ -93,7 +99,7 @@ export class ChatStore {
       item.visitor=parent.visitor===1?1:0;
       this.db.prepare("INSERT INTO chats (id,title,created_at,updated_at,parent_chat_id,agent_name,visitor) VALUES (@id,@title,@created_at,@updated_at,@parent_chat_id,@agent_name,@visitor)").run(item);
       const history=this.messages(parentId);
-      for(const m of history){this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at,partial) VALUES (?,?,?,?,?,?)").run(randomUUID(),item.id,m.role,m.content,m.created_at,m.partial?1:0);}
+      for(const m of history){this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at,partial,source) VALUES (?,?,?,?,?,?,?)").run(randomUUID(),item.id,m.role,m.content,m.created_at,m.partial?1:0,m.source);}
     })();
     return item;
   }
@@ -170,14 +176,18 @@ export class ChatStore {
   }
   messages(id:string):ChatMessage[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
-    return this.db.prepare("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY rowid LIMIT 500").all(id) as ChatMessage[];
+    const rows=this.db.prepare("SELECT * FROM chat_messages WHERE chat_id=? ORDER BY rowid LIMIT 500").all(id) as ChatMessage[];
+    // A tampered or pre-migration value never reaches the prompt as
+    // free text. Only the five clients, or unknown, come back out.
+    return rows.map(m=>({...m,source:normalizeMessageSource(m.source)}));
   }
-  add(id:string,role:"user"|"assistant",content:string):ChatMessage {
+  add(id:string,role:"user"|"assistant",content:string,source?:unknown):ChatMessage {
     if(!["user","assistant"].includes(role)||!content.trim()||content.length>20000)throw new Error("Invalid chat message");
-    const now=new Date().toISOString(),item={id:randomUUID(),chat_id:id,role,content,created_at:now,reaction:null as string|null,partial:0};
+    const stamped=normalizeMessageSource(source);
+    const now=new Date().toISOString(),item:ChatMessage={id:randomUUID(),chat_id:id,role,content,created_at:now,reaction:null,partial:0,source:stamped};
     this.db.transaction(()=>{
       if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
-      this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at) VALUES (@id,@chat_id,@role,@content,@created_at)").run(item);
+      this.db.prepare("INSERT INTO chat_messages (id,chat_id,role,content,created_at,source) VALUES (@id,@chat_id,@role,@content,@created_at,@source)").run(item);
       this.db.prepare("UPDATE chats SET updated_at=? WHERE id=?").run(now,id);
     })();
     return item;

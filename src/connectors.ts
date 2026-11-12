@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 export type Connector = { id:string; name:string; url:string; tokenEnv:string; enabled:boolean; allowedTools:string[] };
 // Every tool SAM may ever call, across all known MCP servers. All are read-only by
@@ -39,9 +40,7 @@ function openConnectorsStore(root:string):Database.Database{
  const dir=join(resolve(root),".sam");
  mkdirSync(dir,{recursive:true,mode:0o700});
  if(lstatSync(dir).isSymbolicLink())throw new Error("Unsafe SAM state directory");
- const db=new Database(connectorsDbFile(root));
- db.pragma("journal_mode = WAL");
- db.pragma("busy_timeout = 5000");
+ const db=openDatabase(connectorsDbFile(root));
  db.exec("CREATE TABLE IF NOT EXISTS connectors (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
  migrateLegacyConnectors(db,root);
  return db;

@@ -12,8 +12,59 @@ pub struct Connection {
     pub token: Option<String>,
 }
 
+pub const PROFILE_NAMES: [&str; 3] = ["dip", "trading", "second-shift"];
+
+#[derive(Clone, Debug)]
+pub struct ProfileSlot {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub token: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProfileSet {
+    pub active: String,
+    pub slots: Vec<ProfileSlot>,
+}
+
+impl ProfileSet {
+    pub fn bare(active: &str) -> Self {
+        Self {
+            active: canonical_profile(active),
+            slots: PROFILE_NAMES
+                .iter()
+                .map(|name| ProfileSlot {
+                    name: (*name).to_string(),
+                    base_url: None,
+                    token: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn get(&self, name: &str) -> Option<&ProfileSlot> {
+        let name = canonical_profile(name);
+        self.slots.iter().find(|slot| slot.name == name)
+    }
+}
+
+pub struct Session {
+    pub connection: Connection,
+    pub profiles: ProfileSet,
+}
+
 #[derive(Debug, Deserialize)]
 struct FileConfig {
+    #[serde(rename = "baseUrl", alias = "base_url")]
+    base_url: Option<String>,
+    token: Option<String>,
+    #[serde(rename = "activeProfile", alias = "active_profile")]
+    active_profile: Option<String>,
+    profiles: Option<std::collections::BTreeMap<String, FileProfile>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileProfile {
     #[serde(rename = "baseUrl", alias = "base_url")]
     base_url: Option<String>,
     token: Option<String>,
@@ -32,44 +83,127 @@ pub fn default_config_path() -> Option<PathBuf> {
     Some(home.join("sam").join("cli.json"))
 }
 
+#[allow(dead_code)]
 pub fn load_connection(
     config_path: Option<&Path>,
     base_override: Option<&str>,
     token_override: Option<&str>,
 ) -> Result<Connection, String> {
+    Ok(load_session(config_path, base_override, token_override)?.connection)
+}
+
+pub fn load_session(
+    config_path: Option<&Path>,
+    base_override: Option<&str>,
+    token_override: Option<&str>,
+) -> Result<Session, String> {
     let path = config_path
         .map(|p| p.to_path_buf())
         .or_else(default_config_path);
-    let mut base_url = None;
-    let mut token = None;
-    if let Some(path) = path {
+    let file = if let Some(path) = &path {
         if path.exists() {
-            let file = read_private_config(&path)?;
-            base_url = file.base_url.filter(|s| !s.trim().is_empty());
-            token = file.token.filter(|s| !s.trim().is_empty());
+            Some(read_private_config(path)?)
         } else if config_path.is_some() {
             return Err(format!("config file not found: {}", path.display()));
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let active = active_name(file.as_ref());
+    let mut slots = Vec::new();
+    for name in PROFILE_NAMES {
+        let mut base_url = None;
+        let mut token = None;
+        if let Some(file) = file.as_ref() {
+            if let Some(profiles) = &file.profiles {
+                if let Some(slot) = profiles.get(name) {
+                    base_url = non_empty(slot.base_url.clone());
+                    token = non_empty(slot.token.clone());
+                }
+            }
+        }
+        if let Some(value) = non_empty(std::env::var(profile_env(name, "URL")).ok()) {
+            base_url = Some(value);
+        }
+        if let Some(value) = non_empty(std::env::var(profile_env(name, "TOKEN")).ok()) {
+            token = Some(value);
+        }
+        if name == active {
+            if base_url.is_none() {
+                if let Some(file) = file.as_ref() {
+                    base_url = non_empty(file.base_url.clone());
+                }
+            }
+            if token.is_none() {
+                if let Some(file) = file.as_ref() {
+                    token = non_empty(file.token.clone());
+                }
+            }
+            if let Some(value) = non_empty(std::env::var("SAM_BASE_URL").ok()) {
+                base_url = Some(value);
+            }
+            if let Some(value) = non_empty(std::env::var("SAM_TOKEN").ok()) {
+                token = Some(value);
+            }
+            if let Some(value) = non_empty(base_override.map(|s| s.to_string())) {
+                base_url = Some(value);
+            }
+            if let Some(value) = non_empty(token_override.map(|s| s.to_string())) {
+                token = Some(value);
+            }
+        }
+        slots.push(ProfileSlot {
+            name: name.to_string(),
+            base_url: base_url.map(|s| s.trim().trim_end_matches('/').to_string()),
+            token: token.map(|s| s.trim().to_string()),
+        });
+    }
+    let profiles = ProfileSet {
+        active: active.clone(),
+        slots,
+    };
+    let base_url = profiles
+        .get(&active)
+        .and_then(|slot| slot.base_url.clone())
+        .ok_or_else(|| {
+            "set SAM_BASE_URL or baseUrl in the config file (the dashboard origin, or the /sam door)"
+                .to_string()
+        })?;
+    let token = profiles.get(&active).and_then(|slot| slot.token.clone());
+    Ok(Session {
+        connection: Connection { base_url, token },
+        profiles,
+    })
+}
+
+fn active_name(file: Option<&FileConfig>) -> String {
+    if let Some(value) = non_empty(std::env::var("SAM_PROFILE").ok()) {
+        return canonical_profile(&value);
+    }
+    if let Some(file) = file {
+        if let Some(value) = non_empty(file.active_profile.clone()) {
+            return canonical_profile(&value);
         }
     }
-    if let Some(value) = non_empty(std::env::var("SAM_BASE_URL").ok()) {
-        base_url = Some(value);
+    "dip".into()
+}
+
+pub fn canonical_profile(name: &str) -> String {
+    let name = name.trim().to_ascii_lowercase().replace('_', "-");
+    match name.as_str() {
+        "secondshift" | "second-shift" => "second-shift".into(),
+        "dip" | "trading" => name,
+        _ => "dip".into(),
     }
-    if let Some(value) = non_empty(std::env::var("SAM_TOKEN").ok()) {
-        token = Some(value);
-    }
-    if let Some(value) = non_empty(base_override.map(|s| s.to_string())) {
-        base_url = Some(value);
-    }
-    if let Some(value) = non_empty(token_override.map(|s| s.to_string())) {
-        token = Some(value);
-    }
-    let base_url = base_url.ok_or_else(|| {
-        "set SAM_BASE_URL or baseUrl in the config file (the dashboard origin, or the /sam door)".to_string()
-    })?;
-    Ok(Connection {
-        base_url: base_url.trim().trim_end_matches('/').to_string(),
-        token: token.map(|t| t.trim().to_string()),
-    })
+}
+
+fn profile_env(name: &str, suffix: &str) -> String {
+    format!(
+        "SAM_PROFILE_{}_{suffix}",
+        name.to_ascii_uppercase().replace('-', "_")
+    )
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {
@@ -120,6 +254,7 @@ mod tests {
         std::env::remove_var("SAM_BASE_URL");
         std::env::remove_var("SAM_TOKEN");
         std::env::remove_var("SAM_CONFIG");
+        std::env::remove_var("SAM_PROFILE");
         guard
     }
 
