@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { channels, addChannel, type Channel } from "./channels.js";
 import { connectors } from "./connectors.js";
@@ -26,7 +27,7 @@ import { recordActivity } from "./activity.js";
 // a key is set in the install's environment, then verified here.
 // Verify-before-save (the OpenClaw rule): `config setup --live` runs
 // ONE real completion through the existing provider and records the
-// verified baseline (.sam/setup.json + a ledger line) only on success;
+// verified baseline (.sam/setup.db + a ledger line) only on success;
 // a failure saves nothing and never auto-selects another route.
 
 export const CONFIG_SECTIONS = ["model", "channels", "keys", "engine"] as const;
@@ -202,14 +203,81 @@ export async function verifyModel(env: NodeJS.ProcessEnv = process.env, complete
 export interface SetupRecord { model: string; provider: string; endpoint: string | null; verifiedAt: string; reply: string }
 
 function setupPath(root: string) { return join(resolve(root), ".sam", "setup.json"); }
+function setupDbPath(root: string) { return join(resolve(root), ".sam", "setup.db"); }
 
-export function readSetupRecord(root: string): SetupRecord | null {
+// State convergence (UNIFICATION item 4, twenty-ninth store):
+// the verified setup baseline is SQLite (.sam/setup.db, the
+// approval-policy / auth-probes singleton pattern), ONE row
+// holding the record's full JSON so the singleton keeps its
+// exact shape. The old setup.json was rewritten whole by
+// verifyAndSaveSetup on every successful setup run - a plain
+// writeFileSync - while readSetupRecord readers run in every
+// process that builds a status surface (the dashboard status
+// path, the CLI overview and config views, auth status). A
+// torn write read back as no baseline at all, so a verified
+// install silently read as never-verified. Here each save is
+// a single-row UPSERT and connections carry a busy_timeout,
+// so no reader in any process can ever see a torn baseline.
+// First open imports a legacy setup.json (validated through
+// the old read shape: a string model plus a string
+// verifiedAt) and renames it setup.json.migrated - imported,
+// never deleted; a malformed file or a payload failing that
+// shape imports nothing and is left in place (the migrated
+// shape reads it as no baseline, exactly the old forgiving
+// contract). A pure read on an install with neither file
+// creates nothing, and a failed verification still saves
+// nothing - verify-before-save is untouched. The P9 backup
+// snapshots every .sam/*.db generically, so the migrated
+// store is carried with no backup change.
+function parseSetupRecord(data: unknown): SetupRecord | null {
+  const value = data as SetupRecord | null;
+  return typeof value?.model === "string" && typeof value?.verifiedAt === "string" ? value : null;
+}
+function openSetupStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(setupDbPath(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS setup_record (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacySetup(db, root);
+  return db;
+}
+function migrateLegacySetup(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM setup_record WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
   const file = setupPath(root);
-  if (!existsSync(file)) return null;
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const record = parseSetupRecord(data);
+  if (!record) return;
+  db.prepare("INSERT OR IGNORE INTO setup_record (id, data) VALUES (1, ?)").run(JSON.stringify(record));
+  renameSync(file, file + ".migrated");
+}
+function setupStoreExists(root: string): boolean {
+  return existsSync(setupDbPath(root)) || existsSync(setupPath(root));
+}
+function saveSetupRecord(root: string, record: SetupRecord): void {
+  const db = openSetupStore(root);
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as SetupRecord;
-    return typeof value?.model === "string" && typeof value?.verifiedAt === "string" ? value : null;
-  } catch { return null; }
+    db.prepare("INSERT INTO setup_record (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
+  } finally { db.close(); }
+}
+
+// The store's read door: the verified baseline through the
+// store's own shape, or null when no setup has ever been
+// verified - and a read on an install with no store at all
+// creates nothing.
+export function readSetupRecord(root: string): SetupRecord | null {
+  if (!setupStoreExists(root)) return null;
+  const db = openSetupStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM setup_record WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return null;
+    try { return parseSetupRecord(JSON.parse(row.data)); } catch { return null; }
+  } finally { db.close(); }
 }
 
 export async function verifyAndSaveSetup(root: string, env: NodeJS.ProcessEnv = process.env, complete?: Completer): Promise<{ verify: VerifyResult; saved: SetupRecord | null }> {
@@ -222,9 +290,8 @@ export async function verifyAndSaveSetup(root: string, env: NodeJS.ProcessEnv = 
     verifiedAt: new Date().toISOString(),
     reply: verify.reply ?? "",
   };
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(setupPath(root), JSON.stringify(record, null, 2), { mode: 0o600 });
-  recordActivity(root, "owner", "setup-verified", "Model setup verified: " + record.model + " via " + record.provider + " (one real completion; recorded in setup.json)");
+  saveSetupRecord(root, record);
+  recordActivity(root, "owner", "setup-verified", "Model setup verified: " + record.model + " via " + record.provider + " (one real completion; recorded in the setup store)");
   return { verify, saved: record };
 }
 

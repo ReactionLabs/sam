@@ -114,8 +114,9 @@ test("setup: verify-before-save - success records the baseline + ledger line, fa
     assert.equal(good.saved!.model, "MiniMax-M2.5");
     const record = readSetupRecord(root);
     assert.equal(record?.provider, "minimax");
-    const raw = readFileSync(join(root, ".sam", "setup.json"), "utf8");
+    const raw = readFileSync(join(root, ".sam", "setup.db"), "utf8");
     assert.ok(!raw.includes("<redacted>"), "the setup record must never carry the key");
+    assert.equal(existsSync(join(root, ".sam", "setup.json")), false, "the baseline rides the DB; no JSON is recreated");
     assert.ok(readActivity(root, 50).some(l => l.kind === "setup-verified"));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
