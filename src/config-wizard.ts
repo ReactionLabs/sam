@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { channels, addChannel, type Channel } from "./channels.js";
 import { connectors } from "./connectors.js";
@@ -237,9 +238,7 @@ function openSetupStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  const db = new Database(setupDbPath(root));
-  db.pragma("journal_mode = WAL");
-  db.pragma("busy_timeout = 5000");
+  const db = openDatabase(setupDbPath(root));
   db.exec("CREATE TABLE IF NOT EXISTS setup_record (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
   migrateLegacySetup(db, root);
   return db;
