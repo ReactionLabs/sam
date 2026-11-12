@@ -28,7 +28,7 @@ import { listActions } from "./actions.js";
 import { readActivity } from "./activity.js";
 import { listBackgroundTasks } from "./background.js";
 import { modelRoutingTable } from "./model-routing.js";
-import { usageSummary } from "./usage.js";
+import { usageSummary, usageToday } from "./usage.js";
 import { listCompactions } from "./compaction.js";
 import { pairingStatus } from "./pairing.js";
 import { authoredSkills, curatorFindings } from "./skill-author.js";
@@ -130,6 +130,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     doorGuard: opts.doorGuard ?? EMPTY_DOOR_GUARD,
     models: modelRoutingTable(),
     usage: usageSummary(root),
+    usageToday: usageToday(root),
     drafts: listDrafts(root).slice(-20),
     contacts: listContacts(root),
     compactions: listCompactions(root),
