@@ -456,6 +456,27 @@ function oneLine(value: string): string {
   return String(value ?? "").replace(/[\r\n\0]/g, " ").slice(0, 180);
 }
 
+const LEDGER_LIMIT = 300;
+
+function singleLine(value: string): string {
+  return String(value ?? "").replace(/[\r\n\0]/g, " ").replace(/ +/g, " ").trim();
+}
+
+/** An activity summary that stays inside the ledger cap and still
+ *  contains `mustKeep` (the destination, or the content hash). The
+ *  detail is shortened before that required piece is. */
+function boundedLedger(detail: string, mustKeep: string): string {
+  const keep = singleLine(mustKeep);
+  const body = singleLine(detail);
+  if (keep.length >= LEDGER_LIMIT) return keep.slice(0, LEDGER_LIMIT);
+  if (body.includes(keep) && body.length <= LEDGER_LIMIT) return body;
+  const room = LEDGER_LIMIT - keep.length - 1;
+  const head = body.replace(keep, "").replace(/\s+/g, " ").trim();
+  const shown = room <= 1 ? "" : (head.length <= room ? head : head.slice(0, room - 1) + "…");
+  const line = (shown + " " + keep).trim();
+  return line.length <= LEDGER_LIMIT ? line : keep.slice(0, LEDGER_LIMIT);
+}
+
 const CLONE_PROTOCOLS = new Set(["http:", "https:", "file:", "ssh:", "git:"]);
 
 /** Canonicalize a clone URL. A password, query, fragment, or non-URL
@@ -534,8 +555,8 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     mkdirSync(dirname(spec.args[spec.args.length - 1]), { recursive: true });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    const shown = canonical ? canonical + " into " + oneLine(destination) : "an invalid URL";
-    recordActivity(root, actor, "git-clone", "Refused clone of " + shown + ": " + msg);
+    const shown = canonical ? canonical + " into " + oneLine(destination) : "an invalid URL into " + oneLine(destination);
+    recordActivity(root, actor, "git-clone", boundedLedger("Refused clone of " + shown + ": " + oneLine(msg), oneLine(destination)));
     throw e;
   }
   const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
@@ -552,7 +573,8 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
     ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: "git is not installed on this machine - git-clone cannot run until it is installed (installing it is the operator's act)" } : {}),
   };
-  recordActivity(root, actor, "git-clone", "Cloned " + canonical + " into " + destination + ": " + (result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
+  const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
+  recordActivity(root, actor, "git-clone", boundedLedger("Cloned " + canonical + " into " + destination + ": " + status, destination));
   return result;
 }
 
@@ -679,7 +701,9 @@ export async function runPython(root: string, actor: string, rel: string, opts: 
       output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
       ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: located.interpreter + " is not installed on this machine" } : {}),
     };
-    recordActivity(root, actor, "python-run", "Ran python " + rel + (sandbox ? " in sandbox " + sandbox : "") + " sha256:" + digest + " pass-through:" + (requested.length ? requested.join(",") : "none") + " -> " + (result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
+    const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
+    const pass = requested.length ? requested.join(",") : "none";
+    recordActivity(root, actor, "python-run", boundedLedger("sha256:" + digest + " pass-through:" + pass + " path:" + rel + (sandbox ? " sandbox:" + sandbox : "") + " -> " + status, "sha256:" + digest));
     return result;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -753,7 +777,10 @@ export interface SandboxInfo { name: string; path: string; work: string; python:
 
 export async function createSandbox(root: string, actor: string, name: string, opts: { python?: string | null; runner?: CodeRunner; timeoutMs?: number } = {}): Promise<SandboxInfo> {
   const { dir } = sandboxPath(root, name);
-  if (existsSync(dir)) throw new Error("Sandbox already exists: " + name);
+  let existing: ReturnType<typeof lstatSync> | undefined;
+  try { existing = lstatSync(dir); } catch { existing = undefined; }
+  if (existing?.isSymbolicLink()) throw new Error("Refusing to create sandbox " + name + ": that path is a symlink");
+  if (existing) throw new Error("Sandbox already exists: " + name);
   if (opts.python === null) throw new Error("python3 is not available on this machine, so a sandbox venv cannot be created");
   let python = opts.python ?? "";
   if (!python) {
@@ -772,7 +799,10 @@ export async function createSandbox(root: string, actor: string, name: string, o
   catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
   const py = venvPythonPath(dir);
   if (raw.exitCode !== 0 || raw.timedOut || !existsSync(py)) {
-    try { rmSync(dir, { recursive: true, force: true }); } catch { /* the partial directory is removed when it still can be */ }
+    try {
+      const st = lstatSync(dir);
+      if (st.isDirectory() && !st.isSymbolicLink()) rmSync(dir, { recursive: true, force: true });
+    } catch { /* the partial directory is removed when it still can be */ }
     throw new Error("Sandbox venv was not created" + (raw.output ? ": " + raw.output.slice(0, 400) : ""));
   }
   const work = join(dir, "work");

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -149,6 +149,32 @@ test("python env drops connector tokens and model keys unless a name is passed t
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
+test("git-clone ledger keeps the destination when the URL is long, and never stores a rejected secret", async () => {
+  const { base, sam } = fixture();
+  try {
+    const runner: CodeRunner = async () => ({ exitCode: 0, output: "" });
+    const dest = "vendor/" + "b".repeat(40);
+    const url = "https://example.com/" + "a".repeat(280) + "/repo.git";
+    await cloneIntoCodeRoot(sam, "sam", url, dest, { runner });
+    const line = readActivity(sam, 5).filter(l => l.kind === "git-clone").at(-1);
+    assert.ok(line);
+    assert.ok(line.summary.length <= 300);
+    assert.ok(line.summary.includes(dest), line.summary);
+    assert.match(line.summary, /https:\/\/example\.com\//);
+    await assert.rejects(() => cloneIntoCodeRoot(sam, "sam", "https://user:secret-token@example.com/" + "a".repeat(240) + "/repo.git", "../out", { runner }), /password|Invalid/);
+    const ledger = readActivity(sam, 10).map(l => l.summary).join("\n");
+    assert.equal(ledger.includes("secret-token"), false);
+    assert.match(ledger, /\.\.\/out/);
+    await assert.rejects(() => cloneIntoCodeRoot(sam, "sam", "https://example.com/repo.git", "C:/outside", { runner }), /Invalid/);
+    const { proj } = { proj: join(base, "proj") };
+    writeFileSync(join(proj, "taken.txt"), "stay\n");
+    let calls = 0;
+    await assert.rejects(() => cloneIntoCodeRoot(sam, "sam", "https://example.com/repo.git", "taken.txt", { runner: async () => { calls += 1; return { exitCode: 0, output: "" }; } }), /already exists/);
+    assert.equal(calls, 0);
+    assert.equal(readFileSync(join(proj, "taken.txt"), "utf8"), "stay\n");
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
 test("python runner: argv is interpreter plus file, hash is ledgered, output is capped", async () => {
   const { base, sam, proj } = fixture();
   try {
@@ -179,6 +205,20 @@ test("python runner: argv is interpreter plus file, hash is ledgered, output is 
     const timed = await runPython(sam, "sam", "probe.py", { runner: async () => ({ exitCode: null, output: "partial", timedOut: true }) });
     assert.equal(timed.timedOut, true);
     assert.equal(timed.ok, false);
+    let seenTimeout = 0;
+    await runPython(sam, "sam", "probe.py", { timeoutMs: 5, runner: async (_f, _a, _c, timeout) => { seenTimeout = timeout; return { exitCode: 0, output: "" }; } });
+    assert.equal(seenTimeout, 1_000);
+    await runPython(sam, "sam", "probe.py", { timeoutMs: 999_999, runner: async (_f, _a, _c, timeout) => { seenTimeout = timeout; return { exitCode: 0, output: "" }; } });
+    assert.equal(seenTimeout, 120_000);
+    await assert.rejects(() => runPython(sam, "sam", "/etc/passwd", { runner: async () => ({ exitCode: 0, output: "" }) }), /Invalid relative/);
+    writeFileSync(join(proj, "real.py"), "print(1)\n");
+    let linked = true;
+    try { symlinkSync(join(proj, "real.py"), join(proj, "link.py")); } catch { linked = false; }
+    if (linked) {
+      let calls = 0;
+      await assert.rejects(() => runPython(sam, "sam", "link.py", { runner: async () => { calls += 1; return { exitCode: 0, output: "" }; } }), /Symlink/);
+      assert.equal(calls, 0);
+    }
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -295,7 +335,7 @@ test("python in a sandbox uses that venv's interpreter and the script's hash", a
     assert.equal(seen[0].file.includes("python"), true);
     const line = readActivity(sam, 20).filter(l => l.kind === "python-run" && l.summary.includes(digest)).at(-1);
     assert.ok(line);
-    assert.match(line.summary, /sandbox demo/);
+    assert.match(line.summary, /sandbox:demo/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
@@ -308,6 +348,112 @@ test("sandbox create uses a real venv when python3 provides one", { skip: venv.o
     assert.deepEqual(listSandboxes(sam).map(s => s.name), ["realbox"]);
     destroySandbox(sam, "sam", "realbox");
     assert.equal(existsSync(created.path), false);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("sandboxes: a failed venv leaves nothing to delete, a symlink is not replaced, and a tampered marker is not ours", async () => {
+  const { base, sam } = fixture();
+  try {
+    await assert.rejects(() => createSandbox(sam, "sam", "nope", { runner: async () => ({ exitCode: 1, output: "no venv" }) }), /not created/);
+    assert.equal(existsSync(join(sam, ".sam", "sandboxes", "nope")), false);
+    assert.throws(() => destroySandbox(sam, "sam", "nope"), /No SAM sandbox/);
+
+    const outside = join(base, "outside");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "keep.txt"), "stay\n");
+    mkdirSync(join(sam, ".sam", "sandboxes"), { recursive: true });
+    let linked = true;
+    try { symlinkSync(outside, join(sam, ".sam", "sandboxes", "linked")); } catch { linked = false; }
+    if (linked) {
+      await assert.rejects(() => createSandbox(sam, "sam", "linked", { runner: fakeVenvRunner() }), /symlink/);
+      assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "stay\n");
+    }
+
+    const first = await createSandbox(sam, "sam", "demo", { runner: fakeVenvRunner() });
+    const second = await createSandbox(sam, "sam", "other", { runner: fakeVenvRunner() });
+    writeSandboxFile(sam, "sam", "other", "keep.txt", "stay\n");
+    let ran = 0;
+    await assert.rejects(() => runPython(sam, "sam", "../sandbox.json", {
+      sandbox: "demo",
+      runner: async () => { ran += 1; return { exitCode: 0, output: "" }; },
+    }), /Invalid|Protected/);
+    assert.equal(ran, 0);
+    const markerPath = join(first.path, "sandbox.json");
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as { name: string };
+    marker.name = "other";
+    writeFileSync(markerPath, JSON.stringify(marker));
+    assert.throws(() => destroySandbox(sam, "sam", "demo"), /not a sandbox SAM created/);
+    assert.equal(existsSync(first.path), true);
+    assert.deepEqual(listSandboxes(sam).map(s => s.name), ["other"]);
+    destroySandbox(sam, "sam", "other");
+    assert.equal(existsSync(second.path), false);
+    assert.equal(existsSync(first.path), true);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("pip failure is ledgered with the package and the version", async () => {
+  const { base, sam } = fixture();
+  try {
+    await createSandbox(sam, "sam", "demo", { runner: fakeVenvRunner() });
+    const pip = await installSandboxPackage(sam, "sam", "demo", "requests", "2.32.3", {
+      runner: async () => ({ exitCode: 2, output: "no index" }),
+    });
+    assert.equal(pip.ok, false);
+    assert.equal(pip.exitCode, 2);
+    const line = readActivity(sam, 10).filter(l => l.kind === "sandbox-pip").at(-1);
+    assert.ok(line);
+    assert.match(line.summary, /requests==2\.32\.3/);
+    assert.match(line.summary, /exit 2/);
+    assert.match(line.summary, /demo/);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("python runner: a real interpreter enforces the timeout and the output cap", { skip: py.ok ? false : py.reason + "; skipped rather than failed", timeout: 20_000 }, async () => {
+  const { base, sam, proj } = fixture();
+  try {
+    writeFileSync(join(proj, "flood.py"), "print('Z' * 20000)\n");
+    const flooded = await runPython(sam, "sam", "flood.py", { env: { PATH: process.env.PATH } });
+    assert.equal(flooded.ok, true, flooded.output.slice(0, 80));
+    assert.equal(flooded.output.length, 8_000);
+    assert.equal(flooded.truncated, true);
+    assert.equal(flooded.output.includes("Z".repeat(100)), true);
+    const floodLine = readActivity(sam, 5).filter(l => l.kind === "python-run").at(-1);
+    assert.ok(floodLine);
+    assert.match(floodLine.summary, new RegExp("sha256:" + flooded.sha256));
+    assert.equal(floodLine.summary.includes("Z".repeat(40)), false);
+
+    writeFileSync(join(proj, "sleep.py"), "import time\ntime.sleep(30)\nprint('done')\n");
+    const started = Date.now();
+    const slept = await runPython(sam, "sam", "sleep.py", { timeoutMs: 1000, env: { PATH: process.env.PATH } });
+    const elapsed = Date.now() - started;
+    assert.equal(slept.timedOut, true);
+    assert.equal(slept.ok, false);
+    assert.ok(elapsed < 15_000, "sleep was not stopped (" + elapsed + "ms)");
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("code CLI: clone refusal and sandbox list go through the same hands, with no model and no network", () => {
+  const { base, sam } = fixture();
+  try {
+    const cli = fileURLToPath(new URL("./cli.js", import.meta.url));
+    const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+    const run = (...args: string[]) => spawnSync(process.execPath, [cli, "--workspace", sam, "--json", ...args], { encoding: "utf8", env });
+    const commands = run("code", "commands");
+    assert.equal(commands.status, 0, commands.stderr);
+    assert.match(commands.stdout, /git-clone/);
+    const spec = run("code", "spec", "git-clone");
+    assert.notEqual(spec.status, 0);
+    assert.match(spec.stderr, /needs a url and a destination/);
+    const escaped = run("code", "clone", "https://example.com/repo.git", "../out");
+    assert.notEqual(escaped.status, 0);
+    assert.match(escaped.stderr, /Invalid relative code path/);
+    const line = readActivity(sam, 5).filter(l => l.kind === "git-clone").at(-1);
+    assert.ok(line);
+    assert.match(line.summary, /https:\/\/example\.com\/repo\.git/);
+    assert.match(line.summary, /\.\.\/out/);
+    const listed = run("code", "sandbox-list");
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.deepEqual(JSON.parse(listed.stdout), { sandboxes: [] });
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
