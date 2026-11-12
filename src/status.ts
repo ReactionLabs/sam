@@ -26,6 +26,8 @@ import type { DoorGuardStats } from "./door-guard.js";
 import { connectors } from "./connectors.js";
 import { channels } from "./channels.js";
 import { installedSkills } from "./skill-registry.js";
+import { listSubagents } from "./subagents.js";
+import { teamStatus } from "./team-runtime.js";
 import { listActions } from "./actions.js";
 import { readActivity } from "./activity.js";
 import { listBackgroundTasks } from "./background.js";
@@ -129,6 +131,8 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     }),
     actions,
     pendingActions: actions.filter(a => a.status === "pending"),
+    subagents: listSubagents(root),
+    team: teamStatus(root),
     background: listBackgroundTasks(root).slice(-20),
     doors: listDoors(root),
     doorGuard: opts.doorGuard ?? EMPTY_DOOR_GUARD,
