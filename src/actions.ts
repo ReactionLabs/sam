@@ -354,7 +354,7 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     // the PR stays the owner's click.
     const { branch } = validateGitPushDetail(root, a.detail);
     const pushed = await pushBranch(root, branch);
-    return "Pushed branch " + pushed.branch + " to origin (" + pushed.sha.slice(0, 12) + ") - no pull request was opened; that stays the owner's act";
+    return "Pushed branch " + pushed.branch + " to origin (" + pushed.sha.slice(0, 12) + ")" + (pushed.vaultCredential ? " using vault credential " + pushed.vaultCredential : "") + " - no pull request was opened; that stays the owner's act";
   }
   if (a.kind === "spawn") {
     // Team spawn execution: the agent is created (profile + welcome

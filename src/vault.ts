@@ -25,9 +25,12 @@ import { recordActivity } from "./activity.js";
  * hostname matches a credential's declared hosts, the executor
  * (code.ts) adds GIT_ASKPASS - a static script in the vault
  * directory that contains no secret - plus the value in one env
- * var on the child process alone. The value never enters argv,
- * a tool result, or the ledger. Credentials with no declared
- * hosts never auto-inject; they wait for a named consumer.
+ * var on the child process alone. The second consumer is the
+ * gated git-push executor (git-work.ts): the same host-matched
+ * injection into the push child alone, after an owner approval.
+ * The value never enters argv, a tool result, or the ledger.
+ * Credentials with no declared hosts never auto-inject; they
+ * wait for a named consumer.
  *
  * AUDIT: every deposit, removal, and use writes one activity
  * line (vault-set / vault-remove / vault-use) carrying the

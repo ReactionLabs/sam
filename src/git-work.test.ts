@@ -8,7 +8,8 @@ import { ChatStore } from "./chats.js";
 import { setCodeRoot, writeCodeFile } from "./code.js";
 import { recordVerification } from "./verification.js";
 import { drainCodingTasks, listCodingTasks, queueCodingTask } from "./coding.js";
-import { commitTaskPaths, isTaskBranch, listTaskBranches, prepareTaskBranch, pushBranch, taskBranchName, validateGitPushDetail , canonicalPath } from "./git-work.js";
+import { commitTaskPaths, isTaskBranch, listTaskBranches, prepareTaskBranch, pushBranch, pushCredentialEnv, taskBranchName, validateGitPushDetail , canonicalPath } from "./git-work.js";
+import { setVaultCredential, VAULT_CREDENTIAL_ENV } from "./vault.js";
 import { decideAction, listActions, proposeAction } from "./actions.js";
 import { classifyProposal, saveApprovalPolicy } from "./approval-policy.js";
 import { readActivity } from "./activity.js";
@@ -234,5 +235,87 @@ test("git-push gate: only an existing sam/* branch with an origin can be propose
     assert.ok(readActivity(sam).some(a => a.kind === "git-push"));
     assert.ok(existsSync(join(proj, "src", "hello.ts")));
     assert.equal(listActions(sam).filter(a => a.kind === "git-push").length, 1);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+const PUSH_SECRET = "ghp_push_value_never_printed_0987654321";
+
+test("git-push vault injection: an HTTPS origin matching a vault credential pushes with it in the child env only - never in argv, results, or the ledger", async () => {
+  const { base, sam, proj } = fixture(true);
+  try {
+    git(proj, "remote", "add", "origin", "https://github.com/ReactionLabs/sam.git");
+    const state = prepareTaskBranch(sam, { id: "ffffffff-6", title: "Push work" });
+    assert.equal(state.mode, "branch");
+    const branch = state.branch as string;
+
+    // No credential yet: the env is prompt-off only.
+    const plain = pushCredentialEnv(sam, "https://github.com/ReactionLabs/sam.git");
+    assert.equal(plain.credentialName, null);
+    assert.equal(plain.env.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(plain.env.GIT_ASKPASS, undefined);
+    assert.equal(plain.env[VAULT_CREDENTIAL_ENV], undefined);
+
+    setVaultCredential(sam, "operator", "github", PUSH_SECRET, { purpose: "gated pushes", hosts: ["github.com"] });
+    const injected = pushCredentialEnv(sam, "https://github.com/ReactionLabs/sam.git");
+    assert.equal(injected.credentialName, "github");
+    assert.equal(injected.env[VAULT_CREDENTIAL_ENV], PUSH_SECRET);
+    assert.ok(injected.env.GIT_ASKPASS);
+
+    // The stub runner stands in for git: it captures exactly what
+    // the child would receive, so no network push happens.
+    let seenEnv: NodeJS.ProcessEnv | undefined; let seenArgs: string[] = [];
+    const stub = async (_file: string, args: string[], _cwd: string, _timeout: number, env: NodeJS.ProcessEnv) => {
+      seenEnv = env; seenArgs = args; return { exitCode: 0, output: "pushed" };
+    };
+    const pushed = await pushBranch(sam, branch, stub);
+    assert.equal(pushed.vaultCredential, "github");
+    assert.equal(seenEnv?.[VAULT_CREDENTIAL_ENV], PUSH_SECRET);
+    assert.equal(seenEnv?.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(seenArgs.join(" ").includes(PUSH_SECRET), false);
+    assert.equal(JSON.stringify(pushed).includes(PUSH_SECRET), false);
+
+    const ledgerFile = join(sam, ".sam", "activity.jsonl");
+    const ledger = readFileSync(ledgerFile, "utf8");
+    assert.equal(ledger.includes(PUSH_SECRET), false);
+    const uses = readActivity(sam, 40).filter(a => a.kind === "vault-use");
+    assert.equal(uses.length, 1);
+    assert.match(uses[0].summary, /github/);
+    assert.match(uses[0].summary, /git-push/);
+    assert.match(uses[0].summary, /github\.com/);
+    assert.match(uses[0].summary, /ok/);
+    const pushes = readActivity(sam, 40).filter(a => a.kind === "git-push");
+    assert.equal(pushes.length, 1);
+    assert.match(pushes[0].summary, /with vault credential github/);
+
+    // A failed push still ledgers the use, with its exit, and
+    // writes no git-push success line.
+    const failing = async () => ({ exitCode: 128, output: "fatal: auth failed" });
+    await assert.rejects(() => pushBranch(sam, branch, failing), /git push failed \(exit 128\)/);
+    const uses2 = readActivity(sam, 40).filter(a => a.kind === "vault-use");
+    assert.equal(uses2.length, 2);
+    assert.match(uses2[1].summary, /exit 128/);
+    assert.equal(readActivity(sam, 40).filter(a => a.kind === "git-push").length, 1);
+    assert.equal(readFileSync(ledgerFile, "utf8").includes(PUSH_SECRET), false);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("git-push vault injection: an SSH origin takes no vault credential, even for a deposited host", async () => {
+  const { base, sam, proj } = fixture(true);
+  try {
+    git(proj, "remote", "add", "origin", "git@github.com:ReactionLabs/sam.git");
+    const state = prepareTaskBranch(sam, { id: "99999999-7", title: "SSH push work" });
+    assert.equal(state.mode, "branch");
+    setVaultCredential(sam, "operator", "github", PUSH_SECRET, { hosts: ["github.com"] });
+    assert.equal(pushCredentialEnv(sam, "git@github.com:ReactionLabs/sam.git").credentialName, null);
+    let seenEnv: NodeJS.ProcessEnv | undefined;
+    const stub = async (_file: string, _args: string[], _cwd: string, _timeout: number, env: NodeJS.ProcessEnv) => {
+      seenEnv = env; return { exitCode: 0, output: "pushed" };
+    };
+    const pushed = await pushBranch(sam, state.branch as string, stub);
+    assert.equal(pushed.vaultCredential, undefined);
+    assert.equal(seenEnv?.[VAULT_CREDENTIAL_ENV], undefined);
+    assert.equal(seenEnv?.GIT_ASKPASS, undefined);
+    assert.equal(seenEnv?.GIT_TERMINAL_PROMPT, "0");
+    assert.equal(readActivity(sam, 40).filter(a => a.kind === "vault-use").length, 0);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });

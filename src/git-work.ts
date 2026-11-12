@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { recordActivity } from "./activity.js";
 import { codeRoot } from "./code.js";
+import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
 
 /**
  * Git discipline (Phase D item 5, Dip's coder program C4, ordered
@@ -240,27 +241,64 @@ export function headFileContent(root: string, rel: string): string | null {
   return probe.ok ? probe.out : null;
 }
 
-export type GitPushRunner = (file: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ exitCode: number | null; output: string }>;
+export type GitPushRunner = (file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv) => Promise<{ exitCode: number | null; output: string }>;
+
+/** The push child's environment, with the SAM VAULT injection
+ *  (Dip ruling 2026-11-12, second consumer after git-clone):
+ *  when a vault credential's declared hosts cover the origin
+ *  URL's hostname, the child - and only the child - gains
+ *  GIT_ASKPASS (a static script holding no secret) and the
+ *  credential's value in one env var. GIT_TERMINAL_PROMPT=0
+ *  rides every push, so a credential-less HTTPS push fails
+ *  fast instead of hanging on a prompt nobody can answer.
+ *  The value never enters argv, any result, or any ledger
+ *  line; credentialName is the NAME, all any surface may say. */
+export function pushCredentialEnv(root: string, originUrl: string): { env: NodeJS.ProcessEnv; credentialName: string | null } {
+  const env: NodeJS.ProcessEnv = { GIT_TERMINAL_PROMPT: "0" };
+  let credentialName: string | null = null;
+  try {
+    const cred = vaultCredentialForUrl(root, originUrl);
+    if (cred) {
+      env.GIT_ASKPASS = vaultAskpassPath(root);
+      env[VAULT_CREDENTIAL_ENV] = cred.value;
+      credentialName = cred.name;
+    }
+  } catch { /* a vault read failure never breaks an SSH/local push */ }
+  return { env, credentialName };
+}
 
 /** The gated landing act itself: push ONE sam/* branch to origin.
  *  Fixed argv, no force, no extra refs, no PR. Called only by the
  *  git-push executor after an owner decision; validation runs
  *  again here so a record written around proposal-time checks
- *  still cannot push anything but a task branch. */
-export async function pushBranch(root: string, branch: string, runner?: GitPushRunner): Promise<{ branch: string; sha: string }> {
+ *  still cannot push anything but a task branch. An HTTPS origin
+ *  whose host has a deposited vault credential pushes with that
+ *  credential injected into the child alone (see pushCredentialEnv);
+ *  an SSH or local origin takes no vault credential. */
+export async function pushBranch(root: string, branch: string, runner?: GitPushRunner): Promise<{ branch: string; sha: string; vaultCredential?: string }> {
   if (!isTaskBranch(branch)) throw new Error("Refused: only a sam/<task> branch can be pushed (got " + JSON.stringify(branch) + ")");
   const repo = gitRepoRoot(root);
   if (!repo) throw new Error("No git repository at the designated code root - nothing to push");
   if (!branchExists(repo, branch)) throw new Error("Branch " + branch + " does not exist in the code root's repository");
-  if (!gitSync(repo, ["remote", "get-url", "origin"]).ok) throw new Error("The code root's repository has no origin remote");
+  const origin = gitSync(repo, ["remote", "get-url", "origin"]);
+  if (!origin.ok) throw new Error("The code root's repository has no origin remote");
+  const originUrl = origin.out.trim();
   const sha = gitSync(repo, ["rev-parse", "refs/heads/" + branch]).out.trim();
-  const run: GitPushRunner = runner ?? ((file, args, cwd, timeoutMs) => new Promise(done => {
-    execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 256_000, windowsHide: true }, (error, stdout, stderr) => {
+  const injected = pushCredentialEnv(root, originUrl);
+  const run: GitPushRunner = runner ?? ((file, args, cwd, timeoutMs, env) => new Promise(done => {
+    execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 256_000, windowsHide: true, env: { ...process.env, ...env } }, (error, stdout, stderr) => {
       done({ exitCode: error ? (typeof (error as unknown as { code?: unknown }).code === "number" ? (error as unknown as { code: number }).code : null) : 0, output: (stdout ?? "") + (stderr ?? "") });
     });
   }));
-  const result = await run("git", ["-C", repo, "push", "-u", "origin", branch], repo, 120_000);
+  const result = await run("git", ["-C", repo, "push", "-u", "origin", branch], repo, 120_000, injected.env);
+  const status = result.exitCode === 0 ? "ok" : "exit " + String(result.exitCode);
+  if (injected.credentialName) {
+    let host = "";
+    try { host = new URL(originUrl).hostname; } catch { /* the origin was read from git config */ }
+    recordActivity(root, "owner", "vault-use",
+      "Vault credential " + injected.credentialName + " injected for git-push of " + branch + " to " + (host || "origin") + ": " + status);
+  }
   if (result.exitCode !== 0) throw new Error("git push failed (exit " + String(result.exitCode) + "): " + result.output.trim().slice(0, 240));
-  recordActivity(root, "owner", "git-push", "Pushed " + branch + " to origin (" + sha.slice(0, 12) + ")");
-  return { branch, sha };
+  recordActivity(root, "owner", "git-push", "Pushed " + branch + " to origin (" + sha.slice(0, 12) + ")" + (injected.credentialName ? " with vault credential " + injected.credentialName : ""));
+  return { branch, sha, ...(injected.credentialName ? { vaultCredential: injected.credentialName } : {}) };
 }
