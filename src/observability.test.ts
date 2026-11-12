@@ -70,13 +70,15 @@ test("GET /api/status requires the dashboard token and returns the observability
     assert.equal(denied.status, 401);
     const res = await fetch("http://127.0.0.1:18771/api/status", { headers: { Authorization: "Bearer " + url } });
     assert.equal(res.status, 200);
-    const body = await res.json() as { observability: { providerHealth: unknown[]; agents: Array<{ name: string }>; spend: { totalTokens: number }; failures: unknown[] }; providerHealth: unknown[]; failures: unknown[] };
+    const body = await res.json() as { observability: { providerHealth: unknown[]; agents: Array<{ name: string }>; spend: { totalTokens: number }; failures: unknown[] }; providerHealth: unknown[]; failures: unknown[]; usageToday?: { totalTokens: number; calls: number } };
     assert.ok(Array.isArray(body.observability.providerHealth));
     assert.ok(body.observability.agents.some(a => a.name === "sam"));
     assert.equal(typeof body.observability.spend.totalTokens, "number");
     assert.ok(Array.isArray(body.observability.failures));
     assert.ok(Array.isArray(body.providerHealth));
     assert.ok(Array.isArray(body.failures));
+    assert.equal(typeof body.usageToday?.totalTokens, "number");
+    assert.equal(typeof body.usageToday?.calls, "number");
     const legacy = await fetch("http://127.0.0.1:18771/api/status/" + url);
     assert.equal(legacy.status, 200);
   } finally {
