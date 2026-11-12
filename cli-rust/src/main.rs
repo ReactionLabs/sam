@@ -1,18 +1,3 @@
-mod api;
-mod app;
-mod config;
-mod headless;
-mod image_proto;
-mod runtime;
-mod status_view;
-mod ui;
-mod wordmark;
-
-use crate::api::{resolve_endpoint, Client};
-use crate::app::{App, Effect, Key};
-use crate::config::load_connection;
-use crate::image_proto::detect_image_protocol;
-use crate::runtime::Runtime;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -20,6 +5,13 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use sam_cli::api::{resolve_endpoint, Client};
+use sam_cli::app::{App, Effect, Key};
+use sam_cli::config::load_connection;
+use sam_cli::headless;
+use sam_cli::image_proto::detect_image_protocol;
+use sam_cli::runtime::Runtime;
+use sam_cli::ui;
 use std::env;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
