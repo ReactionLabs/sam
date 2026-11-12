@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,14 @@ import { exchangeCodexCode, refreshCodexAccess, startCodexDevice, startCodexLogi
 import { authStatus } from "./auth-status.js";
 
 function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-codex-")); }
+
+// POSIX mode 0600 is not a Windows fact: the same write lands, but
+// stat mode bits are not owner-only there. The assertion is gated
+// on the platform argument so a Linux run can prove the win32 skip.
+function assertOwnerMode(file: string, platform: NodeJS.Platform = process.platform): void {
+  if (platform === "win32") return;
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+}
 
 test("codex login prints a ChatGPT authorize URL and stores only the pending verifier", () => {
   const root = scratch();
@@ -21,7 +29,7 @@ test("codex login prints a ChatGPT authorize URL and stores only the pending ver
     assert.equal(url.searchParams.get("state"), started.state);
     assert.ok(url.searchParams.get("code_challenge"));
     const pendingFile = join(root, ".sam", "codex-pending.json");
-    assert.equal(statSync(pendingFile).mode & 0o777, 0o600);
+    assertOwnerMode(pendingFile);
     const state = codexAuthState(root);
     assert.equal(state.pending, true);
     assert.equal(state.loggedIn, false);
@@ -49,7 +57,7 @@ test("codex exchange stores tokens at 0600 and refresh is single-flight", async 
     assert.equal(state.loggedIn, true);
     assert.equal(state.pending, false);
     const tokenFile = join(root, ".sam", "codex-tokens.json");
-    assert.equal(statSync(tokenFile).mode & 0o777, 0o600);
+    assertOwnerMode(tokenFile);
     const status = codexAuthState(root);
     assert.ok(!JSON.stringify(status).includes("access-secret"));
     assert.ok(!JSON.stringify(status).includes("refresh-secret"));
@@ -95,5 +103,16 @@ test("CLI: sam codex login prints the auth URL and does not create a token file"
     const parsed = JSON.parse(status.stdout);
     assert.equal(parsed.loggedIn, false);
     assert.ok(!status.stdout.includes("verifier"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("codex 0600 mode assertion is skipped on win32", () => {
+  const root = scratch();
+  try {
+    const file = join(root, "wide.json");
+    writeFileSync(file, "{}");
+    if (process.platform !== "win32") chmodSync(file, 0o644);
+    assert.doesNotThrow(() => assertOwnerMode(file, "win32"));
+    if (process.platform !== "win32") assert.throws(() => assertOwnerMode(file, "linux"));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

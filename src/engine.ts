@@ -4,6 +4,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
@@ -196,14 +197,22 @@ export function updateEngineTask(root: string, id: string, patch: Partial<Engine
  *  SAM_ENGINE_BIN when it names an executable file, else "claude"
  *  found on PATH. Null means not installed - the state the box is
  *  in today - and every surface names it cleanly instead of
- *  failing obscurely (the agent-reach C2 pattern). */
-export function engineBinary(env: NodeJS.ProcessEnv = process.env): string | null {
-  const named = env.SAM_ENGINE_BIN;
+ *  failing obscurely (the agent-reach C2 pattern).
+ *
+ *  PATH is split on path.delimiter (";" on win32). On win32 the
+ *  names tried are claude.exe, claude.cmd, then claude, and a
+ *  SAM_ENGINE_BIN without an extension may name the .exe or .cmd
+ *  beside it. The two lstatSync lines are the reserved probe:
+ *  they stay byte-identical, and a symlink is still not a file. */
+export function engineBinary(env: NodeJS.ProcessEnv = process.env, probe?: BinaryProbe): string | null {
+  const platform = probePlatform(probe);
+  const delimiter = probeDelimiter(probe);
+  const rawNamed = env.SAM_ENGINE_BIN;
+  const named = rawNamed ? namedExecutable(rawNamed, platform) : rawNamed;
   if (named) {
     try { return lstatSync(named).isFile() ? named : null; } catch { return null; }
   }
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) {
-    const candidate = join(dir, "claude");
+  for (const candidate of commandCandidates(env.PATH, delimiter, "claude", platform)) {
     try { if (lstatSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
   }
   return null;

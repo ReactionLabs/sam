@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstatSync } from "node:fs";
-import { join } from "node:path";
+import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { recordActivity } from "./activity.js";
 
 /**
@@ -52,14 +52,18 @@ export const SENSES_NOT_INSTALLED =
 
 /** The senses reader this install would run: the operator's
  *  SAM_GOG_BIN when it names an executable file, else "gog" found
- *  on PATH. Null means not installed (the engineBinary pattern). */
-export function sensesBinary(env: NodeJS.ProcessEnv = process.env): string | null {
-  const named = env.SAM_GOG_BIN;
+ *  on PATH. Null means not installed (the engineBinary pattern).
+ *  PATH uses path.delimiter, and win32 resolves gog.exe / gog.cmd.
+ *  Tests inject platform and delimiter; they do not depend on the host. */
+export function sensesBinary(env: NodeJS.ProcessEnv = process.env, probe?: BinaryProbe): string | null {
+  const platform = probePlatform(probe);
+  const delimiter = probeDelimiter(probe);
+  const rawNamed = env.SAM_GOG_BIN;
+  const named = rawNamed ? namedExecutable(rawNamed, platform) : rawNamed;
   if (named) {
     try { return lstatSync(named).isFile() ? named : null; } catch { return null; }
   }
-  for (const dir of (env.PATH ?? "").split(":").filter(Boolean)) {
-    const candidate = join(dir, "gog");
+  for (const candidate of commandCandidates(env.PATH, delimiter, "gog", platform)) {
     try { if (lstatSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
   }
   return null;
