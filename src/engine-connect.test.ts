@@ -162,7 +162,7 @@ test("wizard: the engine section offers the connect and records the marker on a 
   try {
     const bin = fakeBinary(root);
     const prints: string[] = [];
-    const answers = ["y"];
+    const answers = ["", "y"];
     const io = { print: (l: string) => prints.push(l), ask: async () => answers.shift() ?? "" };
     await runConfigWizard(root, io, { section: "engine", env: envWith(bin), engineAuthRunner: runnerReturning(SIGNED_IN_JSON) });
     assert.ok(prints.some(l => l.includes("Connected: Claude Code is the coding-engine route")));
@@ -172,7 +172,8 @@ test("wizard: the engine section offers the connect and records the marker on a 
     const root2 = scratch();
     try {
       const prints2: string[] = [];
-      const io2 = { print: (l: string) => prints2.push(l), ask: async () => "y" };
+      const answers2 = ["", "y"];
+      const io2 = { print: (l: string) => prints2.push(l), ask: async () => answers2.shift() ?? "" };
       await runConfigWizard(root2, io2, { section: "engine", env: envWith(bin), engineAuthRunner: runnerReturning(JSON.stringify({ loggedIn: false }), 1) });
       assert.ok(prints2.some(l => l.includes("Not connected:")));
       assert.equal(readEngineConnection(root2), null);

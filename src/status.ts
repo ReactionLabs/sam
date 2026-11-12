@@ -158,7 +158,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     approvals: loadApprovalPolicy(root),
     code: codeSummary(root),
     coding: codingSummary(root),
-    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, connected: c.connected, stale: c.stale, record: c.connection } }; })(),
+    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, provider: c.provider, connected: c.connected, stale: c.stale, record: c.connection, providers: c.providers } }; })(),
     senses: sensesStatus(),
     brief: briefStatus(root),
     selfAudit: readSelfAudit(root),
