@@ -19,6 +19,7 @@ import { pushBranch, validateGitPushDetail } from "./git-work.js";
 import { queueEngineTask, validateEngineDetail } from "./engine.js";
 import { spawnMini, validateSpawnDetail } from "./minis.js";
 import { createLink } from "./links.js";
+import { runApprovedDelegation, validateDelegateDetail } from "./coding-operatives.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -39,9 +40,12 @@ import { createLink } from "./links.js";
 // engine's work itself, and the run executes nothing until the owner
 // approves - approval queues it, the drain runs it.
 // No external sends, no service control, no money, no trading - widening this
-// list is an owner decision, never a model decision. Every step lands in the
+// list is an owner decision, never a model decision. The owner approved one
+// more kind, "delegate": hand a repo job to Codex CLI or Claude Code. It
+// always cards the owner with adapter, repo, branch, and prompt, and the
+// process does not start until that card is approved. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine" | "spawn";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine" | "spawn" | "delegate";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -59,7 +63,7 @@ export interface ActionProposal {
   risk: ProposalRisk | null;
   decidedBy: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn", "delegate"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 function actionsDbFile(root: string): string { return join(resolve(root), ".sam", "actions.db"); }
@@ -243,6 +247,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // proposal time - fresh name, real person and instructions, a real
   // connector pin - so the card the owner sees can always execute.
   if (input.kind === "spawn") validateSpawnDetail(root, detail);
+  if (input.kind === "delegate") validateDelegateDetail(detail);
   if (input.kind === "engine") {
     const parsed = validateEngineDetail(root, detail);
     if (!input.chatId && !parsed.chatId) throw new Error("An engine proposal needs a chat to report back into - propose it from inside a chat, or name chatId in the detail");
@@ -367,6 +372,14 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
       linkNote = "; linked to " + a.actor + " ('" + group.name + "') so they can work together through the link";
     } catch (e) { linkNote = "; the agent exists but linking it to " + a.actor + " failed: " + (e instanceof Error ? e.message : "unknown error"); }
     return "Agent " + mini.name + " created for " + mini.person + " (profile + welcome chat 'Meet " + mini.person + "'" + (spec.starterHeartbeat ? " + a starter daily digest" : "") + ")" + linkNote;
+  }
+  if (a.kind === "delegate") {
+    // Owner-approved coding operative. The card already named the
+    // adapter, repo, branch, and prompt. Approval is what starts the
+    // local process; this path never pushes or opens a pull request.
+    const job = await runApprovedDelegation(root, { id: a.id, actor: a.actor, chatId: a.chatId, detail: a.detail });
+    if (job.status !== "done") throw new Error(job.summary ?? "Delegation " + job.status);
+    return job.summary ?? "Delegation finished";
   }
   if (a.kind === "engine") {
     // C6 managed engine runtime: approval QUEUES the run - it does
