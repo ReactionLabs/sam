@@ -99,10 +99,7 @@ function add(bucket: UsageBucket, entry: UsageEntry): void {
   bucket.totalTokens += entry.totalTokens || 0;
 }
 
-export function usageSummary(
-  root: string,
-  filter: { actor?: string; route?: string; model?: string } = {},
-): UsageSummary {
+function summarize(entries: UsageEntry[]): UsageSummary {
   const summary: UsageSummary = {
     ...emptyBucket(),
     byModel: {},
@@ -111,10 +108,7 @@ export function usageSummary(
     byActor: {},
     lastAt: null,
   };
-  for (const entry of readUsage(root)) {
-    if (filter.actor && entry.actor !== filter.actor) continue;
-    if (filter.route && entry.route !== filter.route) continue;
-    if (filter.model && entry.model !== filter.model) continue;
+  for (const entry of entries) {
     add(summary, entry);
     for (const [map, key] of [
       [summary.byModel, entry.model],
@@ -128,4 +122,23 @@ export function usageSummary(
     if (!summary.lastAt || entry.at > summary.lastAt) summary.lastAt = entry.at;
   }
   return summary;
+}
+
+export function usageSummary(
+  root: string,
+  filter: { actor?: string; route?: string; model?: string } = {},
+): UsageSummary {
+  return summarize(readUsage(root).filter(entry => {
+    if (filter.actor && entry.actor !== filter.actor) return false;
+    if (filter.route && entry.route !== filter.route) return false;
+    if (filter.model && entry.model !== filter.model) return false;
+    return true;
+  }));
+}
+
+/** Today's ledger only. The all-time summary is a different number and
+ *  must not be labeled as today. The day is the UTC date of `now`. */
+export function usageToday(root: string, now: Date = new Date()): UsageSummary {
+  const day = now.toISOString().slice(0, 10);
+  return summarize(readUsage(root).filter(entry => typeof entry.at === "string" && entry.at.slice(0, 10) === day));
 }
