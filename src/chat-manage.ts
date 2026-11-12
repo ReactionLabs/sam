@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
 import { ChatStore, type ChatRecord } from "./chats.js";
+import { readDashboardConfig } from "./dashboard-config.js";
 
 /**
  * Chat management (Dip ask 2026-11-09 22:13: "I want him to be
@@ -24,14 +23,13 @@ import { ChatStore, type ChatRecord } from "./chats.js";
  */
 
 export function coreActor(root: string): string {
-  try {
-    const file = join(resolve(root), ".sam", "dashboard-config.json");
-    if (existsSync(file)) {
-      const data = JSON.parse(readFileSync(file, "utf8")) as { defaultAgent?: unknown };
-      if (typeof data.defaultAgent === "string" && data.defaultAgent) return data.defaultAgent;
-    }
-  } catch { /* a broken config reads as the default, like the dashboard's own reader */ }
-  return "sam";
+  // The dashboard config's one read door (dashboard-config.ts):
+  // this surface used to read the raw JSON file itself, with its
+  // own sanitization that already disagreed with the dashboard
+  // reader at the edges. A broken config reads as the default
+  // through the store, which is what this fallback always
+  // claimed to mirror.
+  try { return readDashboardConfig(root).defaultAgent || "sam"; } catch { return "sam"; }
 }
 
 function boundProfile(root: string, chat: ChatRecord): string {

@@ -39,20 +39,22 @@ import { authoredSkills, curatorFindings } from "./skill-author.js";
 import { deliverySummary } from "./delivery-outbox.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
 
-export type DashboardConfig={defaultAgent:string;showTeamEvents:boolean};
-const defaultDashboardConfig:DashboardConfig={defaultAgent:"sam",showTeamEvents:true};
-function configPath(root:string){return join(resolve(root),".sam","dashboard-config.json");}
-export function readDashboardConfig(root:string):DashboardConfig{
- const file=configPath(root);if(!existsSync(file))return {...defaultDashboardConfig};
- const data=JSON.parse(readFileSync(file,"utf8")) as Partial<DashboardConfig>;
- return {defaultAgent:typeof data.defaultAgent==="string"?data.defaultAgent:"sam",showTeamEvents:data.showTeamEvents!==false};
-}
-function saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{
+export { readDashboardConfig } from "./dashboard-config.js";
+export type { DashboardConfig } from "./dashboard-config.js";
+// The config store itself (UNIFICATION item 4, thirty-first
+// store) lives in dashboard-config.ts: readDashboardConfig is
+// the one read door every surface rides, and a save is a
+// single-row UPSERT through writeDashboardConfig. The
+// validation below is unchanged from the file era - key set,
+// types, the agent-name regex, and the unknown-agent refusal
+// all still stand before any store is touched.
+export function saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{
  if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean"||!(/^[a-z][a-z0-9._-]{0,63}$/.test(data.defaultAgent)))throw Error("Invalid dashboard configuration");
  const config={defaultAgent:data.defaultAgent,showTeamEvents:data.showTeamEvents};
  const db=new ChatStore(root);try{if(config.defaultAgent!=="sam"&&!db.agents().some(a=>a.name===config.defaultAgent))throw Error("Unknown agent");}finally{db.close();}
- mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(configPath(root),JSON.stringify(config,null,2),{mode:0o600});return config;
+ writeDashboardConfig(root,config);return config;
 }
 export type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
 const MAX_SCHEDULES=32;
