@@ -1,10 +1,17 @@
 // Screen state for the terminal client. The app never stores a copy of
 // SAM's memory or gate; it only holds the last API response it drew.
 
-use crate::api::{ChatDetail, Message, SendResult};
-use crate::image_proto::{display_text, encode_iterm2, encode_kitty, image_label, ImageProtocol};
+use crate::api::{ChatDetail, SendResult};
+use crate::attach;
+use crate::config::ProfileSet;
+use crate::image_proto::{encode_iterm2, encode_kitty, image_label, ImageProtocol};
+use crate::markdown::{SpanKind, StyledSpan};
+use crate::scroll::ScrollState;
 use crate::status_view::{Action, Snapshot};
+use crate::theme::{self, Theme, ThemeId};
+use crate::thinking::ToolLine;
 use serde::Serialize;
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
@@ -13,6 +20,58 @@ pub enum Screen {
     Approvals,
     Status,
     Config,
+    Skills,
+    Tools,
+    Connections,
+    Claude,
+    Bridge,
+}
+
+impl Screen {
+    pub fn title(self) -> &'static str {
+        match self {
+            Screen::Splash => "splash",
+            Screen::Chat => "chat",
+            Screen::Approvals => "approvals",
+            Screen::Status => "status",
+            Screen::Config => "config",
+            Screen::Skills => "skills",
+            Screen::Tools => "tools",
+            Screen::Connections => "connections",
+            Screen::Claude => "claude code",
+            Screen::Bridge => "desktop bridge",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            Screen::Splash => 0,
+            Screen::Chat => 1,
+            Screen::Approvals => 2,
+            Screen::Status => 3,
+            Screen::Config => 4,
+            Screen::Skills => 5,
+            Screen::Tools => 6,
+            Screen::Connections => 7,
+            Screen::Claude => 8,
+            Screen::Bridge => 9,
+        }
+    }
+
+    fn from_key(key: char) -> Option<Self> {
+        Some(match key {
+            '1' => Screen::Chat,
+            '2' => Screen::Approvals,
+            '3' => Screen::Status,
+            '4' => Screen::Config,
+            '5' => Screen::Skills,
+            '6' => Screen::Tools,
+            '7' => Screen::Connections,
+            '8' => Screen::Claude,
+            '9' => Screen::Bridge,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -26,6 +85,21 @@ pub enum Key {
     Left,
     Right,
     CtrlC,
+    CtrlK,
+    CtrlF,
+    CtrlY,
+    PageUp,
+    PageDown,
+    ShiftJ,
+    ShiftK,
+    Home,
+    End,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum Pointer {
+    Click { x: u16, y: u16 },
+    Wheel { x: u16, y: u16, up: bool },
 }
 
 #[derive(Clone, Debug)]
@@ -36,6 +110,10 @@ pub enum Effect {
     Send { chat_id: String, content: String },
     Decide { id: String, approve: bool },
     CreateChat(String),
+    UseProfile {
+        base_url: String,
+        token: Option<String>,
+    },
 }
 
 pub enum Ev {
@@ -45,6 +123,10 @@ pub enum Ev {
     Sent(Result<SendResult, String>),
     Decided(Result<Action, String>),
     Created(Result<String, String>),
+    Switched {
+        epoch: u64,
+        result: Result<String, String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -63,6 +145,76 @@ pub struct Proof {
     pub origin: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct ViewLine {
+    pub spans: Vec<StyledSpan>,
+    pub message: Option<usize>,
+    pub code_block: Option<usize>,
+    pub hit: bool,
+}
+
+impl ViewLine {
+    pub(crate) fn plain(&self) -> String {
+        self.spans.iter().map(|span| span.text.as_str()).collect()
+    }
+
+    pub(crate) fn from_text(text: impl Into<String>, kind: SpanKind) -> Self {
+        Self {
+            spans: vec![StyledSpan::new(text, kind)],
+            message: None,
+            code_block: None,
+            hit: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PaletteUi {
+    pub query: String,
+    pub cursor: usize,
+    pub index: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SearchUi {
+    pub query: String,
+    pub cursor: usize,
+    pub current: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachUi {
+    pub path: String,
+    pub cursor: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Zone {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl Zone {
+    pub fn contains(self, x: u16, y: u16) -> bool {
+        self.w > 0
+            && self.h > 0
+            && x >= self.x
+            && y >= self.y
+            && x < self.x.saturating_add(self.w)
+            && y < self.y.saturating_add(self.h)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FooterHit {
+    pub x0: u16,
+    pub x1: u16,
+    pub y: u16,
+    pub screen: Screen,
+}
+
 pub struct App {
     pub origin: String,
     pub screen: Screen,
@@ -72,8 +224,7 @@ pub struct App {
     pub chat_id: Option<String>,
     pub list_index: usize,
     pub approval_index: usize,
-    pub status_scroll: usize,
-    pub config_scroll: usize,
+    pub page_scroll: [usize; 10],
     pub composer: String,
     pub cursor: usize,
     pub insert: bool,
@@ -86,6 +237,38 @@ pub struct App {
     pub optimistic: Option<String>,
     pub image_sequence: Option<String>,
     pub image_anchor: Option<(u16, u16)>,
+    pub theme_id: ThemeId,
+    pub theme: Theme,
+    pub profiles: ProfileSet,
+    pub epoch: u64,
+    pub transcript_scroll: ScrollState,
+    pub history: bool,
+    pub cols: usize,
+    pub viewport: usize,
+    pub view_lines: Vec<ViewLine>,
+    pub selected_message: Option<usize>,
+    pub code_focus: usize,
+    pub clipboard: Option<String>,
+    pub palette: Option<PaletteUi>,
+    pub search: Option<SearchUi>,
+    pub profiles_open: bool,
+    pub profile_index: usize,
+    pub pending_profile: Option<String>,
+    pub attach: Option<AttachUi>,
+    pub attachment: Option<String>,
+    pub attachment_name: Option<String>,
+    pub now_ms: u64,
+    pub turn_started_ms: Option<u64>,
+    pub thought_ms: Option<u64>,
+    pub thinking_tools: Vec<ToolLine>,
+    pub thinking_reasoning: String,
+    pub turn_events: HashSet<String>,
+    pub pending_reveal: Option<usize>,
+    pub hit_list: Zone,
+    pub hit_thread: Zone,
+    pub hit_page: Zone,
+    pub hit_composer: Zone,
+    pub footer_hits: Vec<FooterHit>,
 }
 
 impl App {
@@ -114,8 +297,7 @@ impl App {
             chat_id: None,
             list_index: 0,
             approval_index: 0,
-            status_scroll: 0,
-            config_scroll: 0,
+            page_scroll: [0; 10],
             composer: String::new(),
             cursor: 0,
             insert: false,
@@ -127,43 +309,172 @@ impl App {
             optimistic: None,
             image_sequence: None,
             image_anchor: None,
+            theme_id: ThemeId::Muse,
+            theme: theme::default_theme(),
+            profiles: ProfileSet::bare("dip"),
+            epoch: 0,
+            transcript_scroll: ScrollState::pinned(),
+            history: false,
+            cols: 80,
+            viewport: 16,
+            view_lines: Vec::new(),
+            selected_message: None,
+            code_focus: 0,
+            clipboard: None,
+            palette: None,
+            search: None,
+            profiles_open: false,
+            profile_index: 0,
+            pending_profile: None,
+            attach: None,
+            attachment: None,
+            attachment_name: None,
+            now_ms: 0,
+            turn_started_ms: None,
+            thought_ms: None,
+            thinking_tools: Vec::new(),
+            thinking_reasoning: String::new(),
+            turn_events: HashSet::new(),
+            pending_reveal: None,
+            hit_list: Zone::default(),
+            hit_thread: Zone::default(),
+            hit_page: Zone::default(),
+            hit_composer: Zone::default(),
+            footer_hits: Vec::new(),
         }
     }
 
+    pub fn tick(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
+    }
+
     pub fn on_key(&mut self, key: Key) -> Vec<Effect> {
+        if matches!(key, Key::CtrlC) {
+            return vec![Effect::Quit];
+        }
+        if matches!(key, Key::CtrlK) {
+            self.toggle_palette();
+            return vec![];
+        }
         if self.help {
             return match key {
                 Key::Char('?') | Key::Esc => {
                     self.help = false;
                     vec![]
                 }
-                Key::Char('q') | Key::CtrlC => vec![Effect::Quit],
+                Key::Char('q') => vec![Effect::Quit],
                 _ => vec![],
             };
         }
+        if self.palette.is_some() {
+            return self.key_palette(key);
+        }
+        if matches!(key, Key::CtrlF) {
+            self.toggle_search();
+            return vec![];
+        }
+        if matches!(key, Key::CtrlY) {
+            return self.yank_selected(true);
+        }
+        if self.search.is_some() {
+            return self.key_search(key);
+        }
+        if self.profiles_open {
+            return self.key_profiles(key);
+        }
+        if self.attach.is_some() {
+            return self.key_attach(key);
+        }
         if !self.insert {
             match key {
-                Key::CtrlC | Key::Char('q') => return vec![Effect::Quit],
+                Key::Char('q') => return vec![Effect::Quit],
                 Key::Char('?') => {
                     self.help = true;
                     return vec![];
                 }
-                Key::Char(c @ '1'..='4') => return self.goto(c),
+                Key::Char(c @ '1'..='9') => return self.goto(c),
+                Key::Char('p') => {
+                    self.open_profiles();
+                    return vec![];
+                }
+                Key::Char('t') => {
+                    self.cycle_theme();
+                    return vec![];
+                }
                 _ => {}
             }
+        }
+        if matches!(
+            key,
+            Key::PageUp | Key::PageDown | Key::ShiftJ | Key::ShiftK | Key::Home | Key::End
+        ) {
+            return self.key_scroll(key);
+        }
+        if !self.insert && matches!(key, Key::Char('J')) {
+            return self.key_scroll(Key::ShiftJ);
+        }
+        if !self.insert && matches!(key, Key::Char('K')) {
+            return self.key_scroll(Key::ShiftK);
         }
         match self.screen {
             Screen::Splash => self.key_splash(key),
             Screen::Chat => self.key_chat(key),
             Screen::Approvals => self.key_approvals(key),
-            Screen::Status => {
-                self.nudge_scroll(key, true);
+            _ => {
+                self.nudge_page(&key);
                 vec![]
             }
-            Screen::Config => {
-                self.nudge_scroll(key, false);
-                vec![]
+        }
+    }
+
+    pub fn on_paste(&mut self, text: &str) -> Vec<Effect> {
+        if self.help || self.palette.is_some() || self.profiles_open {
+            return vec![];
+        }
+        let flat: String = text
+            .chars()
+            .map(|ch| match ch {
+                '\n' | '\r' | '\t' => ' ',
+                other => other,
+            })
+            .collect();
+        let flat = flat.trim();
+        if flat.is_empty() {
+            return vec![];
+        }
+        if let Some(search) = self.search.as_mut() {
+            crate::surface::push_text(&mut search.query, &mut search.cursor, flat, 200);
+            self.sync_search();
+            return vec![];
+        }
+        if let Some(attach) = self.attach.as_mut() {
+            crate::surface::push_text(&mut attach.path, &mut attach.cursor, flat, 512);
+            return vec![];
+        }
+        self.insert = true;
+        let before = self.composer.chars().count();
+        for ch in flat.chars() {
+            self.insert_char(ch);
+        }
+        if self.composer.chars().count() == 4000 && before + flat.chars().count() > 4000 {
+            self.notice = "Paste truncated to the composer limit.".into();
+        }
+        vec![]
+    }
+
+    pub fn on_pointer(&mut self, pointer: Pointer) -> Vec<Effect> {
+        if self.help || self.palette.is_some() || self.search.is_some() || self.profiles_open {
+            if let Pointer::Click { .. } = pointer {
+                self.help = false;
+                self.palette = None;
+                self.search = None;
+                self.profiles_open = false;
             }
+            return vec![];
+        }
+        match pointer {
+            Pointer::Wheel { x, y, up } => self.wheel(x, y, up),
+            Pointer::Click { x, y } => self.click(x, y),
         }
     }
 
@@ -174,6 +485,7 @@ impl App {
                 self.inflight = false;
                 match result {
                     Ok(detail) => {
+                        self.note_detail(&detail);
                         self.detail = Some(detail);
                         self.proof.chat_open = true;
                         self.latch();
@@ -186,6 +498,7 @@ impl App {
                 vec![]
             }
             Ev::Poll(detail) => {
+                self.note_detail(&detail);
                 self.detail = Some(detail);
                 self.proof.chat_open = true;
                 self.latch();
@@ -195,6 +508,13 @@ impl App {
                 self.busy = false;
                 self.inflight = false;
                 self.optimistic = None;
+                if let Some(start) = self.turn_started_ms.take() {
+                    if result.is_ok() {
+                        self.thought_ms = Some(self.now_ms.saturating_sub(start));
+                    }
+                }
+                self.thinking_tools.clear();
+                self.thinking_reasoning.clear();
                 match result {
                     Ok(send) => {
                         if !send.reply.is_empty() {
@@ -255,6 +575,37 @@ impl App {
                     }
                 }
             }
+            Ev::Switched { epoch, result } => {
+                if epoch >= self.epoch {
+                    self.epoch = epoch;
+                }
+                let pending = self.pending_profile.take();
+                match result {
+                    Ok(origin) => {
+                        if let Some(name) = pending {
+                            self.profiles.active = name;
+                        }
+                        self.origin = origin.clone();
+                        self.proof.origin = origin;
+                        self.detail = None;
+                        self.chat_id = None;
+                        self.list_index = 0;
+                        self.selected_message = None;
+                        self.busy = false;
+                        self.inflight = false;
+                        self.optimistic = None;
+                        self.transcript_scroll = ScrollState::pinned();
+                        self.history = false;
+                        self.screen = Screen::Chat;
+                        self.notice = format!("Now talking to {}.", self.profiles.active);
+                        vec![]
+                    }
+                    Err(err) => {
+                        self.notice = format!("Stayed on {}: {err}", self.profiles.active);
+                        vec![]
+                    }
+                }
+            }
         }
     }
 
@@ -275,46 +626,12 @@ impl App {
         self.proof.image_sequence_prefix = self.image_sequence.as_deref().map(sequence_prefix);
     }
 
+    #[allow(dead_code)]
     pub fn transcript(&self) -> Vec<String> {
-        let mut lines = Vec::new();
-        if let Some(detail) = &self.detail {
-            for message in &detail.messages {
-                lines.extend(message_lines(message));
-            }
-            for action in detail.actions.iter().filter(|a| a.status == "pending") {
-                lines.push(format!(
-                    "action  {} pending · {}",
-                    action.kind, action.title
-                ));
-            }
-            for event in &detail.events {
-                lines.push(format!("team  {event}"));
-            }
-        }
-        if let Some(text) = &self.optimistic {
-            let already = self
-                .detail
-                .as_ref()
-                .map(|d| {
-                    d.messages
-                        .iter()
-                        .any(|m| m.role == "user" && m.content == *text)
-                })
-                .unwrap_or(false);
-            if !already {
-                lines.push(format!("you  {text}"));
-            }
-        }
-        if self.busy {
-            lines.push("sam  SAM is working…".into());
-        }
-        if let Some(label) = &self.proof.image_label {
-            lines.push(label.clone());
-        }
-        if lines.is_empty() {
-            lines.push("No messages yet. Press i to write.".into());
-        }
-        lines
+        self.build_lines(80)
+            .into_iter()
+            .map(|line| line.plain())
+            .collect()
     }
 
     pub fn chat_rows(&self) -> Vec<String> {
@@ -459,23 +776,19 @@ impl App {
     }
 
     fn goto(&mut self, key: char) -> Vec<Effect> {
+        let Some(screen) = Screen::from_key(key) else {
+            return vec![];
+        };
+        self.open_screen(screen)
+    }
+
+    fn open_screen(&mut self, screen: Screen) -> Vec<Effect> {
         self.insert = false;
-        match key {
-            '1' => self.enter_chat(),
-            '2' => {
-                self.screen = Screen::Approvals;
-                vec![Effect::Refresh]
-            }
-            '3' => {
-                self.screen = Screen::Status;
-                vec![Effect::Refresh]
-            }
-            '4' => {
-                self.screen = Screen::Config;
-                vec![Effect::Refresh]
-            }
-            _ => vec![],
+        if screen == Screen::Chat {
+            return self.enter_chat();
         }
+        self.screen = screen;
+        vec![Effect::Refresh]
     }
 
     fn enter_chat(&mut self) -> Vec<Effect> {
@@ -534,6 +847,29 @@ impl App {
                 self.insert = true;
                 vec![]
             }
+            Key::Char('a') => {
+                self.attach = Some(AttachUi {
+                    path: String::new(),
+                    cursor: 0,
+                });
+                vec![]
+            }
+            Key::Char('y') => self.yank_selected(false),
+            Key::Char('c') => self.copy_block(),
+            Key::Char('x') if self.attachment.is_some() => {
+                self.attachment = None;
+                self.attachment_name = None;
+                self.notice = "Attachment removed.".into();
+                vec![]
+            }
+            Key::Char(']') => {
+                self.move_selection(1);
+                vec![]
+            }
+            Key::Char('[') => {
+                self.move_selection(-1);
+                vec![]
+            }
             Key::Char('n') if !self.inflight => {
                 self.inflight = true;
                 vec![Effect::CreateChat("Terminal".into())]
@@ -541,7 +877,9 @@ impl App {
             Key::Char('j') | Key::Down => self.move_list(1),
             Key::Char('k') | Key::Up => self.move_list(-1),
             Key::Enter => {
-                if let Some(id) = self.chat_id.clone() {
+                if self.attachment.is_some() || !self.composer.trim().is_empty() {
+                    self.send()
+                } else if let Some(id) = self.chat_id.clone() {
                     vec![Effect::LoadChat(id)]
                 } else {
                     vec![]
@@ -590,17 +928,35 @@ impl App {
             self.notice = "Select or create a chat first.".into();
             return vec![];
         };
-        let text = self.composer.trim().to_string();
-        if text.is_empty() {
+        let text = match &self.attachment {
+            Some(markdown) => match attach::join_attachment(&self.composer, markdown) {
+                Ok(text) => text,
+                Err(err) => {
+                    self.notice = err;
+                    return vec![];
+                }
+            },
+            None => self.composer.trim().to_string(),
+        };
+        if text.trim().is_empty() {
             return vec![];
         }
         self.composer.clear();
         self.cursor = 0;
         self.insert = false;
+        self.attachment = None;
+        self.attachment_name = None;
         self.busy = true;
         self.inflight = true;
         self.optimistic = Some(text.clone());
-        self.notice = "SAM is working…".into();
+        self.turn_started_ms = Some(self.now_ms);
+        self.thought_ms = None;
+        self.thinking_tools.clear();
+        self.thinking_reasoning.clear();
+        self.turn_events = self.event_keys();
+        self.transcript_scroll = ScrollState::pinned();
+        self.history = false;
+        self.notice.clear();
         vec![Effect::Send {
             chat_id: id,
             content: text,
@@ -629,21 +985,25 @@ impl App {
         vec![Effect::LoadChat(id)]
     }
 
-    fn nudge_scroll(&mut self, key: Key, status: bool) {
-        let delta: isize = match key {
-            Key::Char('j') | Key::Down => 1,
-            Key::Char('k') | Key::Up => -1,
-            _ => return,
-        };
-        let slot = if status {
-            &mut self.status_scroll
+    fn nudge_page(&mut self, key: &Key) {
+        match key {
+            Key::Char('j') | Key::Down => self.bump_page(1, false),
+            Key::Char('k') | Key::Up => self.bump_page(-1, false),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn bump_page(&mut self, delta: isize, page: bool) {
+        let step = if page {
+            self.viewport.max(1).saturating_sub(1).max(1)
         } else {
-            &mut self.config_scroll
+            1
         };
+        let slot = &mut self.page_scroll[self.screen.index()];
         if delta < 0 {
-            *slot = slot.saturating_sub(delta.unsigned_abs());
+            *slot = slot.saturating_sub(step);
         } else {
-            *slot = slot.saturating_add(delta as usize);
+            *slot = slot.saturating_add(step);
         }
     }
 
@@ -726,37 +1086,6 @@ impl App {
     }
 }
 
-fn message_lines(message: &Message) -> Vec<String> {
-    let who = if message.role == "user" { "you" } else { "sam" };
-    let when = message
-        .created_at
-        .get(11..19)
-        .filter(|t| t.chars().all(|c| c.is_ascii_digit() || c == ':'))
-        .map(|t| format!("{t}  "))
-        .unwrap_or_default();
-    let reaction = message
-        .reaction
-        .as_deref()
-        .filter(|r| !r.is_empty())
-        .map(|r| format!("  {r}"))
-        .unwrap_or_default();
-    let text = display_text(&message.content);
-    let mut lines = Vec::new();
-    let mut first = true;
-    for line in text.split('\n') {
-        if first {
-            lines.push(format!("{who}  {when}{line}{reaction}"));
-            first = false;
-        } else if !line.is_empty() {
-            lines.push(format!("    {line}"));
-        }
-    }
-    if lines.is_empty() {
-        lines.push(format!("{who}  {reaction}"));
-    }
-    lines
-}
-
 fn sequence_prefix(sequence: &str) -> String {
     sequence
         .chars()
@@ -769,29 +1098,37 @@ fn sequence_prefix(sequence: &str) -> String {
 pub const HELP: &str = "\
 sam-cli is a face for the running SAM. It keeps no agent state.
 
-q            quit
-?            toggle this help
-esc          close help, or leave the composer
-1 2 3 4      chat, approvals, status, config
-j k          next / previous
-i            write in the chat composer
-enter        send the composer
-n            new chat titled Terminal
-y            approve the selected card
-x            reject the selected card
+q              quit          ?            this help
+esc            close a panel, or leave the composer
+1-4            chat, approvals, status, config
+5-9            skills, tools, connections, claude code, bridge
+j k            next / previous in the list or page
+J K            scroll the transcript one line
+pgup pgdn      scroll a page     home end   top / latest
+i              write            enter        send
+n              new chat titled Terminal
+a              attach an image by path (data URL, 12000 character cap)
+[ ]            select a message    y   copy it (OSC 52)
+c              copy the selected message's code block
+ctrl-k         command palette     ctrl-f   search this chat
+p              switch profile (dip, trading, second-shift)
+t              toggle theme (Muse, Harbor)
+y x            on approvals: approve / reject
 
-Images use the kitty or iTerm2 graphics protocol when this
-terminal supports it (or when SAM_TUI_IMAGE says so). Otherwise
-the transcript shows a text placeholder.
+The transcript follows the latest line until you scroll up.
+\"viewing history\" means new messages will not yank the view down.
+Paste is bracketed: it lands in the composer and is not a command.
+A desktop bridge that is not paired says so. It is not Telegram.
 
 Connect with SAM_BASE_URL and SAM_TOKEN, or a mode-0600 config
-file. A base URL ending in /sam follows the stable-door redirect.
+file. Profiles live in that file under \"profiles\". A base URL
+ending in /sam follows the stable-door redirect.
 ";
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::ChatDetail;
+    use crate::api::{ChatDetail, Message};
     use crate::image_proto::InlineImage;
 
     fn app_with_thread(protocol: ImageProtocol) -> App {
@@ -805,6 +1142,8 @@ mod tests {
                     content: "ping".into(),
                     created_at: "".into(),
                     reaction: Some("👀".into()),
+                    partial: false,
+                    source: None,
                 },
                 Message {
                     id: "a".into(),
@@ -812,9 +1151,12 @@ mod tests {
                     content: format!("pong from mock\n![pixel](data:image/png;base64,{png})"),
                     created_at: "".into(),
                     reaction: None,
+                    partial: false,
+                    source: None,
                 },
             ],
             events: vec![],
+            team: vec![],
             actions: vec![],
             images: vec![InlineImage {
                 name: "pixel".into(),
@@ -878,12 +1220,204 @@ mod tests {
                 content: "ping".into(),
                 created_at: "".into(),
                 reaction: Some("❤️".into()),
+                partial: false,
+                source: None,
             }],
             events: vec![],
+            team: vec![],
             actions: vec![],
             images: vec![],
         };
         app.apply(Ev::Poll(detail));
         assert!(app.proof.saw_heart_reaction);
+    }
+
+    fn detail(messages: Vec<Message>) -> ChatDetail {
+        ChatDetail {
+            messages,
+            events: vec![],
+            team: vec![],
+            actions: vec![],
+            images: vec![],
+        }
+    }
+
+    fn message(role: &str, content: &str) -> Message {
+        Message {
+            id: role.into(),
+            role: role.into(),
+            content: content.into(),
+            created_at: "".into(),
+            reaction: None,
+            partial: false,
+            source: None,
+        }
+    }
+
+    #[test]
+    fn bracketed_paste_is_text_not_a_command() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        let effects = app.on_paste("q\n1");
+        assert!(effects.is_empty());
+        assert!(app.insert);
+        assert_eq!(app.composer, "q 1");
+        assert!(!matches!(app.on_key(Key::Char('q'))[..], [Effect::Quit]));
+    }
+
+    #[test]
+    fn scrolling_up_marks_history_until_the_tail_is_pinned_again() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        app.viewport = 6;
+        app.cols = 40;
+        let body = (0..30)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.detail = Some(detail(vec![message("assistant", &body)]));
+        app.on_key(Key::PageUp);
+        assert!(app.viewing_history(), "page up leaves the tail");
+        app.on_key(Key::End);
+        assert!(!app.viewing_history());
+        app.on_key(Key::ShiftK);
+        assert!(app.viewing_history());
+    }
+
+    #[test]
+    fn yank_uses_osc52_and_code_copy_uses_the_block_source() {
+        use crate::clipboard::decode_osc52_payload;
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        app.detail = Some(detail(vec![
+            message("user", "ping"),
+            message("assistant", "```rust\nfn main() {}\n```"),
+        ]));
+        app.on_key(Key::Char(']'));
+        app.on_key(Key::Char(']'));
+        app.on_key(Key::Char('y'));
+        let yanked = app.clipboard.clone().expect("yank");
+        let text = String::from_utf8(decode_osc52_payload(&yanked).unwrap()).unwrap();
+        assert!(text.contains("fn main"), "{text}");
+        app.clipboard = None;
+        app.on_key(Key::Char('c'));
+        let copied = app.clipboard.clone().expect("code");
+        assert_eq!(
+            String::from_utf8(decode_osc52_payload(&copied).unwrap())
+                .unwrap()
+                .trim(),
+            "fn main() {}"
+        );
+    }
+
+    #[test]
+    fn palette_fuzzy_opens_approvals_and_theme_toggles() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        assert_eq!(app.theme_id, ThemeId::Muse);
+        app.on_key(Key::CtrlK);
+        assert!(app.palette.is_some());
+        for ch in "appr".chars() {
+            app.on_key(Key::Char(ch));
+        }
+        assert_eq!(app.palette_matches()[0].label, "Approvals");
+        app.on_key(Key::Enter);
+        assert_eq!(app.screen, Screen::Approvals);
+        app.on_key(Key::Char('t'));
+        assert_eq!(app.theme_id, ThemeId::Harbor);
+        app.on_key(Key::Char('t'));
+        assert_eq!(app.theme_id, ThemeId::Muse);
+    }
+
+    #[test]
+    fn search_jumps_to_the_matching_message() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        app.detail = Some(detail(vec![
+            message("user", "ping"),
+            message("assistant", "Pong from mock"),
+        ]));
+        app.on_key(Key::CtrlF);
+        for ch in "pong".chars() {
+            app.on_key(Key::Char(ch));
+        }
+        assert_eq!(app.selected_message, Some(1));
+        let hits = app.search_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(&"Pong from mock"[hits[0].start..hits[0].end], "Pong");
+    }
+
+    #[test]
+    fn an_unconfigured_profile_is_not_invented() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        app.on_key(Key::Char('p'));
+        app.on_key(Key::Down);
+        let effects = app.on_key(Key::Enter);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(app.notice.contains("not configured"), "{}", app.notice);
+        assert_eq!(app.profiles.active, "dip");
+        app.profiles.slots[1].base_url = Some("http://127.0.0.1:9".into());
+        app.profiles.slots[1].token = Some("secret-token".into());
+        app.on_key(Key::Char('p'));
+        app.on_key(Key::Down);
+        let effects = app.on_key(Key::Enter);
+        match effects.as_slice() {
+            [Effect::UseProfile { base_url, token }] => {
+                assert_eq!(base_url, "http://127.0.0.1:9");
+                assert_eq!(token.as_deref(), Some("secret-token"));
+            }
+            other => panic!("expected a switch, got {other:?}"),
+        }
+        assert!(!app.notice.contains("secret-token"), "{}", app.notice);
+    }
+
+    #[test]
+    fn a_user_message_shows_its_source_and_an_old_server_stays_quiet() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        let mut from_cli = message("user", "ping");
+        from_cli.source = Some("rust-cli".into());
+        let mut from_desk = message("user", "from the desk");
+        from_desk.source = Some("dashboard".into());
+        app.detail = Some(detail(vec![
+            from_cli,
+            from_desk,
+            message("user", "legacy"),
+            message("assistant", "reply"),
+        ]));
+        let joined = app.transcript().join("\n");
+        assert!(joined.contains("you  ping") && joined.contains("· rust-cli"), "{joined}");
+        assert!(joined.contains("· dashboard"), "{joined}");
+        assert!(
+            joined.contains("legacy") && !joined.contains("· unknown"),
+            "{joined}"
+        );
+        let legacy = app
+            .transcript()
+            .into_iter()
+            .find(|line| line.contains("legacy"))
+            .unwrap();
+        assert!(!legacy.contains('·'), "{legacy}");
+        assert!(!joined.lines().any(|line| line.contains("reply") && line.contains('·')));
+        assert!(app.build_lines(80).iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.text.contains("rust-cli") && span.kind == SpanKind::Dim)
+        }));
+    }
+
+    #[test]
+    fn sections_five_through_nine_open() {
+        let mut app = App::new("http://127.0.0.1:1", ImageProtocol::None);
+        app.screen = Screen::Chat;
+        for (key, screen) in [
+            ('5', Screen::Skills),
+            ('6', Screen::Tools),
+            ('7', Screen::Connections),
+            ('8', Screen::Claude),
+            ('9', Screen::Bridge),
+        ] {
+            app.on_key(Key::Char(key));
+            assert_eq!(app.screen, screen);
+        }
     }
 }
