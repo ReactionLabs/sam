@@ -86,7 +86,7 @@ impl Client {
             "{}/api/{}/chats/{}/messages",
             self.endpoint.origin, self.endpoint.token, id
         );
-        let value = self.post_json(&url, json!({ "content": content }))?;
+        let value = self.post_json(&url, message_body(content))?;
         let reply = value
             .get("reply")
             .and_then(|r| r.get("content"))
@@ -235,6 +235,12 @@ impl Client {
     fn redact(&self, text: String) -> String {
         text.replace(&self.endpoint.token, "<token>")
     }
+}
+
+/// Body the Rust CLI posts for one owner message. `source` is the
+/// provenance stamp the dashboard stores on the message record.
+pub fn message_body(content: &str) -> Value {
+    json!({ "content": content, "source": "rust-cli" })
 }
 
 fn read_json(response: ureq::Response) -> Result<Value, String> {
@@ -424,6 +430,13 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn send_body_stamps_rust_cli() {
+        let body = message_body("hello from the cli");
+        assert_eq!(body["content"], "hello from the cli");
+        assert_eq!(body["source"], "rust-cli");
+    }
 
     #[test]
     fn dashboard_url_carries_its_own_token() {

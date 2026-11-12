@@ -19,6 +19,7 @@ import { readSetupRecord } from "./config-wizard.js";
 import { authStatus } from "./auth-status.js";
 import { observabilityReport } from "./observability.js";
 import { runChatTurn } from "./agent-turn.js";
+import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
@@ -184,8 +185,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       pending.add(id);
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
+        const source=sourceFromApiBody(body.source);
         const turnStart=new Date().toISOString();
-        const reply=await runChatTurn(workspace,id,body.content);
+        const reply=await runChatTurn(workspace,id,body.content,{source});
         const result={message:{role:"assistant" as const,content:reply}};
         let userReaction:string|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"){userReaction=msgs[i].reaction;break;}}}finally{db2.close();}}catch{/* the badge is garnish */}
         json(200,{reply:result.message,userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});

@@ -260,7 +260,7 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   if(!botToken)throw new Error("Channel credential missing from environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
-  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"telegram");
   let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
   console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
@@ -482,7 +482,7 @@ program.command("relay").description("Send one prompt to 2 or more configured mo
   const result=await relayPrompt(root,prompt,targets,{actor:o.profile});
   if(o.chat){
     const db=new ChatStore(root);
-    try{db.add(o.chat,"user",prompt);db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
+    try{db.add(o.chat,"user",prompt,"ts-cli");db.add(o.chat,"assistant",result.text.length>20000?result.text.slice(0,19900)+"\n[truncated]":result.text);}finally{db.close();}
   }
   output(result);
   if(result.answers.every(a=>!a.ok))process.exitCode=1;
@@ -510,7 +510,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   if(!secret||secret.length<24)throw new Error("Channel secret missing or too short in environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
-  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token);
+  const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"api");
   console.log("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port);
   await serveWebhookChannel({channel,sam,secret,port:Number(o.port),root});
  });
@@ -545,7 +545,7 @@ chats.command("resume").argument("<id>").description("Resume a killed turn from 
 });
 chats.command("react").argument("<chatId>").argument("<messageId>").argument("<emoji>").description("Set an emoji reaction on a message (or clear it with 'none') - the operator parity for sam_react and the dashboard badges").action((chatId:string,messageId:string,emoji:string)=>{const db=new ChatStore(program.opts().workspace);try{const set=db.setReaction(chatId,messageId,emoji==="none"?null:emoji);output({set,message:db.messages(chatId).find(m=>m.id===messageId)??null});}finally{db.close();}});
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
-chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message);output({reply,proposed:turnActions(ws,id,since)});});
+chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message,{source:"ts-cli"});output({reply,proposed:turnActions(ws,id,since)});});
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
 const teams=program.command("team").description("Explicit, bounded two-agent research and QA collaboration (model calls may incur charges)");
 teams.command("run").requiredOption("--chat <uuid>","Existing chat id").requiredOption("--objective <text>","Mission objective").requiredOption("--live","Explicitly authorize three model calls").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").action(async(o:{chat:string;objective:string;live:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean})=>{
