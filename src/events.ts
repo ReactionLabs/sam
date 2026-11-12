@@ -1,7 +1,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
@@ -24,38 +25,177 @@ const MAX_IDS = 500;
 function dir(root: string): string { return join(resolve(root), ".sam"); }
 function bindingPath(root: string): string { return join(dir(root), "event-bindings.json"); }
 function seenPath(root: string): string { return join(dir(root), "event-ids.json"); }
+function eventsDbFile(root: string): string { return join(dir(root), "events.db"); }
 
-function writeFile(file: string, value: unknown): void {
-  mkdirSync(join(file, ".."), { recursive: true });
-  writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
-  chmodSync(file, 0o600);
+// State convergence (UNIFICATION item 4, twenty-sixth store): the
+// event door's two stores are SQLite (.sam/events.db, the pairing
+// two-collection pattern), one row per binding keyed by its name
+// holding the binding's full JSON in rowid order, plus one row per
+// seen event id keyed by the id in rowid order. The old
+// event-bindings.json was rewritten whole on every bind and unbind,
+// and event-ids.json whole on every accepted event carrying an id,
+// with writers in the CLI (events bind / unbind / accept) and the
+// event door server process (serveEvents -> acceptEvent ->
+// rememberId), while eventBindings was read on every accept - so
+// two writers holding the same snapshot silently lost the second
+// one's change, and here the losses are door-shaped: a binding
+// could vanish, an unbound binding could resurrect and re-open a
+// signed door the operator closed, and a seen id lost under a
+// concurrent save defeated the dedupe guard so the same signed
+// event woke the profile twice. Its bindings reader also THREW on
+// a malformed file, taking down every accept instead of failing
+// closed to no bindings. Here each mutation is a single-row INSERT
+// or DELETE (rememberId's dedupe move and the 500-id prune ride
+// one transaction), and connections carry a busy_timeout so a
+// writer waits out a peer's transaction instead of dying on
+// "database is locked". First open imports each legacy file
+// independently and renames it (event-bindings.json.migrated /
+// event-ids.json.migrated) - imported, never deleted; a malformed
+// file imports nothing and is left in place (the migrated shape
+// reads bindings as none instead of throwing, the
+// channels/connectors precedent; the seen-ids shape keeps its old
+// forgiving read). A pure read on an install with neither file
+// creates nothing. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup
+// change.
+function openEventsStore(root: string): Database.Database {
+  const d = dir(root);
+  mkdirSync(d, { recursive: true, mode: 0o700 });
+  if (lstatSync(d).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(eventsDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS event_bindings (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS event_seen_ids (id TEXT PRIMARY KEY)");
+  migrateLegacyEvents(db, root);
+  return db;
+}
+function legacyBinding(raw: unknown): EventBinding | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Partial<EventBinding>;
+  if (typeof r.name !== "string" || typeof r.profile !== "string" || typeof r.secretEnv !== "string") return null;
+  return { name: r.name, profile: r.profile, secretEnv: r.secretEnv };
+}
+function migrateLegacyEvents(db: Database.Database, root: string): void {
+  const bindingCount = db.prepare("SELECT COUNT(*) AS n FROM event_bindings").get() as { n: number };
+  if (bindingCount.n === 0 && existsSync(bindingPath(root))) {
+    let value: unknown;
+    let parsed = true;
+    try { value = JSON.parse(readFileSync(bindingPath(root), "utf8")); } catch { parsed = false; }
+    if (parsed && Array.isArray(value) && value.length <= MAX_BINDINGS) {
+      const insert = db.prepare("INSERT OR IGNORE INTO event_bindings (name, data) VALUES (?, ?)");
+      const importAll = db.transaction((rows: unknown[]) => {
+        for (const raw of rows) {
+          const row = legacyBinding(raw);
+          if (!row) continue;
+          insert.run(row.name, JSON.stringify(row));
+        }
+      });
+      importAll(value);
+      renameSync(bindingPath(root), bindingPath(root) + ".migrated");
+    }
+  }
+  const seenCount = db.prepare("SELECT COUNT(*) AS n FROM event_seen_ids").get() as { n: number };
+  if (seenCount.n === 0 && existsSync(seenPath(root))) {
+    let value: unknown;
+    let parsed = true;
+    try { value = JSON.parse(readFileSync(seenPath(root), "utf8")); } catch { parsed = false; }
+    if (parsed && Array.isArray(value)) {
+      const ids = value.filter((x): x is string => typeof x === "string").slice(-MAX_IDS);
+      const insert = db.prepare("INSERT OR IGNORE INTO event_seen_ids (id) VALUES (?)");
+      const importAll = db.transaction((rows: string[]) => {
+        for (const id of rows) insert.run(id);
+      });
+      importAll(ids);
+      renameSync(seenPath(root), seenPath(root) + ".migrated");
+    }
+  }
+}
+function storeExists(root: string): boolean {
+  return existsSync(eventsDbFile(root)) || existsSync(bindingPath(root)) || existsSync(seenPath(root));
+}
+function rowToBinding(data: string): EventBinding | null {
+  try { return legacyBinding(JSON.parse(data)); }
+  catch { return null; }
+}
+function readBindings(db: Database.Database): EventBinding[] {
+  const rows = db.prepare("SELECT data FROM event_bindings ORDER BY rowid").all() as Array<{ data: string }>;
+  const out: EventBinding[] = [];
+  for (const row of rows) { const b = rowToBinding(row.data); if (b) out.push(b); }
+  return out;
+}
+function findBindingRow(db: Database.Database, name: string): EventBinding | null {
+  const row = db.prepare("SELECT data FROM event_bindings WHERE name = ?").get(name) as { data: string } | undefined;
+  return row ? rowToBinding(row.data) : null;
+}
+function readSeenIds(db: Database.Database): string[] {
+  const rows = db.prepare("SELECT id FROM event_seen_ids ORDER BY rowid").all() as Array<{ id: string }>;
+  return rows.map(r => r.id);
+}
+
+// The store's read door (the pairing precedent): the full event
+// store snapshot - bindings plus seen ids - read through the
+// store's own shape. A pure read on an install with neither file
+// creates nothing.
+export function readEventStore(root: string): { bindings: EventBinding[]; seenIds: string[] } {
+  if (!storeExists(root)) return { bindings: [], seenIds: [] };
+  const db = openEventsStore(root);
+  try { return { bindings: readBindings(db), seenIds: readSeenIds(db) }; }
+  finally { db.close(); }
 }
 
 export function eventBindings(root: string): EventBinding[] {
-  if (!existsSync(bindingPath(root))) return [];
-  const value = JSON.parse(readFileSync(bindingPath(root), "utf8")) as unknown;
-  if (!Array.isArray(value)) throw new Error("Invalid event bindings file");
-  return value as EventBinding[];
+  if (!storeExists(root)) return [];
+  const db = openEventsStore(root);
+  try { return readBindings(db); }
+  finally { db.close(); }
 }
 
 export function bindEvent(root: string, input: EventBinding): EventBinding {
   if (!NAME_RE.test(input.name)) throw new Error("Invalid event name");
   if (!NAME_RE.test(input.profile)) throw new Error("Invalid profile");
   if (!ENV_RE.test(input.secretEnv)) throw new Error("secretEnv must be an environment variable NAME, never a secret value");
-  const items = eventBindings(root);
-  if (items.some(b => b.name === input.name)) throw new Error("Event binding already exists: " + input.name);
-  if (items.length >= MAX_BINDINGS) throw new Error("Event binding limit reached");
-  const row = { name: input.name, profile: input.profile, secretEnv: input.secretEnv };
-  writeFile(bindingPath(root), [...items, row]);
-  return row;
+  const row: EventBinding = { name: input.name, profile: input.profile, secretEnv: input.secretEnv };
+  const db = openEventsStore(root);
+  try {
+    if (findBindingRow(db, row.name)) throw new Error("Event binding already exists: " + row.name);
+    const { n } = db.prepare("SELECT COUNT(*) AS n FROM event_bindings").get() as { n: number };
+    if (n >= MAX_BINDINGS) throw new Error("Event binding limit reached");
+    db.prepare("INSERT INTO event_bindings (name, data) VALUES (?, ?)").run(row.name, JSON.stringify(row));
+    return row;
+  } finally { db.close(); }
 }
 
 export function unbindEvent(root: string, name: string): boolean {
-  const items = eventBindings(root);
-  const next = items.filter(b => b.name !== name);
-  if (next.length === items.length) return false;
-  writeFile(bindingPath(root), next);
-  return true;
+  if (!storeExists(root)) return false;
+  const db = openEventsStore(root);
+  try {
+    const result = db.prepare("DELETE FROM event_bindings WHERE name = ?").run(name);
+    return result.changes > 0;
+  } finally { db.close(); }
+}
+
+// The store's update door (the providers precedent): patch one
+// binding by name, validated exactly as bindEvent validates. The
+// name itself is immutable (it is the door's address); a profile
+// or secretEnv patch becomes a single-row update. Returns null
+// when no such binding exists.
+export function updateEventBinding(root: string, name: string, patch: { profile?: string; secretEnv?: string }): EventBinding | null {
+  if (!storeExists(root)) return null;
+  const db = openEventsStore(root);
+  try {
+    const current = findBindingRow(db, name);
+    if (!current) return null;
+    const next: EventBinding = {
+      name: current.name,
+      profile: patch.profile !== undefined ? patch.profile : current.profile,
+      secretEnv: patch.secretEnv !== undefined ? patch.secretEnv : current.secretEnv,
+    };
+    if (!NAME_RE.test(next.profile)) throw new Error("Invalid profile");
+    if (!ENV_RE.test(next.secretEnv)) throw new Error("secretEnv must be an environment variable NAME, never a secret value");
+    db.prepare("UPDATE event_bindings SET data = ? WHERE name = ?").run(JSON.stringify(next), name);
+    return next;
+  } finally { db.close(); }
 }
 
 export function signEvent(secret: string, rawBody: string): string {
@@ -83,15 +223,26 @@ export function eventPrompt(event: InboundEvent): string {
 }
 
 function seenIds(root: string): string[] {
-  if (!existsSync(seenPath(root))) return [];
-  try {
-    const value = JSON.parse(readFileSync(seenPath(root), "utf8")) as unknown;
-    return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
-  } catch { return []; }
+  if (!storeExists(root)) return [];
+  const db = openEventsStore(root);
+  try { return readSeenIds(db); }
+  finally { db.close(); }
 }
 function rememberId(root: string, id: string): void {
-  const next = [...seenIds(root).filter(x => x !== id), id].slice(-MAX_IDS);
-  writeFile(seenPath(root), next);
+  const db = openEventsStore(root);
+  try {
+    const apply = db.transaction((seenId: string) => {
+      // Dedupe move: re-inserting an existing id moves it to the
+      // newest position (the old filter + append), in one row op.
+      db.prepare("DELETE FROM event_seen_ids WHERE id = ?").run(seenId);
+      db.prepare("INSERT INTO event_seen_ids (id) VALUES (?)").run(seenId);
+      const { n } = db.prepare("SELECT COUNT(*) AS n FROM event_seen_ids").get() as { n: number };
+      if (n > MAX_IDS) {
+        db.prepare("DELETE FROM event_seen_ids WHERE rowid IN (SELECT rowid FROM event_seen_ids ORDER BY rowid ASC LIMIT ?)").run(n - MAX_IDS);
+      }
+    });
+    apply(id);
+  } finally { db.close(); }
 }
 
 function parseEvent(rawBody: string): InboundEvent {
