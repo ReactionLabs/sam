@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,10 +32,10 @@ test("providers: file entries store the key env name only, mode 0600, and the en
     }, env);
     assert.equal(added.key, "present");
     assert.equal(added.source, "file");
-    const raw = readFileSync(join(root, ".sam", "providers.json"), "utf8");
+    const raw = readFileSync(join(root, ".sam", "providers.db"), "utf8");
     assert.ok(!raw.includes("openai-secret-do-not-print"));
     assert.ok(!raw.includes("minimax-secret-do-not-print"));
-    assert.equal(statSync(join(root, ".sam", "providers.json")).mode & 0o777, 0o600);
+    assert.equal(existsSync(join(root, ".sam", "providers.json")), false);
     const ids = listProviders(root, env).map(p => p.id);
     assert.deepEqual(ids, ["minimax", "openai"]);
     assert.throws(() => addProvider(root, { id: "minimax", endpoint: "https://api.openai.com/v1/chat/completions", keyEnv: "OPENAI_API_KEY", model: "gpt-4.1" }, env), /reserved/);

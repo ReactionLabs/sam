@@ -1,5 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { resolveModelForRoute, tierForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
 import type { TurnRoute } from "./budgets.js";
@@ -8,7 +9,7 @@ import type { TurnRoute } from "./budgets.js";
 // env triple SAM_MODEL_PROVIDER / SAM_MODEL_ENDPOINT / SAM_MODEL_API_KEY
 // (or MINIMAX_API_KEY). That env provider still exists and is still
 // the default for every unpinned profile. Additional providers live
-// in .sam/providers.json as endpoint + key ENV NAME + model. The file
+// in .sam/providers.db as endpoint + key ENV NAME + model. The store
 // never holds a key value. A profile pins a provider id plus a model;
 // two profiles can therefore talk to two providers in the same process.
 
@@ -41,7 +42,7 @@ export interface TurnConnection {
   unavailable?: string;
 }
 
-interface FileProvider {
+export interface FileProvider {
   id: string;
   endpoint: string;
   keyEnv: string;
@@ -96,6 +97,91 @@ function assertModel(model: string, field: string): string {
 function providersPath(root: string): string {
   return join(resolve(root), ".sam", "providers.json");
 }
+function providersDbFile(root: string): string {
+  return join(resolve(root), ".sam", "providers.db");
+}
+// State convergence (UNIFICATION item 4, twenty-fourth store): the
+// provider registry is SQLite (.sam/providers.db, the connectors
+// pattern), one row per provider keyed by its id holding the record's
+// full JSON, rowid order = the old file order. The old providers.json
+// was rewritten whole on every add and remove, and its writers (the
+// CLI) ran beside readFileProviders readers on every turn's
+// connection resolution, every failover route build, and every
+// auth-status / dashboard build, so two writers holding the same
+// snapshot silently lost the second one's change - routing-shaped
+// here: a removed provider could resurrect (and a profile pinned to
+// it would send its turns, addressed to the key named by keyEnv, to
+// that endpoint again), an added provider could vanish, and a
+// reverted endpoint silently re-pointed a profile's model traffic.
+// Its reader also THREW on a malformed file, taking down every turn
+// that resolves a connection instead of failing closed to the
+// environment provider alone. Here each mutation is a single-row
+// INSERT, UPDATE, or DELETE, and connections carry a busy_timeout so
+// a writer waits out a peer's transaction instead of dying on
+// "database is locked". First open imports a legacy providers.json
+// in file order and renames it providers.json.migrated - imported,
+// never deleted; a malformed file, a non-array payload, or an
+// over-cap payload imports nothing and is left in place (the
+// migrated shape reads it as no file providers, the environment
+// provider alone, instead of throwing). A pure read on an install
+// with neither file creates nothing. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried with no
+// backup change.
+function openProvidersStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(providersDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS providers (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyProviders(db, root);
+  return db;
+}
+function migrateLegacyProviders(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM providers").get() as { n: number };
+  if (n > 0) return;
+  const file = providersPath(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  if (data.length > MAX_PROVIDERS) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO providers (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      const row = legacyFileProvider(raw);
+      if (!row) continue;
+      insert.run(row.id, JSON.stringify(row));
+    }
+  });
+  importAll(data);
+  renameSync(file, file + ".migrated");
+}
+function legacyFileProvider(raw: unknown): FileProvider | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Partial<FileProvider>;
+  if (typeof r.id !== "string" || typeof r.endpoint !== "string" || typeof r.keyEnv !== "string" || typeof r.model !== "string") return null;
+  return {
+    id: r.id,
+    endpoint: r.endpoint,
+    keyEnv: r.keyEnv,
+    model: r.model,
+    cheapModel: typeof r.cheapModel === "string" ? r.cheapModel : null,
+    deepModel: typeof r.deepModel === "string" ? r.deepModel : null,
+  };
+}
+function rowToFileProvider(data: string): FileProvider | null {
+  try { return legacyFileProvider(JSON.parse(data)); }
+  catch { return null; }
+}
+function storeExists(root: string): boolean {
+  return existsSync(providersDbFile(root)) || existsSync(providersPath(root));
+}
+function findProviderRow(db: Database.Database, id: string): FileProvider | null {
+  const row = db.prepare("SELECT data FROM providers WHERE id = ?").get(id) as { data: string } | undefined;
+  return row ? rowToFileProvider(row.data) : null;
+}
 
 function envProvider(env: NodeJS.ProcessEnv): ConfiguredProvider {
   const keyEnv = modelKeyEnvName(env);
@@ -112,34 +198,14 @@ function envProvider(env: NodeJS.ProcessEnv): ConfiguredProvider {
 }
 
 export function readFileProviders(root: string): FileProvider[] {
-  const file = providersPath(root);
-  if (!existsSync(file)) return [];
-  let value: unknown;
-  try { value = JSON.parse(readFileSync(file, "utf8")); }
-  catch { throw new Error("Invalid providers file: " + file); }
-  if (!Array.isArray(value)) throw new Error("Invalid providers file: " + file);
-  return value.map(row => {
-    if (!row || typeof row !== "object") throw new Error("Invalid providers file: " + file);
-    const r = row as Partial<FileProvider>;
-    if (typeof r.id !== "string" || typeof r.endpoint !== "string" || typeof r.keyEnv !== "string" || typeof r.model !== "string")
-      throw new Error("Invalid providers file: " + file);
-    return {
-      id: r.id,
-      endpoint: r.endpoint,
-      keyEnv: r.keyEnv,
-      model: r.model,
-      cheapModel: typeof r.cheapModel === "string" ? r.cheapModel : null,
-      deepModel: typeof r.deepModel === "string" ? r.deepModel : null,
-    };
-  });
-}
-
-function writeFileProviders(root: string, items: FileProvider[]): void {
-  const dir = join(resolve(root), ".sam");
-  mkdirSync(dir, { recursive: true });
-  const file = providersPath(root);
-  writeFileSync(file, JSON.stringify(items, null, 2), { mode: 0o600 });
-  chmodSync(file, 0o600);
+  if (!storeExists(root)) return [];
+  const db = openProvidersStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM providers ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: FileProvider[] = [];
+    for (const row of rows) { const provider = rowToFileProvider(row.data); if (provider) items.push(provider); }
+    return items;
+  } finally { db.close(); }
 }
 
 function toPublic(env: NodeJS.ProcessEnv, row: FileProvider): ConfiguredProvider {
@@ -170,21 +236,54 @@ export function addProvider(root: string, input: { id: string; endpoint: string;
   const model = assertModel(input.model, "model");
   const cheapModel = input.cheapModel ? assertModel(input.cheapModel, "cheap model") : null;
   const deepModel = input.deepModel ? assertModel(input.deepModel, "deep model") : null;
-  const items = readFileProviders(root);
-  if (items.some(p => p.id === id)) throw new Error("Provider already exists: " + id);
-  if (items.length >= MAX_PROVIDERS) throw new Error("Provider limit reached (" + MAX_PROVIDERS + ")");
   const row: FileProvider = { id, endpoint, keyEnv, model, cheapModel, deepModel };
-  writeFileProviders(root, [...items, row]);
+  const db = openProvidersStore(root);
+  try {
+    if (findProviderRow(db, id)) throw new Error("Provider already exists: " + id);
+    const { n } = db.prepare("SELECT COUNT(*) AS n FROM providers").get() as { n: number };
+    if (n >= MAX_PROVIDERS) throw new Error("Provider limit reached (" + MAX_PROVIDERS + ")");
+    db.prepare("INSERT INTO providers (id, data) VALUES (?, ?)").run(id, JSON.stringify(row));
+  } finally { db.close(); }
   return toPublic(env, row);
 }
 
+// The single-row patch door (the connectors precedent): updates one
+// provider row in place by id, validated exactly as addProvider
+// validates; a null cheap/deep model clears that tier. The id is not
+// patchable. Returns the updated public shape, or null on a miss -
+// and a miss on an install with no store creates nothing.
+export function updateProvider(root: string, id: string, patch: { endpoint?: string; keyEnv?: string; model?: string; cheapModel?: string | null; deepModel?: string | null }, env: NodeJS.ProcessEnv = process.env): ConfiguredProvider | null {
+  if (!storeExists(root)) return null;
+  const endpoint = patch.endpoint !== undefined ? assertChatCompletionsUrl(patch.endpoint.trim()) : undefined;
+  const keyEnv = patch.keyEnv !== undefined ? patch.keyEnv.trim() : undefined;
+  if (keyEnv !== undefined && !KEY_ENV_RE.test(keyEnv)) throw new Error("keyEnv must be an environment variable NAME (UPPER_SNAKE), never a key value");
+  const model = patch.model !== undefined ? assertModel(patch.model, "model") : undefined;
+  const cheapModel = patch.cheapModel === undefined ? undefined : (patch.cheapModel ? assertModel(patch.cheapModel, "cheap model") : null);
+  const deepModel = patch.deepModel === undefined ? undefined : (patch.deepModel ? assertModel(patch.deepModel, "deep model") : null);
+  const db = openProvidersStore(root);
+  try {
+    const existing = findProviderRow(db, id);
+    if (!existing) return null;
+    const next: FileProvider = {
+      id: existing.id,
+      endpoint: endpoint ?? existing.endpoint,
+      keyEnv: keyEnv ?? existing.keyEnv,
+      model: model ?? existing.model,
+      cheapModel: cheapModel === undefined ? existing.cheapModel : cheapModel,
+      deepModel: deepModel === undefined ? existing.deepModel : deepModel,
+    };
+    db.prepare("UPDATE providers SET data = ? WHERE id = ?").run(JSON.stringify(next), id);
+    return toPublic(env, next);
+  } finally { db.close(); }
+}
+
 export function removeProvider(root: string, id: string): boolean {
-  if ((RESERVED_PROVIDER_IDS as readonly string[]).includes(id)) throw new Error("The environment provider is not stored in the providers file");
-  const items = readFileProviders(root);
-  const next = items.filter(p => p.id !== id);
-  if (next.length === items.length) return false;
-  writeFileProviders(root, next);
-  return true;
+  if ((RESERVED_PROVIDER_IDS as readonly string[]).includes(id)) throw new Error("The environment provider is not stored here and cannot be removed");
+  if (!storeExists(root)) return false;
+  const db = openProvidersStore(root);
+  try {
+    return db.prepare("DELETE FROM providers WHERE id = ?").run(id).changes > 0;
+  } finally { db.close(); }
 }
 
 function modelForTier(row: { model: string | null; cheapModel: string | null; deepModel: string | null }, tier: ModelTier): string | null {
