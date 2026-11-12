@@ -51,6 +51,17 @@ import { readSelfAudit, type SelfAudit } from "./self-audit.js";
  *   operator names the channel - e.g. the SAM Telegram channel
  *   Dip designated for self-work updates - or none).
  *
+ * Known-defect seeding (the later-step design call the step-1
+ * and step-2 landings left open): the picker also sees a
+ * code-declared registry of KNOWN defects that no ledger line
+ * ever records (KNOWN_DEFECTS below). A seeded defect enters
+ * the ranking beside the ledger classes at count 1 with
+ * source "known" and its recorded date as its timestamps, so
+ * any real recurring class outranks it; it becomes the top
+ * spec only when the ledger is quiet. A known spec is a spec
+ * like any other from there: the audit grounding, the
+ * owner-only stamp, and the work bridge all apply unchanged.
+ *
  * Step 2 (the work bridge, below the picker): the recorded spec
  * is WORKED, not just written. queueSelfWorkFix hands a workable
  * recorded spec to the C3 coding loop as a task in a dedicated
@@ -84,13 +95,52 @@ export interface DefectClass {
   lastAt: string;
   actors: string[];
   evidence: string;
+  /** Where the class came from: the activity ledger, or the
+   *  known-defect registry seeded beside it. Legacy recorded
+   *  runs predate the field and read as ledger classes. */
+  source?: "ledger" | "known";
 }
+
+/** A known defect: recorded in the roadmap / by the operator
+ *  as real, but never written to the activity ledger, so the
+ *  ledger alone can never surface it. The registry is data in
+ *  code - reviewed like code, extended one honest entry at a
+ *  time, never by the model and never at run time. */
+export interface KnownDefect {
+  key: string;
+  label: string;
+  /** When the defect was recorded (its ranking timestamps). */
+  recordedAt: string;
+  evidence: string;
+  files: string[];
+}
+
+/** The known-defect registry, seeded beside the ledger in
+ *  rankDefects at count 1. First entry: the SELF-WORK
+ *  provisioning GAP - the engine binary probe (engine.ts, and
+ *  engine-connect.ts's own copy) tests lstatSync().isFile(),
+ *  which is false for a symlink, and npm's global install puts
+ *  a symlink on PATH, so a stock install reads the engine as
+ *  not installed; installs work around it by pointing
+ *  SAM_ENGINE_BIN at the resolved real binary. */
+export const KNOWN_DEFECTS: KnownDefect[] = [
+  {
+    key: "known:engine-binary-symlink",
+    label: "known defect: engine binary probe misses symlinked installs (npm global)",
+    recordedAt: "2026-11-11T20:17:00.000Z",
+    evidence: "Recorded in the SELF-WORK provisioning pass (2026-11-11): engineBinary probes with lstatSync().isFile(), which is FALSE for npm's global install because the claude binary on PATH is a symlink; a stock npm install therefore reads installed:false. Worked around the operator way (SAM_ENGINE_BIN pointing at the resolved real binary). No ledger line ever records it.",
+    files: ["engine.ts", "engine-connect.ts"],
+  },
+];
 
 export interface SelfWorkSpec {
   id: string;
   defectKey: string;
   label: string;
   count: number;
+  /** The top class's source: ledgered recurrence, or the
+   *  known-defect registry. Legacy specs predate the field. */
+  source?: "ledger" | "known";
   evidence: string;
   endGoal: string;
   doneLooksLike: string[];
@@ -111,14 +161,22 @@ interface SpecTemplate { files: string[]; endGoal: string; doneLooksLike: string
 
 function templateFor(key: string, label: string, count: number): SpecTemplate {
   const n = String(count);
-  const base = (files: string[], endGoal: string, doneLooksLike: string[]): SpecTemplate => ({
+  const base = (files: string[], endGoal: string, doneLooksLike: string[], extraNotDone: string[] = []): SpecTemplate => ({
     files, endGoal, doneLooksLike,
     notDone: [
       "Claiming the class fixed from a single quiet run - the ledger must show the class absent across later comparable work, or a regression test must pin the failure shape",
       "Widening any allowlist, gate, budget number, or fence to make the symptom stop instead of fixing its cause",
       "Editing SAM's own gate, policy, or allowlist code (owner-only, forever) or landing anything except through the existing approval gate",
+      ...extraNotDone,
     ],
   });
+  if (key === "known:engine-binary-symlink") return base(
+    ["engine.ts", "engine-connect.ts"],
+    "A stock engine install reads as installed without an operator workaround: the binary probes test lstatSync().isFile(), which is false for the symlink npm's global install puts on PATH, so the engine (and the engine-connect probe's own copy) reads not-installed until SAM_ENGINE_BIN is pointed at the resolved real file by hand.",
+    ["A test with a symlinked fake binary (the npm-global shape) reads installed through both probes, and a genuinely missing binary still reads not-installed",
+     "The full suite is green, including the win-path guard, with the guard itself unedited",
+     "An install with no SAM_ENGINE_BIN set and a symlinked engine on PATH reports the engine truthfully in status and the self-audit"],
+    ["Loosening, editing, or routing around the win-path guard or its reserved-probe discipline to make the suite pass - the guard is the owner's tripwire, not an obstacle; if the reserve truly blocks the fix, the honest close is blocked naming that conflict, never a quiet guard edit"]);
   if (key === "tool-budget") return base(
     ["budgets.ts", "own-tools.ts", "connector-chat.ts"],
     "Turns stop ending on the tool budget with work unfinished: " + n + " ledgered tool-budget endings are the top recurring defect, and a turn that gathers results must answer from them (naming what it could not finish) instead of truncating.",
@@ -243,7 +301,13 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
 
 /** Rank every defect class in the ledger: count descending,
  *  most recent first on a tie, key ascending last - the same
- *  ledger always yields the same ranking. */
+ *  ledger always yields the same ranking. The known-defect
+ *  registry is seeded beside the ledger: each known defect
+ *  enters at count 1 with its recorded date as its first and
+ *  last sighting, so a real recurring class (or a fresher
+ *  one-off) always outranks it, and it tops the queue only
+ *  when the ledger is quiet. Known keys are namespaced
+ *  ("known:") so they can never merge with a ledger class. */
 export function rankDefects(root: string): DefectClass[] {
   const groups = new Map<string, DefectClass & { actorSet: Set<string> }>();
   for (const line of readActivity(root, 100_000)) {
@@ -251,7 +315,7 @@ export function rankDefects(root: string): DefectClass[] {
     if (!cls) continue;
     let g = groups.get(cls.key);
     if (!g) {
-      g = { key: cls.key, label: cls.label, count: 0, firstAt: line.at, lastAt: line.at, actors: [], evidence: "", actorSet: new Set() };
+      g = { key: cls.key, label: cls.label, count: 0, firstAt: line.at, lastAt: line.at, actors: [], evidence: "", source: "ledger", actorSet: new Set() };
       groups.set(cls.key, g);
     }
     g.count += 1;
@@ -259,7 +323,11 @@ export function rankDefects(root: string): DefectClass[] {
     if (line.at >= g.lastAt) { g.lastAt = line.at; g.evidence = (line.summary ?? "").slice(0, 200); }
     g.actorSet.add(line.actor);
   }
-  const ranked = [...groups.values()].map(g => ({ key: g.key, label: g.label, count: g.count, firstAt: g.firstAt, lastAt: g.lastAt, actors: [...g.actorSet].sort(), evidence: g.evidence }));
+  const ranked: DefectClass[] = [...groups.values()].map(g => ({ key: g.key, label: g.label, count: g.count, firstAt: g.firstAt, lastAt: g.lastAt, actors: [...g.actorSet].sort(), evidence: g.evidence, source: "ledger" as const }));
+  for (const known of KNOWN_DEFECTS) {
+    if (ranked.some(r => r.key === known.key)) continue;
+    ranked.push({ key: known.key, label: known.label, count: 1, firstAt: known.recordedAt, lastAt: known.recordedAt, actors: [], evidence: known.evidence, source: "known" });
+  }
   ranked.sort((a, b) => (b.count - a.count) || (a.lastAt < b.lastAt ? 1 : a.lastAt > b.lastAt ? -1 : 0) || (a.key < b.key ? -1 : 1));
   return ranked;
 }
@@ -279,7 +347,7 @@ export function buildSelfWorkSpec(root: string, audit: SelfAudit | null = readSe
     else if (t.files.length && !audit.code.root) blockedBy = "the recorded self-audit reads no designated code root (cannot: coder hands) - designating one is the operator's act, so this fix has no workbench yet";
     spec = {
       id: "selfwork-" + randomUUID().slice(0, 8),
-      defectKey: top.key, label: top.label, count: top.count, evidence: top.evidence,
+      defectKey: top.key, label: top.label, count: top.count, source: top.source ?? "ledger", evidence: top.evidence,
       endGoal: t.endGoal, doneLooksLike: t.doneLooksLike, notDone: t.notDone,
       files: t.files, ownerOnly, blockedBy,
     };
@@ -424,7 +492,7 @@ export function selfWorkFixSpecText(spec: SelfWorkSpec): string {
   const lines = [
     "Self-work fix (SELF-WORK loop): the top recurring defect in SAM's own activity ledger, specced by the deterministic self-work picker and worked here in the designated code root, which is a clone of SAM's own repository.",
     "",
-    "Defect: " + spec.label + " (" + spec.defectKey + "), ledgered " + String(spec.count) + " time(s).",
+    "Defect: " + spec.label + " (" + spec.defectKey + "), " + (spec.source === "known" ? "a known defect seeded beside the ledger from the recorded registry (not a ledgered recurrence)" : "ledgered " + String(spec.count) + " time(s)") + ".",
     "Evidence: " + spec.evidence,
     ...(spec.files.length ? ["Likely files: " + spec.files.map(f => "src/" + f).join(", ")] : []),
     "",
@@ -565,11 +633,12 @@ export function selfWorkText(run: SelfWorkRun, opts: { fixes?: SelfWorkFixView[]
   if (!run.ranked.length) {
     lines.push("", "No ledgered defect classes. Nothing to spec.");
   } else {
-    lines.push("", "Defect queue (ledgered, ranked):");
-    for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x, last " + d.lastAt + " - " + d.label);
+    lines.push("", "Defect queue (ranked; known defects seeded beside the ledger):");
+    for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x, last " + d.lastAt + " - " + d.label + (d.source === "known" ? " [known defect, seeded]" : ""));
     const spec = run.spec;
     if (spec) {
       lines.push("", "Top spec " + spec.id + " - " + spec.label + " (" + String(spec.count) + "x)");
+      if (spec.source === "known") lines.push("Source: the known-defect registry - recorded as real, never ledgered; it topped the queue because the ledger is quiet, not because it recurred.");
       lines.push("Evidence: " + spec.evidence);
       if (spec.files.length) lines.push("Likely files: " + spec.files.map(f => "src/" + f).join(", "));
       if (spec.ownerOnly) lines.push("Boundary: OWNER-ONLY - this spec touches the gate/policy/allowlist machinery; it is recorded for the owner and is never queued for SAM's own hands.");

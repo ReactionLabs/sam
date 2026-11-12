@@ -13,7 +13,7 @@ import { runSelfAudit } from "./self-audit.js";
 import {
   SELF_WORK_PROTECTED_FILES, advanceSelfWork, buildSelfWorkSpec, classifyDefect, installSelfWork,
   listSelfWorkFixes, queueSelfWorkFix, rankDefects, readSelfWork, reconcileSelfWorkFixes,
-  runSelfWork, selfWorkFixViews, selfWorkStatus, selfWorkText,
+  runSelfWork, selfWorkFixSpecText, selfWorkFixViews, selfWorkStatus, selfWorkText,
 } from "./self-work.js";
 
 // SELF-WORK step 1: the spec picker. The ledger is the defect
@@ -80,6 +80,52 @@ test("self-work: ranking counts the ledger and the top spec is the three-part sh
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRoot, { recursive: true, force: true }); }
 });
 
+test("self-work: known defects seed beside the ledger at count 1 - real classes outrank them, a quiet ledger specs one", () => {
+  const root = fresh();
+  const codeRoot = fresh();
+  try {
+    seedLedger(root);
+    writeFileSync(join(codeRoot, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+    setCodeRoot(root, codeRoot);
+    runSelfAudit(root, {});
+    const ranked = rankDefects(root);
+    const known = ranked.find(r => r.key === "known:engine-binary-symlink");
+    assert.ok(known);
+    assert.equal(known.count, 1);
+    assert.equal(known.source, "known");
+    assert.equal(ranked[ranked.length - 1].key, "known:engine-binary-symlink");
+    assert.equal(ranked[0].source, "ledger");
+    // A single fresh ledger class (count 1, seen today) still
+    // outranks the seeded defect (count 1, recorded 2026-11-11).
+    const root2 = fresh();
+    try {
+      recordActivity(root2, "dip", "tool-budget", "Tool budget exhausted: 6/6 calls used");
+      const ranked2 = rankDefects(root2);
+      assert.equal(ranked2[0].key, "tool-budget");
+      assert.equal(ranked2[1].key, "known:engine-binary-symlink");
+    } finally { rmSync(root2, { recursive: true, force: true }); }
+    // A quiet ledger: the known defect is the spec, with its
+    // own template - the guard tension named, never hidden.
+    const root3 = fresh();
+    const codeRoot3 = fresh();
+    try {
+      writeFileSync(join(codeRoot3, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+      setCodeRoot(root3, codeRoot3);
+      runSelfAudit(root3, {});
+      const run = buildSelfWorkSpec(root3);
+      assert.ok(run.spec);
+      assert.equal(run.spec.defectKey, "known:engine-binary-symlink");
+      assert.equal(run.spec.source, "known");
+      assert.deepEqual(run.spec.files, ["engine.ts", "engine-connect.ts"]);
+      assert.equal(run.spec.ownerOnly, false);
+      assert.equal(run.spec.blockedBy, null);
+      assert.match(run.spec.endGoal, /symlink/);
+      assert.ok(run.spec.notDone.some(d => /win-path guard/.test(d)));
+      assert.match(selfWorkFixSpecText(run.spec), /known defect seeded beside the ledger/);
+    } finally { rmSync(root3, { recursive: true, force: true }); rmSync(codeRoot3, { recursive: true, force: true }); }
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRoot, { recursive: true, force: true }); }
+});
+
 test("self-work: no audit recorded - the spec is stamped blocked naming step 0, never dressed as workable", () => {
   const root = fresh();
   try {
@@ -117,13 +163,17 @@ test("self-work: an audit with no code root blocks a hands spec; an owner-only c
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("self-work: a run records through the store, ledgers counts only, and an empty ledger specs nothing", () => {
+test("self-work: a run records through the store, ledgers counts only, and an empty ledger specs the seeded known defect", () => {
   const root = fresh();
   try {
     const empty = runSelfWork(root);
-    assert.equal(empty.spec, null);
-    assert.deepEqual(empty.ranked, []);
-    assert.match(selfWorkText(empty), /No ledgered defect classes/);
+    assert.ok(empty.spec);
+    assert.equal(empty.spec.defectKey, "known:engine-binary-symlink");
+    assert.equal(empty.spec.source, "known");
+    assert.equal(empty.ranked.length, 1);
+    assert.equal(empty.ranked[0].source, "known");
+    assert.match(selfWorkText(empty), /known defect, seeded/);
+    assert.match(selfWorkText(empty), /Source: the known-defect registry/);
     assert.deepEqual(readSelfWork(root), empty);
     seedLedger(root);
     const run = runSelfWork(root);
