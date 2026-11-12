@@ -53,6 +53,7 @@ export const CORE_OWN_TOOLS = [
   "sam_author_skill",
   "sam_code",
   "sam_coding_task",
+  "sam_spawn_subagent",
 ];
 
 export const LOADER_TOOL_DEF: Record<string, unknown> = {
