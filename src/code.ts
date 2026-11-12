@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import Database from "better-sqlite3";
 import { recordActivity } from "./activity.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { recordChange, recordVerification } from "./verification.js";
@@ -13,7 +14,7 @@ import { recordChange, recordVerification } from "./verification.js";
  *
  * C1: write/edit tools scoped to ONE designated code root. The root is
  * set only by the operator via the CLI (`code set-root`) and stored in
- * .sam/code.json; the model can use the hands but can never move the
+ * .sam/code.db; the model can use the hands but can never move the
  * root. The root is never the SAM home, never inside it, and never an
  * ancestor of it, so a code write cannot reach SAM's own state (.sam),
  * its keys, or its install. Inside the root the read tools' refusals
@@ -50,28 +51,94 @@ const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex")
 
 interface CodeConfig { version: 1; root: string | null }
 
-function configPath(root: string): string {
+function configPath(root: string): string { return join(resolve(root), ".sam", "code.json"); }
+function configDbPath(root: string): string { return join(resolve(root), ".sam", "code.db"); }
+
+// State convergence (UNIFICATION item 4, thirty-second store):
+// the designated code root is SQLite (.sam/code.db, the
+// dashboard-config / setup singleton pattern), ONE row holding
+// the config's full JSON so the singleton keeps its exact shape.
+// The old code.json was rewritten whole (temp + rename) by every
+// setCodeRoot / clearCodeRoot, while codeRoot readers run in
+// every process that touches the coder hands (every sam_code
+// call, the coding loop, the C6 engine validation, the status
+// builds) - two writers holding the same snapshot could lose
+// the second one's change, and the designation IS the C1 fence:
+// the one record that decides which tree SAM may write in at
+// all. Its read path also created the .sam directory on every
+// call, so even a pure read was a write. Here a save is a
+// single-row UPSERT and connections carry a busy_timeout. First
+// open imports a legacy code.json (validated through the old
+// read shape: a plain object whose root is a string or null)
+// and renames it code.json.migrated - imported, never deleted;
+// a malformed file or a payload failing that shape imports
+// nothing and is left in place (the migrated shape reads it as
+// unset, exactly the old forgiving contract). A pure read on an
+// install with neither file creates nothing, not even the .sam
+// directory. The old configPath's .sam symlink refusal moves
+// into the store open, so it binds writes and migrated reads
+// exactly as before. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup
+// change.
+function parseCodeConfig(data: unknown): CodeConfig | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = data as Partial<CodeConfig>;
+  if (typeof value.root !== "string" && value.root !== null) return null;
+  return { version: 1, root: value.root };
+}
+
+function openCodeStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  return join(dir, "code.json");
+  const db = new Database(configDbPath(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS code_config (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyConfig(db, root);
+  return db;
+}
+
+function migrateLegacyConfig(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
+  const file = configPath(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const record = parseCodeConfig(data);
+  if (!record) return;
+  db.prepare("INSERT OR IGNORE INTO code_config (id, data) VALUES (1, ?)").run(JSON.stringify(record));
+  renameSync(file, file + ".migrated");
+}
+
+function codeStoreExists(root: string): boolean {
+  return existsSync(configDbPath(root)) || existsSync(configPath(root));
+}
+
+/** The store's read door: the recorded designation through the
+ *  store's own shape, or null when none has ever been recorded -
+ *  and a read on an install with no store at all creates
+ *  nothing. */
+export function readCodeStore(root: string): CodeConfig | null {
+  if (!codeStoreExists(root)) return null;
+  const db = openCodeStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return null;
+    try { return parseCodeConfig(JSON.parse(row.data)); } catch { return null; }
+  } finally { db.close(); }
 }
 
 function readConfig(root: string): CodeConfig {
-  const path = configPath(root);
-  if (!existsSync(path)) return { version: 1, root: null };
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as CodeConfig;
-    if (parsed && typeof parsed === "object" && (typeof parsed.root === "string" || parsed.root === null)) return { version: 1, root: parsed.root };
-  } catch { /* corrupt state reads as unset, never fatal */ }
-  return { version: 1, root: null };
+  return readCodeStore(root) ?? { version: 1, root: null };
 }
 
 function writeConfig(root: string, cfg: CodeConfig): void {
-  const path = configPath(root);
-  const temp = path + ".tmp";
-  writeFileSync(temp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-  renameSync(temp, path);
+  const db = openCodeStore(root);
+  try {
+    db.prepare("INSERT INTO code_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(cfg));
+  } finally { db.close(); }
 }
 
 /** The designated code root (absolute, realpath'd), or null when the
