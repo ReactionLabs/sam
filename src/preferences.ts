@@ -70,7 +70,26 @@ export function extractPreferences(text:string):Array<{statement:string;kind:Pre
   const fav=/\bmy\s+favou?rite\s+(.{3,150})/i.exec(t);if(fav)push(fav[1],"like");
   return out.slice(0,3);
 }
+export const LAW_PROMPT_MAX_CHARS=4000;
+// The law block carries a character budget like every other bounded
+// context surface (HARNESS INTELLIGENCE item 2): lawsFor caps the
+// count at 50, but a statement runs to 200 chars, so the count cap
+// alone left the volatile tier able to carry ~10k chars of law with
+// no marker when anything was left out. Now whole laws are included
+// in order until the budget fills, and any law left out is named by
+// count in an omission marker - never dropped silently. The laws
+// themselves stay in force in the store; the marker says plainly
+// that this prompt did not carry all of them.
 export function lawPromptBlock(laws:Preference[]):string{
   if(!laws.length)return "";
-  return " Standing law for this profile, stated or earned from the owner's own preferences. Follow it unless the owner overrides it in this conversation:\n"+laws.map(l=>"- "+l.statement).join("\n");
+  const head=" Standing law for this profile, stated or earned from the owner's own preferences. Follow it unless the owner overrides it in this conversation:";
+  const marker=(n:number)=>"- ("+n+" more standing law"+(n===1?"":"s")+" not carried in this prompt to keep it bounded; the full law list is in status)";
+  const lines=laws.map(l=>"- "+l.statement);
+  const included:string[]=[];let used=head.length;let omitted=0;
+  for(const line of lines){const cost=line.length+1;if(used+cost<=LAW_PROMPT_MAX_CHARS){included.push(line);used+=cost;}else{omitted=lines.length-included.length;break;}}
+  if(omitted>0){
+    while(included.length&&(head.length+included.join("\n").length+1+marker(omitted).length)>LAW_PROMPT_MAX_CHARS){included.pop();omitted++;}
+    return head+"\n"+[...included,marker(omitted)].join("\n");
+  }
+  return head+"\n"+included.join("\n");
 }

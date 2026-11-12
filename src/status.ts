@@ -47,6 +47,7 @@ import { readDeliveryLedger } from "./worthiness.js";
 import { stackWatchStatus } from "./stack-watch.js";
 import { readSelfAudit } from "./self-audit.js";
 import { readPromptAudit } from "./prompt-audit.js";
+import { readContextAudit } from "./context-audit.js";
 import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 // One status payload (fix-list item 3). The dashboard route /api/status
@@ -159,6 +160,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     brief: briefStatus(root),
     selfAudit: readSelfAudit(root),
     promptAudit: readPromptAudit(root),
+    contextAudit: readContextAudit(root),
     selfWork: readSelfWork(root),
     selfWorkFixes: selfWorkFixViews(root),
     setup: readSetupRecord(root),
