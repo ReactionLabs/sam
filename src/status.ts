@@ -50,6 +50,7 @@ import { readPromptAudit } from "./prompt-audit.js";
 import { readContextAudit } from "./context-audit.js";
 import { readLoopAudit } from "./loop-audit.js";
 import { readEvalBattery } from "./eval-battery.js";
+import { vaultStatus } from "./vault.js";
 import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 // One status payload (fix-list item 3). The dashboard route /api/status
@@ -165,6 +166,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     contextAudit: readContextAudit(root),
     loopAudit: readLoopAudit(root),
     evalBattery: readEvalBattery(root),
+    vault: vaultStatus(root),
     selfWork: readSelfWork(root),
     selfWorkFixes: selfWorkFixViews(root),
     setup: readSetupRecord(root),

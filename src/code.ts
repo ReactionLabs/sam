@@ -10,6 +10,7 @@ import { connectors } from "./connectors.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { readFileProviders } from "./providers.js";
 import { recordChange, recordVerification } from "./verification.js";
+import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
 
 /**
  * Coder hands (Phase D item 2, Dip's coder program 2026-11-09: C1 write
@@ -477,6 +478,9 @@ export interface CodeRunResult {
   command: string; description: string; ok: boolean; exitCode: number | null;
   timedOut: boolean; output: string; truncated: boolean; durationMs: number; error?: string;
   url?: string; destination?: string;
+  /** The vault credential's NAME when one was injected into this
+   *  run's child env (git-clone only). The value never appears. */
+  vaultCredential?: string;
 }
 
 export async function runCodeCommand(root: string, actor: string, name: string, opts: { timeoutMs?: number; runner?: CodeRunner; url?: string; destination?: string } = {}): Promise<CodeRunResult> {
@@ -609,6 +613,27 @@ function gitCloneEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** The clone child's environment, with the SAM VAULT injection
+ *  (Dip ruling 2026-11-12): when a vault credential's declared
+ *  hosts cover this URL's hostname, the child - and only the
+ *  child - gains GIT_ASKPASS (a static script holding no secret)
+ *  and the credential's value in one env var. The value never
+ *  enters argv, this result's other fields, or any ledger line;
+ *  credentialName is the NAME, which is all any surface may say. */
+export function cloneCredentialEnv(root: string, canonicalUrl: string): { env: NodeJS.ProcessEnv; credentialName: string | null } {
+  const env = gitCloneEnv();
+  let credentialName: string | null = null;
+  try {
+    const cred = vaultCredentialForUrl(root, canonicalUrl);
+    if (cred) {
+      env.GIT_ASKPASS = vaultAskpassPath(root);
+      env[VAULT_CREDENTIAL_ENV] = cred.value;
+      credentialName = cred.name;
+    }
+  } catch { /* a vault read failure never breaks a public clone */ }
+  return { env, credentialName };
+}
+
 /** Clone one URL into a directory inside the designated code root.
  *  The URL and the relative destination are written to the activity
  *  ledger. The argv is built here. There is no shell and no push. */
@@ -626,7 +651,8 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     throw e;
   }
   const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
-  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, gitCloneEnv()));
+  const injected = cloneCredentialEnv(root, canonical);
+  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, injected.env));
   const start = Date.now();
   let raw: { exitCode: number | null; output: string; timedOut?: boolean };
   try { raw = await runner(spec.file, spec.args, spec.cwd, timeoutMs); }
@@ -637,10 +663,17 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     ok: raw.exitCode === 0 && !raw.timedOut,
     exitCode: raw.exitCode, timedOut: !!raw.timedOut,
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
+    ...(injected.credentialName ? { vaultCredential: injected.credentialName } : {}),
     ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: "git is not installed on this machine - git-clone cannot run until it is installed (installing it is the operator's act)" } : {}),
   };
   const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
   recordActivity(root, actor, "git-clone", boundedLedger("Cloned " + canonical + " into " + destination + ": " + status, destination));
+  if (injected.credentialName) {
+    let host = "";
+    try { host = new URL(canonical).hostname; } catch { /* the URL was canonicalized above */ }
+    recordActivity(root, actor, "vault-use", boundedLedger(
+      "Vault credential " + injected.credentialName + " injected for git-clone of " + host + ": " + status, destination));
+  }
   return result;
 }
 
