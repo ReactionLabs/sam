@@ -3,7 +3,7 @@
 
 use crate::api::Client;
 use crate::app::{App, Effect, Key, Screen};
-use crate::runtime::Runtime;
+use crate::runtime::{self, Runtime};
 use crate::ui;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -105,8 +105,8 @@ fn wait_for(app: &mut App, runtime: &Runtime, cond: &str, dump_dir: &Path) -> Re
 }
 
 fn drain(app: &mut App, runtime: &Runtime) {
-    while let Some(ev) = runtime.try_recv() {
-        let effects = app.apply(ev);
+    while let Some(stamped) = runtime.try_recv() {
+        let effects = runtime::accept(app, stamped);
         for effect in effects {
             runtime.dispatch(&effect);
         }
