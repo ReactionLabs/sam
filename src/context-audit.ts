@@ -10,6 +10,7 @@ import { PreferenceStore, lawPromptBlock, LAW_PROMPT_MAX_CHARS, type Preference 
 import { fitRecallBlock, RECALL_MAX_CHARS, type RecallSection } from "./recall.js";
 import { composeSystemPrompt, standingPromptParts, STANDING_FILE_MAX_CHARS } from "./standing-files.js";
 import { COMPACT_KEEP_MESSAGES, COMPACT_SUMMARY_MAX_CHARS, COMPACT_TRIGGER_CHARS, COMPACT_TRIGGER_MESSAGES } from "./compaction.js";
+import { assembleTurnMessages, duplicateMessageIdCount } from "./prompt-assembly.js";
 
 /**
  * The context audit (HARNESS INTELLIGENCE item 2, Dip 2026-11-11):
@@ -88,6 +89,7 @@ const DIMENSIONS: Array<{ id: string; label: string; checks: CheckSpec[] }> = [
     { id: "law-last", label: "standing law assembles after the standing files (the override layer)", missing: "prompt assembly that places standing law after the stable and context tiers", run: () => { const p = composeSystemPrompt({ base: "BASE", style: "STYLE", stable: "STABLETOKEN", role: "ROLETOKEN", context: "CONTEXTTOKEN", volatile: "", law: "LAWTOKEN" }); return p.indexOf("LAWTOKEN") > p.indexOf("STABLETOKEN") && p.indexOf("LAWTOKEN") > p.indexOf("CONTEXTTOKEN"); } },
     { id: "compaction-bounded", label: "compaction keeps a bounded tail under a bounded summary", missing: "sane compaction bounds (keep < trigger, a capped summary, a char trigger above the summary cap)", run: () => COMPACT_KEEP_MESSAGES >= 1 && COMPACT_KEEP_MESSAGES < COMPACT_TRIGGER_MESSAGES && COMPACT_SUMMARY_MAX_CHARS > 0 && COMPACT_TRIGGER_CHARS > COMPACT_SUMMARY_MAX_CHARS },
     { id: "standing-file-capped", label: "each standing file carries a character cap", missing: "a per-file character cap on standing files", run: () => STANDING_FILE_MAX_CHARS > 0 && STANDING_FILE_MAX_CHARS <= 16000 },
+    { id: "no-duplicate-messages", label: "a stored message enters the prompt at most once (dedupe by message id, history copy wins)", missing: "prompt assembly that dedupes by message id - the current message was appended as the final turn after already riding in the history tail, so every message reached the model twice", run: () => { const kept = [{ id: "m1", role: "user" as const, content: "are u there?", source: "telegram" }, { id: "m1", role: "user" as const, content: "are u there?", source: "telegram" }, { id: "m2", role: "assistant" as const, content: "here" }]; const out = assembleTurnMessages({ kept, currentId: "m1", currentContent: "are u there?", currentSource: "telegram", resuming: false }); return duplicateMessageIdCount(kept) === 1 && out.filter(m => m.content.includes("are u there?")).length === 1 && out.filter(m => m.content.includes("[metadata source=telegram]")).length === 1; } },
   ] },
   { id: "load", label: "Measured per-profile load", checks: [
     { id: "system-load-budget", label: "every profile's fixed system load fits the named budget", missing: "a profile whose fixed context load (core + style + standing + role + law) fits the system budget - trim standing files or law", run: (a) => a.profiles.every(p => p.chars <= SYSTEM_CONTEXT_BUDGET_CHARS) },
@@ -213,7 +215,7 @@ export function contextAuditText(audit: ContextAudit): string {
   if (audit.findings.length) {
     lines.push("", "Findings:");
     for (const f of audit.findings) lines.push("- [" + f.dimension + "/" + f.check + "] " + f.missing);
-  } else lines.push("", "Findings: none - recall, law, standing files, and history all fit their budgets with omissions named.");
+  } else lines.push("", "Findings: none - recall, law, standing files, and history all fit their budgets with omissions named, and no stored message enters the prompt twice.");
   lines.push("", "Profile loads (fixed system chars, budget " + String(audit.budget) + "):");
   for (const p of audit.profiles) lines.push("- " + p.profile + ": " + String(p.chars) + " chars (standing " + String(p.standingChars) + ", law " + String(p.lawChars) + " across " + String(p.lawCount) + ", role " + String(p.roleChars) + ")");
   return lines.join("\n");

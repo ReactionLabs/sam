@@ -18,7 +18,7 @@ import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
 import { buildRecallBlock } from "./recall.js";
-import { withMessageProvenance } from "./message-provenance.js";
+import { assembleTurnMessages } from "./prompt-assembly.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -209,16 +209,21 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // replaced here by their summary; the newest exchanges stay
   // verbatim. Compaction never breaks a turn - on any error the raw
   // tail rides, exactly the pre-compaction behavior.
-  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string;source?:string}>=history.slice(-24).map(m=>({role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content,source:m.source}));
+  let contextSummary:string|null=null;let keptHistory:Array<{id?:string;role:"user"|"assistant";content:string;source?:string}>=history.slice(-24).map(m=>({id:m.id,role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content,source:m.source}));
   try{
     const ctx=buildChatContext(root,{chatId,profile:profileName,visitor,history});
     contextSummary=ctx.summary;keptHistory=ctx.kept;
     const partialText=new Set(history.filter(m=>m.partial===1).map(m=>m.content));
-    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{role:m.role,content:"[partial, incomplete reply]\n"+m.content,source:m.source}:m);
+    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{...m,content:"[partial, incomplete reply]\n"+m.content}:m);
   }catch{/* fail open to the raw tail */}
+  // Prompt assembly dedupes by message id (prompt-assembly.ts):
+  // history already ends with the message stored at this turn's
+  // start, so appending it again doubled every message in the
+  // prompt - the history copy wins and the final user entry is
+  // added only when the kept tail does not already carry it.
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
-    ...keptHistory.map(m=>({role:m.role,content:m.role==="user"?withMessageProvenance(m.content,m.source):m.content})),{role:"user" as const,content:resuming?"Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.":withMessageProvenance(content,source)}];
+    ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming})];
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;

@@ -15,6 +15,7 @@ import { senseItemLines } from "./brief.js";
 import { recordChange, recordVerification, verificationGate } from "./verification.js";
 import { failureSignature, repeatedFailureStubContent } from "./loop-guards.js";
 import { codeWrites, readCodeFile, setCodeRoot, writeCodeFile } from "./code.js";
+import { assembleTurnMessages } from "./prompt-assembly.js";
 import { sensesStatus, SENSES_NOT_INSTALLED } from "./senses.js";
 import { engineStatus } from "./engine.js";
 import { runRedTeamPack } from "./door-guard.js";
@@ -28,7 +29,7 @@ import { runRedTeamPack } from "./door-guard.js";
  * holds. This is the gate that turns 'super super smart' from
  * a wish into a number."
  *
- * - REALISTIC TASKS, REAL MACHINERY: each of the 20 tasks is a
+ * - REALISTIC TASKS, REAL MACHINERY: each task is a
  *   small scenario Dip actually asks for, executed against the
  *   real functions that serve it - the stack watch's counting
  *   code for inquiry questions, the recall builder and note
@@ -54,7 +55,7 @@ import { runRedTeamPack } from "./door-guard.js";
  */
 
 export const EVAL_BATTERY_SCRIPT = "sam-eval-battery";
-export const EVAL_TASK_TOTAL = 21;
+export const EVAL_TASK_TOTAL = 22;
 
 export interface EvalTaskResult { id: string; label: string; passed: boolean }
 export interface EvalCategory { id: string; label: string; passed: number; total: number; tasks: EvalTaskResult[] }
@@ -92,6 +93,7 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
     { id: "note-soft-saves", label: "\"note that the samples shipped Tuesday\" saves immediately, no card", missing: "the soft note tier (helpful facts save at once, owner-revocable)", run: () => scratch(root => { const r = saveNote(root, { actor: "dip", content: "The samples shipped Tuesday." }); return r.status === "saved" && r.tier === "soft"; }) },
     { id: "note-hard-gated", label: "\"from now on always brief me at 8\" routes to the gate instead of saving", missing: "the hard note tier (law-like content routes to the ONE gate)", run: () => scratch(root => { const r = saveNote(root, { actor: "dip", content: "From now on, always brief me at 8 in the morning." }); return r.status === "pending_owner_approval" && r.tier === "hard"; }) },
     { id: "correction-proposed", label: "\"don't call them leads, call them inquiries\" becomes one deduped law proposal", missing: "correction detection routed to the gate as a single deduped law proposal", run: () => scratch(root => { const found = detectCorrection("stop calling them leads"); if (!found) return false; const first = proposeCorrection(root, { actor: "dip", text: "stop calling them leads" }); const second = proposeCorrection(root, { actor: "dip", text: "stop calling them leads" }); return !!first && first.created && !!second && !second.created && second.proposal.id === first.proposal.id; }) },
+    { id: "prompt-no-duplicates", label: "\"are u there?\" over Telegram reaches the model exactly once, not twice", missing: "prompt assembly that dedupes by message id (the current message appended after already riding in history doubled every message in the prompt)", run: () => { const kept = [{ id: "m1", role: "user" as const, content: "earlier question", source: "telegram" }, { id: "m2", role: "assistant" as const, content: "earlier answer" }, { id: "m3", role: "user" as const, content: "are u there?", source: "telegram" }]; const out = assembleTurnMessages({ kept, currentId: "m3", currentContent: "are u there?", currentSource: "telegram", resuming: false }); const missing = assembleTurnMessages({ kept: kept.slice(0, 2), currentId: "m3", currentContent: "are u there?", currentSource: "telegram", resuming: false }); return out.filter(m => m.content.includes("are u there?")).length === 1 && out[out.length - 1].content.includes("are u there?") && missing.filter(m => m.content.includes("are u there?")).length === 1; } },
   ] },
   { id: "gate", label: "Gated proposals", tasks: [
     { id: "proposal-pends", label: "a consequential proposal waits pending on the ONE gate, listed once", missing: "a proposal that pends on the gate and lists exactly once", run: () => scratch(root => { const p = proposeAction(root, { actor: "dip", kind: "say", title: "Send the update", detail: "Send the update to the group." }); const listed = listActions(root).filter(a => a.id === p.id); return p.status === "pending" && listed.length === 1; }) },
@@ -113,7 +115,7 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
   ] },
 ];
 
-/** Run all 20 tasks against the real machinery. Deterministic:
+/** Run all tasks against the real machinery. Deterministic:
  *  the same tree always produces the same battery (apart from
  *  `at` and the previous-run comparison). */
 export function buildEvalBattery(previous: EvalBattery | null): EvalBattery {

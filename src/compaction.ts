@@ -90,7 +90,7 @@ export function foldBoundary(history: Array<{ role: string }>, covered: number, 
 
 export interface ChatContext {
   summary: string | null;
-  kept: Array<{ role: "user" | "assistant"; content: string; source: string }>;
+  kept: Array<{ id: string; role: "user" | "assistant"; content: string; source: string }>;
   covered: number;
   compactedNow: boolean;
   foldedCount: number;
@@ -149,7 +149,7 @@ export function buildChatContext(
   // Safety bound: if no safe boundary existed, never hand the model an
   // unbounded tail - fall back to the pre-compaction window.
   if (kept.length > COMPACT_TRIGGER_MESSAGES + COMPACT_KEEP_MESSAGES) kept = kept.slice(-COMPACT_TRIGGER_MESSAGES);
-  return { summary, kept: kept.map(m => ({ role: m.role, content: m.content, source: m.source ?? "unknown" })), covered, compactedNow, foldedCount };
+  return { summary, kept: kept.map(m => ({ id: m.id, role: m.role, content: m.content, source: m.source ?? "unknown" })), covered, compactedNow, foldedCount };
 }
 
 // CLI/manual door onto the same fold: force a compaction of a stored
