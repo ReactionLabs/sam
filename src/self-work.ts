@@ -2,8 +2,12 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import { listActions, proposeAction } from "./actions.js";
 import { readActivity, recordActivity, type ActivityLine } from "./activity.js";
 import { channels } from "./channels.js";
+import { ChatStore } from "./chats.js";
+import { codeRoot } from "./code.js";
+import { getCodingTask, listCodingTasks, queueCodingTask, type CodingTask } from "./coding.js";
 import { addScheduledJob, heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
 import { readSelfAudit, type SelfAudit } from "./self-audit.js";
 
@@ -45,6 +49,23 @@ import { readSelfAudit, type SelfAudit } from "./self-audit.js";
  *   standing job (default daily at 6am America/New_York, the
  *   operator names the channel - e.g. the SAM Telegram channel
  *   Dip designated for self-work updates - or none).
+ *
+ * Step 2 (the work bridge, below the picker): the recorded spec
+ * is WORKED, not just written. queueSelfWorkFix hands a workable
+ * recorded spec to the C3 coding loop as a task in a dedicated
+ * self-work chat - the heartbeat tick's existing drain works it
+ * in the designated code root (suite + goldfish review, C4
+ * branch + local commits). The refusals are the program's
+ * fences restated as code: an owner-only spec is NEVER queued
+ * (the hard boundary), a blocked spec waits for its clearing
+ * act, one fix at a time, and a spec is worked once. Landing
+ * stays gated: reconcileSelfWorkFixes turns a DONE task's
+ * branch into a git-push proposal on the ONE gate (adopting an
+ * existing pending proposal for the branch, never duplicating
+ * it) - nothing pushes without the owner's approval - and
+ * every terminal task earns exactly ONE digest line, recorded
+ * on the fix record and ledgered once, which the standing
+ * job's diffed delivery carries to the owner.
  */
 
 export const SELF_WORK_JOB_NAME = "self-work";
@@ -284,6 +305,7 @@ function openStore(root: string): Database.Database {
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   db.exec("CREATE TABLE IF NOT EXISTS self_work (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS self_work_fixes (spec_id TEXT PRIMARY KEY, data TEXT NOT NULL)");
   migrateLegacy(db, root);
   return db;
 }
@@ -336,30 +358,236 @@ export function runSelfWork(root: string, now: Date = new Date()): SelfWorkRun {
   return run;
 }
 
+// ---- Step 2: the work bridge (spec -> gated coding task) ----
+
+export interface SelfWorkFix {
+  specId: string;
+  defectKey: string;
+  label: string;
+  count: number;
+  taskId: string;
+  chatId: string;
+  queuedAt: string;
+  /** The ONE gate's git-push proposal created for a done fix's
+   *  branch - the only landing door. Null until reconcile. */
+  proposalId: string | null;
+  /** The per-fix digest line, written exactly once when the
+   *  coding task reaches a terminal state. */
+  digest: string | null;
+  digestedAt: string | null;
+}
+
+export interface SelfWorkFixView extends SelfWorkFix {
+  taskStatus: CodingTask["status"] | null;
+}
+
+function parseFix(data: unknown): SelfWorkFix | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = data as Partial<SelfWorkFix>;
+  if (typeof value.specId !== "string" || !value.specId || typeof value.taskId !== "string" || !value.taskId) return null;
+  return value as SelfWorkFix;
+}
+
+/** Every recorded fix, oldest first - a pure read on an install
+ *  with no store creates nothing. */
+export function listSelfWorkFixes(root: string): SelfWorkFix[] {
+  if (!storeExists(root)) return [];
+  const db = openStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM self_work_fixes ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: SelfWorkFix[] = [];
+    for (const row of rows) {
+      try { const fix = parseFix(JSON.parse(row.data)); if (fix) items.push(fix); } catch { /* a malformed row is skipped, never fatal */ }
+    }
+    return items;
+  } finally { db.close(); }
+}
+
+function saveFix(root: string, fix: SelfWorkFix): void {
+  const db = openStore(root);
+  try {
+    db.prepare("INSERT INTO self_work_fixes (spec_id, data) VALUES (?, ?) ON CONFLICT(spec_id) DO UPDATE SET data = excluded.data").run(fix.specId, JSON.stringify(fix));
+  } finally { db.close(); }
+}
+
+/** Fix records joined with their coding task's live status -
+ *  the read shape status and the run text carry. */
+export function selfWorkFixViews(root: string): SelfWorkFixView[] {
+  return listSelfWorkFixes(root).map(fix => ({ ...fix, taskStatus: getCodingTask(root, fix.taskId)?.status ?? null }));
+}
+
+/** The coding task's spec text: the recorded three-part spec
+ *  verbatim in shape - end goal, done conditions, not-done
+ *  fences, likely files, and the ledgered evidence - plus the
+ *  self-work framing (this is SAM fixing SAM in the workbench
+ *  clone; the landing is a separate gated act). */
+export function selfWorkFixSpecText(spec: SelfWorkSpec): string {
+  const lines = [
+    "Self-work fix (SELF-WORK loop): the top recurring defect in SAM's own activity ledger, specced by the deterministic self-work picker and worked here in the designated code root, which is a clone of SAM's own repository.",
+    "",
+    "Defect: " + spec.label + " (" + spec.defectKey + "), ledgered " + String(spec.count) + " time(s).",
+    "Evidence: " + spec.evidence,
+    ...(spec.files.length ? ["Likely files: " + spec.files.map(f => "src/" + f).join(", ")] : []),
+    "",
+    "End goal: " + spec.endGoal,
+    "",
+    "Done looks like:",
+    ...spec.doneLooksLike.map(d => "- " + d),
+    "",
+    "Not done:",
+    ...spec.notDone.map(d => "- " + d),
+    "",
+    "Boundaries: fix the cause in the code, never the symptom; do not edit the approval gate, the approval policy, or any allowlist code (owner-only, forever); do not widen any budget, fence, or permission to make the failures stop; the work lands only as a local branch the owner can push through the approval gate - never push, never open a pull request.",
+  ];
+  return lines.join("\n");
+}
+
+/** Queue the RECORDED top spec as a coding task (step 2's first
+ *  act). Every refusal names its reason: no recorded run, an
+ *  owner-only spec (the hard boundary - recorded for the owner,
+ *  never SAM's hands), a blocked spec (its clearing act is
+ *  named on the spec), a fix already in flight (one at a time),
+ *  a spec already worked, or no designated code root. On
+ *  success the task waits in the coding queue for the heartbeat
+ *  tick's drain, in a dedicated self-work chat bound to the
+ *  core profile. */
+export function queueSelfWorkFix(root: string, now: Date = new Date()): SelfWorkFix {
+  const run = readSelfWork(root);
+  if (!run?.spec) throw new Error("No self-work spec has been recorded yet - run 'sam self-work run' first; the work bridge takes the recorded spec, never a fresh opinion.");
+  const spec = run.spec;
+  if (spec.ownerOnly) throw new Error("Spec " + spec.id + " (" + spec.defectKey + ") is OWNER-ONLY: its likely files touch SAM's gate, policy, or allowlist machinery, which the SELF-WORK hard boundary keeps out of SAM's own hands forever. It is recorded for the owner and is never queued.");
+  if (spec.blockedBy) throw new Error("Spec " + spec.id + " (" + spec.defectKey + ") is blocked: " + spec.blockedBy);
+  const fixes = listSelfWorkFixes(root);
+  const tasks = listCodingTasks(root);
+  const inFlight = fixes.find(f => { const t = tasks.find(t => t.id === f.taskId); return t !== undefined && (t.status === "queued" || t.status === "running"); });
+  if (inFlight) throw new Error("A self-work fix is already in flight: spec " + inFlight.specId + " (" + inFlight.defectKey + "), coding task " + inFlight.taskId + " - one fix at a time; it closes through the coding loop before another queues.");
+  if (fixes.some(f => f.specId === spec.id)) throw new Error("Spec " + spec.id + " (" + spec.defectKey + ") already has a fix record - a spec is worked once; the next recorded run's spec is the next candidate.");
+  if (!codeRoot(root)) throw new Error("No code root is designated on this install, so a self-work fix has no workbench. The operator designates one with: sam code set-root <path>.");
+  const store = new ChatStore(root);
+  let chatId: string;
+  try { chatId = store.create(("Self-work: " + spec.label).slice(0, 120), "sam").id; } finally { store.close(); }
+  const task = queueCodingTask(root, { actor: "sam", chatId, spec: selfWorkFixSpecText(spec) });
+  const fix: SelfWorkFix = {
+    specId: spec.id, defectKey: spec.defectKey, label: spec.label, count: spec.count,
+    taskId: task.id, chatId, queuedAt: now.toISOString(), proposalId: null, digest: null, digestedAt: null,
+  };
+  saveFix(root, fix);
+  recordActivity(root, "sam", "self-work-fix", "Self-work fix queued: spec " + spec.id + " (" + spec.defectKey + " x" + String(spec.count) + ") -> coding task " + task.id + " in the designated code root; it lands only through the git-push approval gate");
+  return fix;
+}
+
+function fixDigestLine(fix: SelfWorkFix, task: CodingTask, proposalId: string | null): string {
+  const head = "Self-fix " + fix.specId + " (" + fix.defectKey + " x" + String(fix.count) + "): " + task.status;
+  if (task.status === "done") {
+    const files = task.changes.length ? String(task.changes.length) + " file(s) changed" : "no files changed";
+    if (task.git?.mode === "branch" && task.git.branch) {
+      const commits = String(task.git.commits.length) + " local commit(s)";
+      return head + " - " + files + " on " + task.git.branch + ", " + commits + "; " + (proposalId
+        ? "git-push proposal " + proposalId.slice(0, 8) + " waits on the owner's approval - nothing lands without it"
+        : "no push proposal could be recorded - the branch waits for the owner's 'sam coding push' act");
+    }
+    return head + " - " + files + "; the code root is not a git repository, so there is no branch to land";
+  }
+  const reason = (task.result ?? "no reason recorded").replace(/\s+/g, " ").slice(0, 160);
+  return head + " - " + reason;
+}
+
+/** Close the loop on recorded fixes (step 2's second act),
+ *  deterministically: for each fix whose coding task reached a
+ *  terminal state, create the landing proposal when the task
+ *  closed DONE on a clean branch (adopting an existing pending
+ *  git-push proposal for that branch - the gate never holds
+ *  two cards for one push) and write the ONE digest line.
+ *  In-flight tasks are left exactly as they are. Returns the
+ *  updated fix records. */
+export function reconcileSelfWorkFixes(root: string, now: Date = new Date()): SelfWorkFix[] {
+  const out: SelfWorkFix[] = [];
+  for (const fix of listSelfWorkFixes(root)) {
+    if (fix.digest) { out.push(fix); continue; }
+    const task = getCodingTask(root, fix.taskId);
+    if (!task) {
+      fix.digest = "Self-fix " + fix.specId + " (" + fix.defectKey + " x" + String(fix.count) + "): coding task record no longer exists - nothing landed; re-spec from the ledger if the class still recurs";
+      fix.digestedAt = now.toISOString();
+      saveFix(root, fix);
+      recordActivity(root, "sam", "self-work-fix", fix.digest);
+      out.push(fix);
+      continue;
+    }
+    if (task.status === "queued" || task.status === "running") { out.push(fix); continue; }
+    let proposalId = fix.proposalId;
+    let proposalNote = "";
+    if (task.status === "done" && task.git?.mode === "branch" && task.git.branch && task.git.pending.length === 0 && !proposalId) {
+      const branch = task.git.branch;
+      const existing = listActions(root).find(a => {
+        if (a.kind !== "git-push" || a.status !== "pending") return false;
+        try { return (JSON.parse(a.detail) as { branch?: unknown }).branch === branch; } catch { return false; }
+      });
+      if (existing) proposalId = existing.id;
+      else {
+        try {
+          proposalId = proposeAction(root, { actor: task.actor, kind: "git-push", title: "Push " + branch + " (self-work fix " + fix.specId + ": " + fix.defectKey + ")", detail: JSON.stringify({ branch }), chatId: task.chatId }).id;
+        } catch (e) { proposalNote = " (push proposal refused: " + (e instanceof Error ? e.message : "unknown") + ")"; }
+      }
+    }
+    fix.proposalId = proposalId;
+    fix.digest = fixDigestLine(fix, task, proposalId) + proposalNote;
+    fix.digestedAt = now.toISOString();
+    saveFix(root, fix);
+    recordActivity(root, task.actor, "self-work-fix", fix.digest);
+    out.push(fix);
+  }
+  return out;
+}
+
+/** One advance of the standing loop: reconcile finished fixes
+ *  first (old business closes before new work queues), then
+ *  queue the recorded spec when it is workable. A queue refusal
+ *  is data, not a failure - it rides back as the note the run
+ *  text prints. */
+export function advanceSelfWork(root: string, now: Date = new Date()): { queued: SelfWorkFix | null; queueNote: string | null; fixes: SelfWorkFix[] } {
+  reconcileSelfWorkFixes(root, now);
+  let queued: SelfWorkFix | null = null;
+  let queueNote: string | null = null;
+  try { queued = queueSelfWorkFix(root, now); }
+  catch (e) { queueNote = e instanceof Error ? e.message : "queue refused"; }
+  return { queued, queueNote, fixes: reconcileSelfWorkFixes(root, now) };
+}
+
 /** The run as plain text (the sam-self-work script job's
  *  stdout shape): the ranked queue and the three-part spec a
- *  person - or the loop's next step - reads. Stable text when
- *  nothing changed is what Phase C diffing silences on. */
-export function selfWorkText(run: SelfWorkRun): string {
+ *  person - or the loop's next step - reads, plus the step-2
+ *  fix lines when the work bridge has records (a fix in flight,
+ *  a queue refusal worth naming, and the per-fix digests).
+ *  Stable text when nothing changed is what Phase C diffing
+ *  silences on. */
+export function selfWorkText(run: SelfWorkRun, opts: { fixes?: SelfWorkFixView[]; queueNote?: string | null } = {}): string {
   const lines: string[] = ["Self-work - " + run.at];
   lines.push("Capability map: " + (run.auditAt ? "self-audit recorded " + run.auditAt : "none recorded"));
   if (!run.ranked.length) {
     lines.push("", "No ledgered defect classes. Nothing to spec.");
-    return lines.join("\n");
+  } else {
+    lines.push("", "Defect queue (ledgered, ranked):");
+    for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x, last " + d.lastAt + " - " + d.label);
+    const spec = run.spec;
+    if (spec) {
+      lines.push("", "Top spec " + spec.id + " - " + spec.label + " (" + String(spec.count) + "x)");
+      lines.push("Evidence: " + spec.evidence);
+      if (spec.files.length) lines.push("Likely files: " + spec.files.map(f => "src/" + f).join(", "));
+      if (spec.ownerOnly) lines.push("Boundary: OWNER-ONLY - this spec touches the gate/policy/allowlist machinery; it is recorded for the owner and is never queued for SAM's own hands.");
+      if (spec.blockedBy) lines.push("Blocked by: " + spec.blockedBy);
+      lines.push("", "End goal: " + spec.endGoal, "", "Done looks like:");
+      for (const d of spec.doneLooksLike) lines.push("- " + d);
+      lines.push("", "Not done:");
+      for (const d of spec.notDone) lines.push("- " + d);
+    }
   }
-  lines.push("", "Defect queue (ledgered, ranked):");
-  for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x, last " + d.lastAt + " - " + d.label);
-  const spec = run.spec;
-  if (spec) {
-    lines.push("", "Top spec " + spec.id + " - " + spec.label + " (" + String(spec.count) + "x)");
-    lines.push("Evidence: " + spec.evidence);
-    if (spec.files.length) lines.push("Likely files: " + spec.files.map(f => "src/" + f).join(", "));
-    if (spec.ownerOnly) lines.push("Boundary: OWNER-ONLY - this spec touches the gate/policy/allowlist machinery; it is recorded for the owner and is never queued for SAM's own hands.");
-    if (spec.blockedBy) lines.push("Blocked by: " + spec.blockedBy);
-    lines.push("", "End goal: " + spec.endGoal, "", "Done looks like:");
-    for (const d of spec.doneLooksLike) lines.push("- " + d);
-    lines.push("", "Not done:");
-    for (const d of spec.notDone) lines.push("- " + d);
+  const fixes = opts.fixes ?? [];
+  if (fixes.length || opts.queueNote) {
+    lines.push("", "Self-work fixes:");
+    if (opts.queueNote) lines.push("- Not queued: " + opts.queueNote);
+    for (const f of fixes.slice(-3)) {
+      lines.push("- " + (f.digest ?? ("Fix " + f.specId + " (" + f.defectKey + " x" + String(f.count) + "): coding task " + (f.taskStatus ?? "missing") + " in the code workbench")));
+    }
   }
   return lines.join("\n");
 }
@@ -370,8 +598,8 @@ export function selfWorkJob(root: string): HeartbeatJob | null {
   return heartbeatJobs(root).find(j => j.mode === "script" && j.script === SELF_WORK_SCRIPT) ?? null;
 }
 
-export function selfWorkStatus(root: string): { installed: boolean; job: HeartbeatJob | null; script: string; lastRun: SelfWorkRun | null } {
-  return { installed: selfWorkJob(root) !== null, job: selfWorkJob(root), script: SELF_WORK_SCRIPT, lastRun: readSelfWork(root) };
+export function selfWorkStatus(root: string): { installed: boolean; job: HeartbeatJob | null; script: string; lastRun: SelfWorkRun | null; fixes: SelfWorkFixView[] } {
+  return { installed: selfWorkJob(root) !== null, job: selfWorkJob(root), script: SELF_WORK_SCRIPT, lastRun: readSelfWork(root), fixes: selfWorkFixViews(root) };
 }
 
 /** Install the standing self-work job: one wall-clock script

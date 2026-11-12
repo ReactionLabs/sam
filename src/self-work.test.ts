@@ -1,15 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { listActions, proposeAction } from "./actions.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { addChannel } from "./channels.js";
 import { setCodeRoot } from "./code.js";
+import { listCodingTasks, updateCodingTask } from "./coding.js";
 import { runSelfAudit } from "./self-audit.js";
 import {
-  SELF_WORK_PROTECTED_FILES, buildSelfWorkSpec, classifyDefect, installSelfWork,
-  rankDefects, readSelfWork, runSelfWork, selfWorkStatus, selfWorkText,
+  SELF_WORK_PROTECTED_FILES, advanceSelfWork, buildSelfWorkSpec, classifyDefect, installSelfWork,
+  listSelfWorkFixes, queueSelfWorkFix, rankDefects, readSelfWork, reconcileSelfWorkFixes,
+  runSelfWork, selfWorkFixViews, selfWorkStatus, selfWorkText,
 } from "./self-work.js";
 
 // SELF-WORK step 1: the spec picker. The ledger is the defect
@@ -183,4 +187,150 @@ test("self-work: a pure read on an empty install creates nothing, not even the s
     assert.equal(selfWorkStatus(root).lastRun, null);
     assert.equal(existsSync(join(root, ".sam")), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// SELF-WORK step 2: the work bridge. The recorded spec - and
+// only the recorded spec - queues as a coding task; an
+// owner-only spec (the hard boundary) and a blocked spec
+// refuse; one fix flies at a time; a done fix's branch lands
+// only as a git-push proposal on the ONE gate; and every
+// terminal fix earns exactly one digest line.
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", cwd, "-c", "user.name=Test", "-c", "user.email=test@localhost", ...args], { encoding: "utf8" }).trim();
+}
+
+function workableRoot(): { root: string; codeRootDir: string } {
+  const root = fresh();
+  const codeRootDir = fresh();
+  seedLedger(root);
+  writeFileSync(join(codeRootDir, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+  setCodeRoot(root, codeRootDir);
+  runSelfAudit(root, {});
+  runSelfWork(root);
+  return { root, codeRootDir };
+}
+
+test("self-work work: queue refuses with no recorded run, an owner-only spec, and a blocked spec - and queues nothing", () => {
+  const root = fresh();
+  try {
+    assert.throws(() => queueSelfWorkFix(root), /No self-work spec has been recorded/);
+    assert.deepEqual(listSelfWorkFixes(root), []);
+    // Owner-only: the gate-executor class, whose likely file is protected.
+    runSelfAudit(root, {});
+    recordActivity(root, "sam", "failed", "heartbeat: Invalid profile 'Second Shift'");
+    recordActivity(root, "sam", "failed", "heartbeat: Invalid profile 'Second Shift'");
+    runSelfWork(root);
+    assert.throws(() => queueSelfWorkFix(root), /OWNER-ONLY/);
+    assert.deepEqual(listCodingTasks(root), []);
+    assert.deepEqual(listSelfWorkFixes(root), []);
+    // Blocked: a hands spec whose audit reads no code root.
+    const root2 = fresh();
+    try {
+      runSelfAudit(root2, {});
+      recordActivity(root2, "dip", "tool-budget", "Tool budget exhausted: 6/6 calls used");
+      runSelfWork(root2);
+      assert.throws(() => queueSelfWorkFix(root2), /is blocked: .*no designated code root/);
+      assert.deepEqual(listCodingTasks(root2), []);
+    } finally { rmSync(root2, { recursive: true, force: true }); }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("self-work work: a workable spec queues a coding task carrying the three-part spec; one fix flies at a time", () => {
+  const { root, codeRootDir } = workableRoot();
+  try {
+    const fix = queueSelfWorkFix(root);
+    assert.equal(fix.defectKey, "tool-budget");
+    assert.equal(fix.proposalId, null);
+    assert.equal(fix.digest, null);
+    const tasks = listCodingTasks(root);
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].id, fix.taskId);
+    assert.equal(tasks[0].chatId, fix.chatId);
+    assert.equal(tasks[0].status, "queued");
+    assert.match(tasks[0].spec, /End goal:/);
+    assert.match(tasks[0].spec, /Done looks like:/);
+    assert.match(tasks[0].spec, /Not done:/);
+    assert.match(tasks[0].spec, /src\/budgets\.ts/);
+    assert.match(tasks[0].spec, /never push/);
+    const queuedLines = readActivity(root, 100).filter(l => l.kind === "self-work-fix");
+    assert.equal(queuedLines.length, 1);
+    assert.match(queuedLines[0].summary, /fix queued/);
+    // A second queue refuses (already worked / in flight), and an
+    // advance names the in-flight fix instead of queueing another.
+    assert.throws(() => queueSelfWorkFix(root), /already in flight/);
+    const adv = advanceSelfWork(root);
+    assert.equal(adv.queued, null);
+    assert.match(adv.queueNote ?? "", /already in flight/);
+    assert.equal(adv.fixes.length, 1);
+    assert.equal(adv.fixes[0].digest, null);
+    // Reconcile leaves an in-flight task exactly as it is.
+    const after = reconcileSelfWorkFixes(root);
+    assert.equal(after[0].digest, null);
+    assert.deepEqual(listActions(root), []);
+    const views = selfWorkFixViews(root);
+    assert.equal(views[0].taskStatus, "queued");
+    assert.equal(selfWorkStatus(root).fixes.length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRootDir, { recursive: true, force: true }); }
+});
+
+test("self-work work: a done fix on a branch earns its git-push proposal and exactly one digest; an existing proposal is adopted", () => {
+  const root = fresh();
+  const repo = fresh();
+  const origin = fresh();
+  try {
+    seedLedger(root);
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+    git(repo, "add", "package.json");
+    git(repo, "commit", "-qm", "init");
+    execFileSync("git", ["init", "-q", "--bare", origin]);
+    git(repo, "remote", "add", "origin", origin);
+    const branch = "sam/selfwork-fix-07372cda";
+    git(repo, "branch", branch);
+    setCodeRoot(root, repo);
+    runSelfAudit(root, {});
+    runSelfWork(root);
+    const fix = queueSelfWorkFix(root);
+    // The owner (or a manual coding push) already proposed this
+    // branch: reconcile must adopt that card, never duplicate it.
+    const manual = proposeAction(root, { actor: "sam", kind: "git-push", title: "Push " + branch, detail: JSON.stringify({ branch }), chatId: fix.chatId });
+    const sha = git(repo, "rev-parse", "main");
+    updateCodingTask(root, fix.taskId, {
+      status: "done", verification: "verified",
+      changes: [{ path: "src/budgets.ts", created: false, addedLines: 4, removedLines: 1 }],
+      git: { mode: "branch", branch, baseSha: sha, commits: [{ sha, iteration: 1, paths: ["src/budgets.ts"], at: new Date().toISOString() }], pending: [], error: null },
+    });
+    const fixes = reconcileSelfWorkFixes(root);
+    assert.equal(fixes.length, 1);
+    assert.equal(fixes[0].proposalId, manual.id);
+    const proposals = listActions(root).filter(a => a.kind === "git-push");
+    assert.equal(proposals.length, 1);
+    assert.ok(fixes[0].digest);
+    assert.match(fixes[0].digest, /Self-fix .* \(tool-budget x3\): done - 1 file\(s\) changed on sam\/selfwork-fix-07372cda, 1 local commit\(s\); git-push proposal/);
+    assert.match(fixes[0].digest, /waits on the owner's approval - nothing lands without it/);
+    const digestLines = readActivity(root, 100).filter(l => l.kind === "self-work-fix" && /Self-fix/.test(l.summary));
+    assert.equal(digestLines.length, 1);
+    // A second reconcile changes nothing: same digest, still one proposal.
+    const again = reconcileSelfWorkFixes(root);
+    assert.equal(again[0].digest, fixes[0].digest);
+    assert.equal(listActions(root).filter(a => a.kind === "git-push").length, 1);
+    // The run text and the status carry the digest line.
+    const run = readSelfWork(root);
+    assert.ok(run);
+    assert.match(selfWorkText(run, { fixes: selfWorkFixViews(root) }), /Self-fix .*tool-budget/);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); rmSync(origin, { recursive: true, force: true }); }
+});
+
+test("self-work work: a blocked fix earns a digest naming the block and no proposal is created", () => {
+  const { root, codeRootDir } = workableRoot();
+  try {
+    const fix = queueSelfWorkFix(root);
+    updateCodingTask(root, fix.taskId, { status: "blocked", result: "Iterations exhausted with the work unverified - the changes are in the code root but are NOT verified." });
+    const fixes = reconcileSelfWorkFixes(root);
+    assert.equal(fixes[0].proposalId, null);
+    assert.ok(fixes[0].digest);
+    assert.match(fixes[0].digest, /: blocked - Iterations exhausted/);
+    assert.deepEqual(listActions(root), []);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRootDir, { recursive: true, force: true }); }
 });
