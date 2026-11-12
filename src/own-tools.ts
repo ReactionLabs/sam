@@ -9,6 +9,8 @@ import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
+import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
+import { verificationStatus } from "./verification.js";
 import { patchNote, saveNote } from "./notes.js";
 import { proposeAuthoredSkill } from "./skill-author.js";
 import { ChatStore } from "./chats.js";
@@ -442,6 +444,25 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  let callsUsed=0;
  const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
  let loaderOnlyStreak=0;let loaderLoop=false;
+ // Loop guards (HARNESS INTELLIGENCE item 3): the last failed
+ // call's signature (a repeated identical call is stubbed, not
+ // re-executed, until a success clears the record), whether
+ // this turn changed code through sam_code, and the finish
+ // self-check that closes a code-changing turn through the
+ // verification ledger instead of the model's own claim.
+ let lastFailure:{sig:string;error:string}|null=null;
+ let codeChanged=false;
+ const sigById=new Map<string,string>();
+ const finish=(answer:string):string=>{
+  if(!codeChanged)return answer;
+  try{
+   const status=verificationStatus(root);
+   const note=codeVerificationNote(status);
+   if(!note)return answer;
+   recordActivity(root,actor,"loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+")");
+   return answer+"\n\n"+note;
+  }catch{return answer;}
+ };
  for(let round=0;round<budget.rounds&&!exhausted&&!loaderLoop;round++){
   const part=partitionTools(allDefs,currentLoaded());
   const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
@@ -462,7 +483,7 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
     recordActivity(root, actor, "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
     turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
-  if(!turn.calls.length)return turn.content??"No response.";
+  if(!turn.calls.length)return finish(turn.content??"No response.");
   // Failover may only happen before any tool runs. The moment this
   // round has tool calls, later provider errors stay on this route.
   if(guard)guard.toolsStarted=true;
@@ -480,6 +501,11 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
    // transcript valid, and let the tool-free synthesis answer from partial
    // results instead of discarding the whole turn.
    if(allow&&call.name!==LOADER_TOOL_NAME&&!allow.has(call.name)){outputs.set(call.id,{error:"Tool "+call.name+" is not on this sub-agent's allowlist"});continue;}
+   // Repeated-failure guard: an identical call that already
+   // failed in this turn (with no success since) is stubbed -
+   // not executed, no budget spent - and the stub carries the
+   // first error as the repair instruction.
+   if(call.name!==LOADER_TOOL_NAME&&lastFailure&&failureSignature(call.name,call.args)===lastFailure.sig){outputs.set(call.id,repeatedFailureStubContent(call.name,lastFailure.error));continue;}
    if(callsUsed>=budget.maxCalls){exhausted=true;skipped.push(call.name);outputs.set(call.id,budgetStubContent(executed,budget.maxCalls));continue;}
    // A deferred tool called before loading is stubbed, not executed, and
    // does not spend budget: the stub names the loader, the model loads,
@@ -494,11 +520,27 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
     else for(const n of names){if(!valid.has(n))unknown.push(n);else if(!ephemeralLoaded.has(n)){ephemeralLoaded.add(n);loadedNow.push(n);}}
     outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
    }else{
+    sigById.set(call.id,failureSignature(call.name,call.args));
     pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,actor,call.name,call.args??{},runTurn,chatId,userMessageId);}catch(e){return {error:e instanceof Error?e.message:String(e)};}}});
    }
   }
   const settled=await Promise.all(pending.map(p=>p.run()));
   pending.forEach((p,i)=>outputs.set(p.id,settled[i]));
+  // Loop-guard bookkeeping, in call order: an executed call's
+  // error becomes the repeat record; any executed success
+  // clears it (a verify re-run after a fix is never blocked);
+  // a successful sam_code write/edit marks the turn as
+  // code-changing for the finish self-check.
+  for(const call of turn.calls){
+   const sig=sigById.get(call.id);
+   if(!sig)continue;
+   const err=toolResultError(outputs.get(call.id));
+   if(err)lastFailure={sig,error:err};
+   else{
+    lastFailure=null;
+    if(call.name==="sam_code"&&(call.args?.action==="write"||call.args?.action==="edit"))codeChanged=true;
+   }
+  }
   for(const call of turn.calls){
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
@@ -515,11 +557,11 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  }
  if(exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
- if(final.content)return final.content;
- if(loaderLoop)return loaderLoopFallbackAnswer(executed);
+ if(final.content)return finish(final.content);
+ if(loaderLoop)return finish(loaderLoopFallbackAnswer(executed));
  if(final.calls.length||exhausted){
   if(!exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
-  return budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps");
+  return finish(budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps"));
  }
- return "Results received but no summary was produced.";
+ return finish("Results received but no summary was produced.");
 }

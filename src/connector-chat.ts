@@ -4,6 +4,8 @@ import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt } from "./own-t
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
+import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
+import { verificationStatus } from "./verification.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
 // purpose: short strings and a small limit, nothing structured, nothing writable.
@@ -52,6 +54,23 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
  let callsUsed=0;
  const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
  let loaderOnlyStreak=0;let loaderLoop=false;
+ // Loop guards (HARNESS INTELLIGENCE item 3), the same shapes
+ // the own-tools loop rides: the last failed call's signature,
+ // whether this turn changed code through sam_code, and the
+ // finish self-check through the verification ledger.
+ let lastFailure:{sig:string;error:string}|null=null;
+ let codeChanged=false;
+ const sigById=new Map<string,string>();
+ const finish=(answer:string):string=>{
+  if(!codeChanged)return answer;
+  try{
+   const status=verificationStatus(root);
+   const note=codeVerificationNote(status);
+   if(!note)return answer;
+   recordActivity(root,own?.actor??"sam","loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+")");
+   return answer+"\n\n"+note;
+  }catch{return answer;}
+ };
  for(let round=0;round<budget.rounds&&!exhausted&&!loaderLoop;round++){
   const part=partitionTools(allDefs,currentLoaded());
   const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
@@ -72,7 +91,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     recordActivity(root, own?.actor ?? "sam", "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
     turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
-  if(!turn.calls.length)return turn.content??"No response.";
+  if(!turn.calls.length)return finish(turn.content??"No response.");
   // Failover may only happen before any tool runs. Tool calls commit
   // this route; a later provider error must not replay them elsewhere.
   if(guard)guard.toolsStarted=true;
@@ -91,6 +110,11 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
    // A deferred tool called before loading is stubbed, not executed, and
    // does not spend budget: the stub names the loader.
    if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
+   // Repeated-failure guard: an identical call that already
+   // failed in this turn (with no success since) is stubbed -
+   // not executed, no budget spent - with the first error as
+   // the repair instruction.
+   if(call.name!==LOADER_TOOL_NAME&&lastFailure&&failureSignature(call.name,call.args)===lastFailure.sig){outputs.set(call.id,repeatedFailureStubContent(call.name,lastFailure.error));continue;}
    callsUsed++;executed.push(call.name);roundCalls.push(call.name);
    if(call.name===LOADER_TOOL_NAME){
     const names=Array.isArray(call.args?.names)?call.args.names.filter((n):n is string=>typeof n==="string"):[];
@@ -100,6 +124,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     else for(const n of names){if(!valid.has(n))unknown.push(n);else if(!ephemeralLoaded.has(n)){ephemeralLoaded.add(n);loadedNow.push(n);}}
     outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
    }else if(own&&call.name.startsWith("sam_")){
+    sigById.set(call.id,failureSignature(call.name,call.args));
     pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId,own.userMessageId);}catch(e){return {error:e instanceof Error?e.message:String(e)};}}});
    }else{
     const name=toolMap.get(call.name);
@@ -107,12 +132,26 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     else{
      const args=safeArgs(call.args);
      if(!args)outputs.set(call.id,{error:"Tool arguments not supported"});
-     else pending.push({id:call.id,run:async()=>{try{return await readConnectorTool(connector,name,args);}catch{return {error:"MCP tool failed"};}}});
+     else { sigById.set(call.id,failureSignature(call.name,call.args)); pending.push({id:call.id,run:async()=>{try{return await readConnectorTool(connector,name,args);}catch{return {error:"MCP tool failed"};}}}); }
     }
    }
   }
   const settled=await Promise.all(pending.map(p=>p.run()));
   pending.forEach((p,i)=>outputs.set(p.id,settled[i]));
+  // Loop-guard bookkeeping, in call order (the own-tools
+  // loop's contract): an executed error becomes the repeat
+  // record, any executed success clears it, and a successful
+  // sam_code write/edit marks the turn code-changing.
+  for(const call of turn.calls){
+   const sig=sigById.get(call.id);
+   if(!sig)continue;
+   const err=toolResultError(outputs.get(call.id));
+   if(err)lastFailure={sig,error:err};
+   else{
+    lastFailure=null;
+    if(call.name==="sam_code"&&(call.args?.action==="write"||call.args?.action==="edit"))codeChanged=true;
+   }
+  }
   for(const call of turn.calls){
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
@@ -130,13 +169,13 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
  // Never send a tool request in the final synthesis step.
  if(exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
- if(final.content)return final.content;
- if(loaderLoop)return loaderLoopFallbackAnswer(executed);
+ if(final.content)return finish(final.content);
+ if(loaderLoop)return finish(loaderLoopFallbackAnswer(executed));
  // The synthesis step is tool-free; a model that still asks for tools gets a
  // plain partial answer, not a dead turn.
  if(final.calls.length||exhausted){
   if(!exhausted)recordActivity(root,own?.actor??"sam","tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
-  return budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps");
+  return finish(budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps"));
  }
- return "MCP results received but no summary was produced.";
+ return finish("MCP results received but no summary was produced.");
 }
