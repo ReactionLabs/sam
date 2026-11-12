@@ -5,6 +5,10 @@ edition = "2021"
 description = "Terminal client for a running SAM. Holds no agent state of its own."
 publish = false
 
+[lib]
+name = "sam_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sam-cli"
 path = "src/main.rs"

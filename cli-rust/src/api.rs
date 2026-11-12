@@ -363,13 +363,6 @@ fn parse_chat(value: &Value) -> Result<ChatDetail, String> {
     })
 }
 
-/// Outgoing chat body. `source` is the rust-cli provenance stamp.
-/// The dashboard stores it when the route knows the field (item 4) and
-/// ignores it on older servers. GET then returns `source` per message.
-pub fn message_body(content: &str) -> Value {
-    json!({ "content": content, "source": "rust-cli" })
-}
-
 /// Known client stamps. Anything else, including a missing field and
 /// "unknown", draws nothing.
 pub fn message_source(value: Option<&Value>) -> Option<String> {

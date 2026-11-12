@@ -1,29 +1,3 @@
-mod api;
-mod app;
-mod attach;
-mod boards;
-mod clipboard;
-mod config;
-mod headless;
-mod image_proto;
-mod markdown;
-mod palette;
-mod runtime;
-mod scroll;
-mod search;
-mod status_view;
-mod statusbar;
-mod surface;
-mod theme;
-mod thinking;
-mod ui;
-mod wordmark;
-
-use crate::api::{resolve_endpoint, Client};
-use crate::app::{App, Effect, Key, Pointer};
-use crate::config::load_session;
-use crate::image_proto::detect_image_protocol;
-use crate::runtime::Runtime;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -34,6 +8,14 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use sam_cli::api::{resolve_endpoint, Client};
+use sam_cli::app::{App, Effect, Key, Pointer};
+use sam_cli::config::load_session;
+use sam_cli::headless;
+use sam_cli::image_proto::detect_image_protocol;
+use sam_cli::runtime::{accept as runtime_accept, Runtime};
+use sam_cli::theme;
+use sam_cli::ui;
 use std::env;
 use std::io::{self, stdout, Write};
 use std::path::PathBuf;
@@ -152,7 +134,7 @@ fn run_tui(mut app: App, client: Client) -> Result<(), String> {
             }
         }
         while let Some(stamped) = runtime.try_recv() {
-            let effects = runtime::accept(&mut app, stamped);
+            let effects = runtime_accept(&mut app, stamped);
             if dispatch_keys(&runtime, effects) {
                 return Ok(());
             }

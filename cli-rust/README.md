@@ -79,3 +79,11 @@ cli-rust/smoke/smoke.sh
 
 The script starts a loopback fake model, starts SAM against it, and drives
 `sam-cli` through splash, a chat round trip, an approval, status, and config.
+
+## Hermetic tests
+
+`cargo test` (from this directory) runs the client against
+`sam_cli::harness::FakeDashboard`, a loopback dashboard with no model and
+no credentials. `render_screen` / `assert_screen` draw a view into a
+ratatui `TestBackend` so a test can assert the buffer. The HTTP contract,
+and the fields a live SAM does not send yet, are in `API.md`.
