@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
-import { execFile } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync } from "node:child_process";
+import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { recordActivity } from "./activity.js";
+import { channels } from "./channels.js";
+import { connectors } from "./connectors.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
+import { readFileProviders } from "./providers.js";
 import { recordChange, recordVerification } from "./verification.js";
 
 /**
@@ -38,6 +41,20 @@ import { recordChange, recordVerification } from "./verification.js";
  * agent-reach may not be installed on a machine (it is not on the box
  * today): its entries report not-installed cleanly instead of failing
  * obscurely.
+ *
+ * Hands v2 (SAM HANDS v2: fetch, Python, sandbox): git-clone is one
+ * more allowlisted name. It clones a URL into a directory inside the
+ * designated code root, records the URL and destination on the
+ * activity ledger, and never shells out or pushes. A Python run names
+ * a script file that already exists in the code root or in a sandbox;
+ * the argv is the interpreter plus that file, the run is ledgered
+ * with the script's content hash, and the process environment is
+ * scrubbed of connector tokens and model keys unless an explicit
+ * pass-through list names variables to keep. Sandboxes live under a
+ * SAM-managed directory, one venv each. Creating, listing, and
+ * destroying them, and pip installs ledgered by package and version,
+ * are dependency and filesystem isolation. SAM deletes only a sandbox
+ * it created.
  */
 
 const MAX_FILE_BYTES = 32_000;
@@ -341,13 +358,17 @@ const AGENT_REACH_COMMANDS: Record<string, { args: string[]; description: string
 };
 
 export function codeCommandNames(): string[] {
-  return [...NPM_SCRIPT_COMMANDS, ...Object.keys(GIT_COMMANDS), ...Object.keys(AGENT_REACH_COMMANDS)];
+  return [...NPM_SCRIPT_COMMANDS, ...Object.keys(GIT_COMMANDS), "git-clone", ...Object.keys(AGENT_REACH_COMMANDS)];
 }
 
 /** Build the fixed argv for one allowlisted command NAME. The caller
  *  (model or CLI) supplies only the name; a missing package script or a
  *  non-git root refuses here, naming what IS available. */
-export function codeCommandSpec(root: string, name: string): CodeCommandSpec {
+export function codeCommandSpec(root: string, name: string, params?: { url?: string; destination?: string }): CodeCommandSpec {
+  if (name === "git-clone") {
+    if (!params?.url || !params.destination) throw new Error("git-clone needs a url and a destination inside the code root. The argv is built from those two fields (no shell, no push).");
+    return gitCloneSpec(root, params.url, params.destination);
+  }
   const base = requireCodeRoot(root);
   if ((NPM_SCRIPT_COMMANDS as readonly string[]).includes(name)) {
     const scripts = packageScripts(base);
@@ -366,28 +387,34 @@ export function codeCommandSpec(root: string, name: string): CodeCommandSpec {
 
 export type CodeRunner = (file: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ exitCode: number | null; output: string; timedOut?: boolean }>;
 
-export const defaultCodeRunner: CodeRunner = (file, args, cwd, timeoutMs) => new Promise(done => {
-  let settled = false;
-  const child = execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 256_000, windowsHide: true }, (error, stdout, stderr) => {
-    if (settled) return; settled = true;
-    const combined = (stdout ?? "") + (stderr ?? "");
-    if (error && (error as NodeJS.ErrnoException).code === "ENOENT") { done({ exitCode: null, output: combined }); return; }
-    const timedOut = !!error && (error as unknown as { killed?: boolean }).killed === true && (error as unknown as { signal?: string }).signal === "SIGTERM";
-    done({ exitCode: error ? (typeof (error as unknown as { code?: unknown }).code === "number" ? (error as unknown as { code: number }).code : null) : 0, output: combined, timedOut });
+function execFileCapped(file: string, args: string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<{ exitCode: number | null; output: string; timedOut?: boolean }> {
+  return new Promise(done => {
+    let settled = false;
+    const child = execFile(file, args, { cwd, timeout: timeoutMs, maxBuffer: 256_000, windowsHide: true, ...(env ? { env } : {}) }, (error, stdout, stderr) => {
+      if (settled) return; settled = true;
+      const combined = (stdout ?? "") + (stderr ?? "");
+      if (error && (error as NodeJS.ErrnoException).code === "ENOENT") { done({ exitCode: null, output: combined }); return; }
+      const timedOut = !!error && (error as unknown as { killed?: boolean }).killed === true && (error as unknown as { signal?: string }).signal === "SIGTERM";
+      done({ exitCode: error ? (typeof (error as unknown as { code?: unknown }).code === "number" ? (error as unknown as { code: number }).code : null) : 0, output: combined, timedOut });
+    });
+    child.on("error", err => {
+      if (settled) return; settled = true;
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") done({ exitCode: null, output: "" });
+      else done({ exitCode: null, output: String(err) });
+    });
   });
-  child.on("error", err => {
-    if (settled) return; settled = true;
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") done({ exitCode: null, output: "" });
-    else done({ exitCode: null, output: String(err) });
-  });
-});
+}
+
+export const defaultCodeRunner: CodeRunner = (file, args, cwd, timeoutMs) => execFileCapped(file, args, cwd, timeoutMs);
 
 export interface CodeRunResult {
   command: string; description: string; ok: boolean; exitCode: number | null;
   timedOut: boolean; output: string; truncated: boolean; durationMs: number; error?: string;
+  url?: string; destination?: string;
 }
 
-export async function runCodeCommand(root: string, actor: string, name: string, opts: { timeoutMs?: number; runner?: CodeRunner } = {}): Promise<CodeRunResult> {
+export async function runCodeCommand(root: string, actor: string, name: string, opts: { timeoutMs?: number; runner?: CodeRunner; url?: string; destination?: string } = {}): Promise<CodeRunResult> {
+  if (name === "git-clone") return cloneIntoCodeRoot(root, actor, opts.url ?? "", opts.destination ?? "", opts);
   const spec = codeCommandSpec(root, name);
   const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
   const runner = opts.runner ?? defaultCodeRunner;
@@ -417,5 +444,418 @@ export async function runCodeCommand(root: string, actor: string, name: string, 
   if (name === "build" || name === "test") {
     try { recordVerification(root, { kind: name, passed: result.ok, runId: randomUUID() }); } catch { /* the ledger never breaks a run */ }
   }
+  return result;
+}
+
+// ---- Hands v2: git-clone, Python, sandboxes -------------------------
+// git-clone is an allowlisted name with two structured fields. Python
+// runs one script file. Sandboxes are per-project venvs under SAM's
+// own sandboxes directory: dependency and filesystem isolation.
+
+function oneLine(value: string): string {
+  return String(value ?? "").replace(/[\r\n\0]/g, " ").slice(0, 180);
+}
+
+const CLONE_PROTOCOLS = new Set(["http:", "https:", "file:", "ssh:", "git:"]);
+
+/** Canonicalize a clone URL. A password, query, fragment, or non-URL
+ *  is refused so the value that reaches git and the ledger is the
+ *  URL itself, not an option and not an embedded credential. */
+export function parseCloneUrl(raw: string): string {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 2000 || /[\s\0]/.test(raw) || raw.startsWith("-"))
+    throw new Error("Clone URL must be an http, https, file, ssh, or git URL");
+  let url: URL;
+  try { url = new URL(raw); } catch { throw new Error("Clone URL must be an http, https, file, ssh, or git URL"); }
+  if (!CLONE_PROTOCOLS.has(url.protocol)) throw new Error("Clone URL must use http, https, file, ssh, or git");
+  if (url.password || url.hash || url.search) throw new Error("Clone URL must not embed a password, query, or fragment");
+  return url.toString();
+}
+
+function resolveCloneDestination(base: string, rel: string): string {
+  if (typeof rel !== "string" || rel.length === 0 || rel.length > 240) throw new Error("Clone destination must be a relative path inside the code root");
+  const parts = checkedParts(rel);
+  let current = base;
+  for (let i = 0; i < parts.length; i++) {
+    current = join(current, parts[i]);
+    let st;
+    try { st = lstatSync(current); } catch { continue; }
+    if (st.isSymbolicLink()) throw new Error("Symlink access denied: " + rel);
+    if (i === parts.length - 1) throw new Error("Clone destination already exists: " + rel);
+    if (!st.isDirectory()) throw new Error("Clone destination parent is not a directory: " + rel);
+  }
+  const dest = resolve(base, ...parts);
+  const back = relative(base, dest);
+  if (back === "" || back === ".." || back.startsWith(".." + sep) || isAbsolute(back)) throw new Error("Path outside the code root");
+  let ancestor = dirname(dest);
+  const baseReal = realpathSync(base);
+  while (!existsSync(ancestor)) {
+    const parent = dirname(ancestor);
+    if (parent === ancestor) throw new Error("Path outside the code root");
+    ancestor = parent;
+  }
+  const realAncestor = realpathSync(ancestor);
+  if (realAncestor !== baseReal && !realAncestor.startsWith(baseReal + sep)) throw new Error("Path outside the code root");
+  return dest;
+}
+
+function buildCloneSpec(root: string, canonicalUrl: string, destination: string): CodeCommandSpec {
+  const base = requireCodeRoot(root);
+  const dest = resolveCloneDestination(base, destination);
+  return {
+    file: "git",
+    args: ["clone", "--no-recurse-submodules", "--", canonicalUrl, dest],
+    cwd: base,
+    description: "Clone " + canonicalUrl + " into " + destination + " inside the code root (no shell, no push)",
+  };
+}
+
+/** The argv git-clone will run. Previewing it does not create the
+ *  destination or invoke git. */
+export function gitCloneSpec(root: string, url: string, destination: string): CodeCommandSpec {
+  return buildCloneSpec(root, parseCloneUrl(url), destination);
+}
+
+function gitCloneEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) if (typeof value === "string") env[key] = value;
+  env.GIT_TERMINAL_PROMPT = "0";
+  return env;
+}
+
+/** Clone one URL into a directory inside the designated code root.
+ *  The URL and the relative destination are written to the activity
+ *  ledger. The argv is built here. There is no shell and no push. */
+export async function cloneIntoCodeRoot(root: string, actor: string, url: string, destination: string, opts: { timeoutMs?: number; runner?: CodeRunner } = {}): Promise<CodeRunResult> {
+  let canonical: string | undefined;
+  let spec: CodeCommandSpec;
+  try {
+    canonical = parseCloneUrl(url);
+    spec = buildCloneSpec(root, canonical, destination);
+    mkdirSync(dirname(spec.args[spec.args.length - 1]), { recursive: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const shown = canonical ? canonical + " into " + oneLine(destination) : "an invalid URL";
+    recordActivity(root, actor, "git-clone", "Refused clone of " + shown + ": " + msg);
+    throw e;
+  }
+  const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
+  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, gitCloneEnv()));
+  const start = Date.now();
+  let raw: { exitCode: number | null; output: string; timedOut?: boolean };
+  try { raw = await runner(spec.file, spec.args, spec.cwd, timeoutMs); }
+  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
+  const result: CodeRunResult = {
+    command: "git-clone", description: spec.description, url: canonical, destination,
+    ok: raw.exitCode === 0 && !raw.timedOut,
+    exitCode: raw.exitCode, timedOut: !!raw.timedOut,
+    output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
+    ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: "git is not installed on this machine - git-clone cannot run until it is installed (installing it is the operator's act)" } : {}),
+  };
+  recordActivity(root, actor, "git-clone", "Cloned " + canonical + " into " + destination + ": " + (result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
+  return result;
+}
+
+// ---- Python runner ---------------------------------------------------
+
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+// Connector tokens and model keys, plus PYTHONSTARTUP (it would run a
+// second file ahead of the script the argv names).
+const SCRUBBED_ENV = /(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|KEY)(?:_|$)|_API_KEY$|^SAM_MCP_TOKEN_|^SAM_CHANNEL_|^PYTHONSTARTUP$/i;
+
+export function python3Available(): { ok: true; bin: "python3" } | { ok: false; reason: string } {
+  try {
+    execFileSync("python3", ["-c", "import sys; raise SystemExit(0 if sys.version_info[0] >= 3 else 1)"], { stdio: "ignore" });
+    return { ok: true, bin: "python3" };
+  } catch {
+    return { ok: false, reason: "python3 is not available on this machine" };
+  }
+}
+
+export function venvModuleAvailable(): { ok: true } | { ok: false; reason: string } {
+  const py = python3Available();
+  if (!py.ok) return { ok: false, reason: py.reason };
+  try {
+    // `import venv` succeeds on Debian even when ensurepip is missing,
+    // and `python3 -m venv` then fails. The venv is usable for pip
+    // installs only when ensurepip is present.
+    execFileSync("python3", ["-c", "import venv, ensurepip"], { stdio: "ignore" });
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: "python3 is installed but venv/ensurepip is not available, so a sandbox venv cannot be created" };
+  }
+}
+
+/** Env names the install has registered as a connector token, a
+ *  channel token, or a provider model key. The values are never read. */
+export function registeredSecretEnvNames(root: string): string[] {
+  const names = new Set<string>();
+  try { for (const c of connectors(root)) if (c && typeof c.tokenEnv === "string" && c.tokenEnv) names.add(c.tokenEnv); } catch { /* pattern scrub still applies */ }
+  try { for (const c of channels(root)) if (c && typeof c.tokenEnv === "string" && c.tokenEnv) names.add(c.tokenEnv); } catch { /* pattern scrub still applies */ }
+  try { for (const p of readFileProviders(root)) if (p && typeof p.keyEnv === "string" && p.keyEnv) names.add(p.keyEnv); } catch { /* pattern scrub still applies */ }
+  return [...names];
+}
+
+/** Copy an environment with connector tokens and model keys removed.
+ *  passThrough is a list of variable NAMES to keep anyway. */
+export function buildPythonEnv(root: string, env: NodeJS.ProcessEnv, passThrough: readonly string[]): { env: NodeJS.ProcessEnv; passed: string[] } {
+  if (passThrough.length > 16) throw new Error("Pass-through list is limited to 16 environment variable names");
+  const allow = new Set<string>();
+  for (const name of passThrough) {
+    if (typeof name !== "string" || !ENV_NAME.test(name)) throw new Error("Pass-through entries are environment variable names, not values");
+    allow.add(name);
+  }
+  let extra = new Set<string>();
+  try { extra = new Set(registeredSecretEnvNames(root)); } catch { extra = new Set(); }
+  const out: NodeJS.ProcessEnv = {};
+  const passed: string[] = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== "string" || !ENV_NAME.test(key)) continue;
+    const secret = SCRUBBED_ENV.test(key) || extra.has(key);
+    if (secret && !allow.has(key)) continue;
+    if (secret && allow.has(key)) passed.push(key);
+    out[key] = value;
+  }
+  passed.sort();
+  return { env: out, passed };
+}
+
+export type PythonRunner = (file: string, args: string[], cwd: string, timeoutMs: number, env: NodeJS.ProcessEnv) => Promise<{ exitCode: number | null; output: string; timedOut?: boolean }>;
+
+export interface PythonRunResult {
+  path: string; sandbox: string | null; sha256: string; interpreter: string; passThrough: string[];
+  ok: boolean; exitCode: number | null; timedOut: boolean; output: string; truncated: boolean; durationMs: number;
+  error?: string;
+}
+
+function locatePythonScript(root: string, rel: string, sandbox: string | null): { abs: string; cwd: string; interpreter: string } {
+  if (sandbox) {
+    const owned = requireOwnSandbox(root, sandbox);
+    if (!existsSync(owned.work)) mkdirSync(owned.work, { recursive: true, mode: 0o700 });
+    const abs = targetPath(owned.work, rel, false);
+    const st = lstatSync(abs);
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("Python script is not a file: " + rel);
+    if (st.size > MAX_FILE_BYTES) throw new Error("Python script exceeds " + MAX_FILE_BYTES + " bytes: " + rel);
+    return { abs, cwd: owned.work, interpreter: venvPythonPath(owned.dir) };
+  }
+  const base = requireCodeRoot(root);
+  const abs = targetPath(base, rel, false);
+  const st = lstatSync(abs);
+  if (st.isSymbolicLink() || !st.isFile()) throw new Error("Python script is not a file: " + rel);
+  if (st.size > MAX_FILE_BYTES) throw new Error("Python script exceeds " + MAX_FILE_BYTES + " bytes: " + rel);
+  return { abs, cwd: base, interpreter: "python3" };
+}
+
+/** Run one Python script that already exists in the code root or in a
+ *  sandbox. argv is the interpreter plus that file. The activity line
+ *  carries the script's content hash and the pass-through names. */
+export async function runPython(root: string, actor: string, rel: string, opts: { sandbox?: string | null; passThrough?: string[]; timeoutMs?: number; env?: NodeJS.ProcessEnv; runner?: PythonRunner } = {}): Promise<PythonRunResult> {
+  const sandbox = opts.sandbox ? opts.sandbox : null;
+  const requested = [...new Set(opts.passThrough ?? [])].sort();
+  let digest: string | null = null;
+  try {
+    const built = buildPythonEnv(root, opts.env ?? process.env, requested);
+    const located = locatePythonScript(root, rel, sandbox);
+    const bytes = readFileSync(located.abs);
+    if (bytes.includes(0)) throw new Error("Binary file denied: " + rel);
+    digest = sha(bytes);
+    if (sandbox) {
+      if (!existsSync(located.interpreter)) throw new Error("Sandbox " + sandbox + " has no venv interpreter");
+    } else if (!opts.runner) {
+      const py = python3Available();
+      if (!py.ok) throw new Error(py.reason + ", so a Python script cannot run");
+    }
+    const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 30_000));
+    const runner = opts.runner ?? ((file, args, cwd, timeout, env) => execFileCapped(file, args, cwd, timeout, env));
+    const start = Date.now();
+    let raw: { exitCode: number | null; output: string; timedOut?: boolean };
+    try { raw = await runner(located.interpreter, [located.abs], located.cwd, timeoutMs, built.env); }
+    catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+    const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
+    const result: PythonRunResult = {
+      path: rel, sandbox, sha256: digest, interpreter: located.interpreter, passThrough: requested,
+      ok: raw.exitCode === 0 && !raw.timedOut,
+      exitCode: raw.exitCode, timedOut: !!raw.timedOut,
+      output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
+      ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: located.interpreter + " is not installed on this machine" } : {}),
+    };
+    recordActivity(root, actor, "python-run", "Ran python " + rel + (sandbox ? " in sandbox " + sandbox : "") + " sha256:" + digest + " pass-through:" + (requested.length ? requested.join(",") : "none") + " -> " + (result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
+    return result;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    recordActivity(root, actor, "python-run", "Refused python " + oneLine(rel) + (digest ? " sha256:" + digest : "") + ": " + msg);
+    throw e;
+  }
+}
+
+// ---- Sandbox manager -------------------------------------------------
+
+const SANDBOX_NAME = /^[a-z][a-z0-9-]{0,31}$/;
+const PACKAGE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,200}$/;
+const PACKAGE_VERSION = /^[0-9][A-Za-z0-9.+_-]{0,63}$/;
+
+interface SandboxMarker { version: 1; name: string; createdBy: "sam"; at: string }
+
+/** Interpreter path inside a sandbox venv. */
+export function venvPythonPath(sandboxDir: string): string {
+  return process.platform === "win32"
+    ? join(sandboxDir, "venv", "Scripts", "python.exe")
+    : join(sandboxDir, "venv", "bin", "python");
+}
+
+function ensureSandboxesRoot(root: string): string {
+  const sam = join(resolve(root), ".sam");
+  mkdirSync(sam, { recursive: true, mode: 0o700 });
+  if (lstatSync(sam).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const base = join(sam, "sandboxes");
+  mkdirSync(base, { recursive: true, mode: 0o700 });
+  if (lstatSync(base).isSymbolicLink()) throw new Error("Sandboxes root must be a real directory");
+  const realSam = realpathSync(sam);
+  const realBase = realpathSync(base);
+  if (relative(realSam, realBase) !== "sandboxes") throw new Error("Sandboxes root must stay inside SAM state");
+  return realBase;
+}
+
+function sandboxPath(root: string, name: string): { base: string; dir: string } {
+  if (typeof name !== "string" || !SANDBOX_NAME.test(name)) throw new Error("Invalid sandbox name");
+  const base = ensureSandboxesRoot(root);
+  const dir = join(base, name);
+  if (relative(base, dir) !== name) throw new Error("Invalid sandbox name");
+  return { base, dir };
+}
+
+function readSandboxMarker(dir: string): SandboxMarker | null {
+  const file = join(dir, "sandbox.json");
+  try {
+    const st = lstatSync(file);
+    if (st.isSymbolicLink() || !st.isFile() || st.size > 8_000) return null;
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as SandboxMarker;
+    if (!parsed || parsed.version !== 1 || parsed.createdBy !== "sam" || typeof parsed.name !== "string" || typeof parsed.at !== "string") return null;
+    return parsed;
+  } catch { return null; }
+}
+
+export interface OwnedSandbox { name: string; dir: string; work: string; marker: SandboxMarker }
+
+export function requireOwnSandbox(root: string, name: string): OwnedSandbox {
+  const { base, dir } = sandboxPath(root, name);
+  let st;
+  try { st = lstatSync(dir); } catch { throw new Error("No SAM sandbox named " + name); }
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new Error("Refusing to use " + name + ": it is not a sandbox SAM created");
+  const real = realpathSync(dir);
+  if (relative(base, real) !== name) throw new Error("Refusing to use " + name + ": it is not inside the sandboxes root");
+  const marker = readSandboxMarker(real);
+  if (!marker || marker.name !== name) throw new Error("Refusing to use " + name + ": it is not a sandbox SAM created");
+  return { name, dir: real, work: join(real, "work"), marker };
+}
+
+export interface SandboxInfo { name: string; path: string; work: string; python: string; at: string }
+
+export async function createSandbox(root: string, actor: string, name: string, opts: { python?: string | null; runner?: CodeRunner; timeoutMs?: number } = {}): Promise<SandboxInfo> {
+  const { dir } = sandboxPath(root, name);
+  if (existsSync(dir)) throw new Error("Sandbox already exists: " + name);
+  if (opts.python === null) throw new Error("python3 is not available on this machine, so a sandbox venv cannot be created");
+  let python = opts.python ?? "";
+  if (!python) {
+    if (!opts.runner) {
+      const venv = venvModuleAvailable();
+      if (!venv.ok) throw new Error(venv.reason + ", so a sandbox venv cannot be created");
+    }
+    python = "python3";
+  }
+  mkdirSync(dir, { recursive: false, mode: 0o700 });
+  const venvDir = join(dir, "venv");
+  const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
+  const runner = opts.runner ?? defaultCodeRunner;
+  let raw: { exitCode: number | null; output: string; timedOut?: boolean };
+  try { raw = await runner(python, ["-m", "venv", venvDir], dir, timeoutMs); }
+  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  const py = venvPythonPath(dir);
+  if (raw.exitCode !== 0 || raw.timedOut || !existsSync(py)) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* the partial directory is removed when it still can be */ }
+    throw new Error("Sandbox venv was not created" + (raw.output ? ": " + raw.output.slice(0, 400) : ""));
+  }
+  const work = join(dir, "work");
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  const at = new Date().toISOString();
+  const marker: SandboxMarker = { version: 1, name, createdBy: "sam", at };
+  writeFileSync(join(dir, "sandbox.json"), JSON.stringify(marker), { mode: 0o600 });
+  recordActivity(root, actor, "sandbox-create", "Created sandbox " + name);
+  return { name, path: dir, work, python: py, at };
+}
+
+export function listSandboxes(root: string): Array<{ name: string; at: string }> {
+  const base = ensureSandboxesRoot(root);
+  const out: Array<{ name: string; at: string }> = [];
+  let entries;
+  try { entries = readdirSync(base, { withFileTypes: true }); } catch { return []; }
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isDirectory() || !SANDBOX_NAME.test(entry.name)) continue;
+    try {
+      const owned = requireOwnSandbox(root, entry.name);
+      out.push({ name: owned.name, at: owned.marker.at });
+    } catch { /* a directory without SAM's marker is not listed as a sandbox */ }
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name));
+  return out;
+}
+
+export function destroySandbox(root: string, actor: string, name: string): { name: string; removed: true } {
+  const owned = requireOwnSandbox(root, name);
+  rmSync(owned.dir, { recursive: true, force: false });
+  recordActivity(root, actor, "sandbox-destroy", "Deleted sandbox " + name);
+  return { name, removed: true };
+}
+
+export function writeSandboxFile(root: string, actor: string, name: string, rel: string, content: string): { sandbox: string; path: string; sha256: string } {
+  const owned = requireOwnSandbox(root, name);
+  if (typeof content !== "string" || content.includes("\0")) throw new Error("Sandbox content must be text (no binary)");
+  if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) throw new Error("Sandbox content exceeds " + MAX_FILE_BYTES + " bytes");
+  if (!existsSync(owned.work)) mkdirSync(owned.work, { recursive: true, mode: 0o700 });
+  const target = targetPath(owned.work, rel, true);
+  mkdirSync(dirname(target), { recursive: true });
+  const temp = join(dirname(target), ".sam-sandbox-" + randomUUID() + ".tmp");
+  writeFileSync(temp, content, { encoding: "utf8", flag: "wx", mode: 0o644 });
+  try { renameSync(temp, target); } catch (e) { try { unlinkSync(temp); } catch { /* already gone */ } throw e; }
+  const digest = sha(content);
+  recordActivity(root, actor, "sandbox-write", "Wrote " + rel + " in sandbox " + name + " sha256:" + digest);
+  return { sandbox: name, path: rel, sha256: digest };
+}
+
+export function sandboxPipArgv(root: string, name: string, pkg: string, version: string): { file: string; args: string[]; cwd: string; spec: string } {
+  if (typeof pkg !== "string" || !PACKAGE_NAME.test(pkg) || pkg.includes("..")) throw new Error("Package name must be a plain name, not a URL, path, or pip flag");
+  if (typeof version !== "string" || !PACKAGE_VERSION.test(version)) throw new Error("Package version must be an exact version, not a range or a flag");
+  const owned = requireOwnSandbox(root, name);
+  const file = venvPythonPath(owned.dir);
+  if (!existsSync(file)) throw new Error("Sandbox " + name + " has no venv interpreter");
+  const spec = pkg + "==" + version;
+  return { file, args: ["-m", "pip", "install", "--disable-pip-version-check", "--no-input", spec], cwd: owned.work, spec };
+}
+
+export interface SandboxPipResult {
+  sandbox: string; package: string; version: string; ok: boolean; exitCode: number | null;
+  timedOut: boolean; output: string; truncated: boolean; durationMs: number;
+}
+
+/** pip install of one exact package==version inside a sandbox venv.
+ *  The activity line records the package and the version. The child
+ *  environment is scrubbed the same way a Python run is, with no
+ *  pass-through. */
+export async function installSandboxPackage(root: string, actor: string, name: string, pkg: string, version: string, opts: { timeoutMs?: number; runner?: CodeRunner } = {}): Promise<SandboxPipResult> {
+  const argv = sandboxPipArgv(root, name, pkg, version);
+  const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
+  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, buildPythonEnv(root, process.env, []).env));
+  const start = Date.now();
+  let raw: { exitCode: number | null; output: string; timedOut?: boolean };
+  try { raw = await runner(argv.file, argv.args, argv.cwd, timeoutMs); }
+  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
+  const result: SandboxPipResult = {
+    sandbox: name, package: pkg, version,
+    ok: raw.exitCode === 0 && !raw.timedOut,
+    exitCode: raw.exitCode, timedOut: !!raw.timedOut,
+    output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
+  };
+  recordActivity(root, actor, "sandbox-pip", "Installed " + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
   return result;
 }
