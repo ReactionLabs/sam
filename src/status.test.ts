@@ -7,6 +7,8 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { proposeAction, decideAction } from "./actions.js";
 import { buildStatusPayload } from "./status.js";
+import { addChannel } from "./channels.js";
+import { mkdirSync, writeFileSync } from "node:fs";
 
 function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-status-")); }
 
@@ -28,6 +30,30 @@ test("pendingActions is the pending slice of the same actions list", async () =>
     assert.equal(payload.pendingActions[0].id, kept.id);
     assert.deepEqual(payload.pendingActions, payload.actions.filter(a => a.status === "pending"));
     assert.ok(Array.isArray(payload.skills));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status payload carries channels and installed skills for the Manage view", () => {
+  const root = scratch();
+  try {
+    const empty = buildStatusPayload(root);
+    assert.deepEqual(empty.channels, []);
+    assert.deepEqual(empty.skillInstalled, []);
+    assert.equal(typeof empty.usageToday.totalTokens, "number");
+    assert.equal(typeof empty.usageToday.calls, "number");
+    addChannel(root, "telegram", "Dip Telegram", "dip", "SAM_CHANNEL_TG_MAIN", [6300316150]);
+    mkdirSync(join(root, ".sam"), { recursive: true });
+    writeFileSync(join(root, ".sam", "skill-installs.json"), JSON.stringify([
+      { name: "agent-reach", source: "github", ref: "owner/repo", files: 3, installedAt: "2026-11-10T00:00:00.000Z", actor: "sam" },
+    ]));
+    const payload = buildStatusPayload(root);
+    assert.equal(payload.channels.length, 1);
+    assert.equal(payload.channels[0].name, "Dip Telegram");
+    assert.equal(payload.channels[0].kind, "telegram");
+    assert.equal(payload.channels[0].profile, "dip");
+    assert.equal(typeof payload.channels[0].credentialPresent, "boolean");
+    assert.equal(payload.skillInstalled.length, 1);
+    assert.equal(payload.skillInstalled[0].name, "agent-reach");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

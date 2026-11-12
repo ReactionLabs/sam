@@ -24,6 +24,8 @@ import { listDrafts } from "./drafts.js";
 import { listContacts } from "./contacts.js";
 import type { DoorGuardStats } from "./door-guard.js";
 import { connectors } from "./connectors.js";
+import { channels } from "./channels.js";
+import { installedSkills } from "./skill-registry.js";
 import { listActions } from "./actions.js";
 import { readActivity } from "./activity.js";
 import { listBackgroundTasks } from "./background.js";
@@ -100,6 +102,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     at: new Date().toISOString(),
     missions,
     skills: discoverSkills(root),
+    skillInstalled: installedSkills(root),
     schedules: listSchedules(root),
     chats,
     archivedChats,
@@ -107,6 +110,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     agents: agents(root),
     config: readDashboardConfig(root),
     connectors: connectors(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
+    channels: channels(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
     preferences,
     heartbeatJobs: jobs,
     heartbeatLog: heartbeatLog(root, 8),
