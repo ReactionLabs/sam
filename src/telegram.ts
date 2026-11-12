@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
@@ -15,15 +16,100 @@ export interface SamClient {
  postMessage(chatId:string,content:string):Promise<string>;
 }
 export interface TelegramUpdate { update_id:number; message?:{ chat:{id:number}; from?:{id:number; username?:string; first_name?:string}; text?:string } }
-interface BridgeState { offset:number; chats:Record<string,string>; pairingCandidate?:{id:number; username?:string; first_name?:string; at:string} }
+export interface BridgeState { offset:number; chats:Record<string,string>; pairingCandidate?:{id:number; username?:string; first_name?:string; at:string} }
 function statePath(root:string){return join(resolve(root),".sam","telegram-state.json");}
-export function loadBridgeState(root:string):BridgeState{
- if(!existsSync(statePath(root)))return {offset:0,chats:{}};
- const value:unknown=JSON.parse(readFileSync(statePath(root),"utf8"));
- if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid telegram bridge state");
- return value as BridgeState;
+function stateDbFile(root:string){return join(resolve(root),".sam","telegram-state.db");}
+// State convergence (UNIFICATION item 4, twenty-third store): the
+// bridge state is SQLite (.sam/telegram-state.db, the skill-curator
+// singleton pattern), ONE row holding the state's full JSON so the
+// singleton keeps its exact shape. The old telegram-state.json was
+// rewritten whole by saveBridgeState after EVERY update the bridge
+// handled, and loadBridgeState THREW on a malformed or non-object
+// file: a torn write (crash mid-writeFileSync, which is not atomic)
+// left the bridge dead at its first line on the next start - the
+// runTelegramBridge load is uncaught - with the poll offset, the
+// telegram-chat -> SAM-chat map, and any pairing candidate all in
+// the one torn file, while readers in other processes (channelForChat
+// on the action gate and the loop revisit, deliverToChannel in the
+// heartbeat tick, the latter UNGUARDED) caught or propagated the
+// same throw off a half-written read. Here each save is a
+// single-row UPSERT and connections carry a busy_timeout (the F1
+// cross-process lock seam), so no reader in any process can ever
+// see a torn state. The migrated loader is forgiving where the old
+// one threw (the pairing precedent): a malformed or non-object
+// payload reads as the empty bridge state - a torn state's facts
+// were already lost when the write tore; dying forever on it only
+// adds an outage. First open imports a legacy telegram-state.json
+// and renames it telegram-state.json.migrated - imported, never
+// deleted; a malformed file or a non-object payload imports
+// nothing and is left in place. A pure read on an install with
+// neither file creates nothing (the old default-state read,
+// preserved). The P9 backup snapshots every .sam/*.db generically,
+// so the migrated store is carried with no backup change.
+function openBridgeStore(root:string):Database.Database{
+ const dir=join(resolve(root),".sam");
+ mkdirSync(dir,{recursive:true,mode:0o700});
+ if(lstatSync(dir).isSymbolicLink())throw new Error("Unsafe SAM state directory");
+ const db=new Database(stateDbFile(root));
+ db.pragma("journal_mode = WAL");
+ db.pragma("busy_timeout = 5000");
+ db.exec("CREATE TABLE IF NOT EXISTS telegram_state (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+ migrateLegacyBridgeState(db,root);
+ return db;
 }
-export function saveBridgeState(root:string,state:BridgeState){mkdirSync(join(resolve(root),".sam"),{recursive:true});writeFileSync(statePath(root),JSON.stringify(state,null,2),{mode:0o600});}
+function migrateLegacyBridgeState(db:Database.Database,root:string):void{
+ const row=db.prepare("SELECT data FROM telegram_state WHERE id = 1").get() as {data:string}|undefined;
+ if(row)return;
+ const file=statePath(root);
+ if(!existsSync(file))return;
+ let data:unknown;
+ try{data=JSON.parse(readFileSync(file,"utf8"));}catch{return;}
+ if(!data||typeof data!=="object"||Array.isArray(data))return;
+ db.prepare("INSERT OR IGNORE INTO telegram_state (id, data) VALUES (1, ?)").run(JSON.stringify(data));
+ renameSync(file,file+".migrated");
+}
+function rowToBridgeState(data:string):BridgeState|null{
+ try{
+  const value:unknown=JSON.parse(data);
+  if(!value||typeof value!=="object"||Array.isArray(value))return null;
+  const raw=value as {offset?:unknown;chats?:unknown;pairingCandidate?:unknown};
+  const chats:Record<string,string>={};
+  if(raw.chats&&typeof raw.chats==="object"&&!Array.isArray(raw.chats)){
+   for(const [key,chatId] of Object.entries(raw.chats as Record<string,unknown>))if(typeof chatId==="string")chats[key]=chatId;
+  }
+  const state:BridgeState={offset:typeof raw.offset==="number"&&Number.isFinite(raw.offset)?raw.offset:0,chats};
+  if(raw.pairingCandidate&&typeof raw.pairingCandidate==="object"&&!Array.isArray(raw.pairingCandidate)){
+   const candidate=raw.pairingCandidate as {id?:unknown;username?:unknown;first_name?:unknown;at?:unknown};
+   if(typeof candidate.id==="number"){
+    const kept:BridgeState["pairingCandidate"]={id:candidate.id,at:typeof candidate.at==="string"?candidate.at:""};
+    if(typeof candidate.username==="string")kept.username=candidate.username;
+    if(typeof candidate.first_name==="string")kept.first_name=candidate.first_name;
+    state.pairingCandidate=kept;
+   }
+  }
+  return state;
+ }catch{return null;}
+}
+function bridgeStoreExists(root:string):boolean{
+ return existsSync(stateDbFile(root))||existsSync(statePath(root));
+}
+// The store's read door: the full bridge state through the store's
+// own shape, or the empty state when none has ever been persisted -
+// and a read on an install with no store at all creates nothing.
+export function loadBridgeState(root:string):BridgeState{
+ if(!bridgeStoreExists(root))return {offset:0,chats:{}};
+ const db=openBridgeStore(root);
+ try{
+  const row=db.prepare("SELECT data FROM telegram_state WHERE id = 1").get() as {data:string}|undefined;
+  return row?(rowToBridgeState(row.data)??{offset:0,chats:{}}):{offset:0,chats:{}};
+ }finally{db.close();}
+}
+export function saveBridgeState(root:string,state:BridgeState){
+ const db=openBridgeStore(root);
+ try{
+  db.prepare("INSERT INTO telegram_state (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(state));
+ }finally{db.close();}
+}
 // The channel a SAM chat lives on, if any: a chat id found in the
 // Telegram bridge state belongs to that bridge's telegram channel.
 // This is the one resolver for "which channel is this conversation
