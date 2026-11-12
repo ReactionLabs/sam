@@ -84,7 +84,8 @@ test("connect: verify-before-save - signed-in records only the marker, every oth
     assert.ok(good.saved);
     assert.equal(good.saved!.route, "cli-reuse");
     assert.equal(good.saved!.authMethod, "claude.ai");
-    const raw = readFileSync(marker, "utf8");
+    assert.equal(existsSync(marker), false, "no legacy JSON marker is recreated - the connection rides the SQLite store");
+    const raw = readFileSync(join(root, ".sam", "engine-connection.db"), "utf8");
     assert.ok(!raw.includes("owner@example.test") && !raw.includes("org-secret-id"), "the marker holds no identity details");
     assert.ok(!/token|secret|password/i.test(raw), "the marker holds no credential-shaped field at all");
     const status = engineConnectStatus(root, env);

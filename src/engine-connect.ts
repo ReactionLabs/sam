@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { engineBinary } from "./engine.js";
 import { recordActivity } from "./activity.js";
 
@@ -28,7 +29,7 @@ import { recordActivity } from "./activity.js";
 //   and never surfaced or stored; only the auth method name (a
 //   short slug like claude.ai) may ride the marker.
 // - VERIFY-BEFORE-SAVE (the config setup precedent): `connect`
-//   records the marker (.sam/engine-connection.json, 0600) ONLY on
+//   records the marker (.sam/engine-connection.db) ONLY on
 //   an explicit signed-in verdict; any other verdict saves nothing
 //   and writes no ledger line. Disconnect removes ONLY SAM's
 //   marker - it cannot and does not log Claude Code out.
@@ -131,16 +132,99 @@ export async function probeEngineAuth(env: NodeJS.ProcessEnv = process.env, run:
 // --- the route marker ---------------------------------------------------
 
 function connectionPath(root: string) { return join(resolve(root), ".sam", "engine-connection.json"); }
+function connectionDbPath(root: string) { return join(resolve(root), ".sam", "engine-connection.db"); }
 
-export function readEngineConnection(root: string): EngineConnection | null {
+// State convergence (UNIFICATION item 4, thirtieth store):
+// the engine route marker is SQLite (.sam/engine-connection.db,
+// the setup / auth-probes singleton pattern), ONE row holding
+// the marker's full JSON so the singleton keeps its exact
+// shape. The old engine-connection.json was written whole by
+// connectEngine on every successful connect - a plain
+// writeFileSync - and removed whole by disconnectEngine,
+// while readEngineConnection readers run in every process
+// that builds a status surface (detectSetup, auth status,
+// the dashboard status path, the CLI overview and engine
+// verbs). A torn write read back as no connection at all, so
+// a verified signed-in install silently read as
+// never-connected. Here a connect is a single-row UPSERT, a
+// disconnect a single-row DELETE, and connections carry a
+// busy_timeout, so no reader in any process can ever see a
+// torn marker. First open imports a legacy
+// engine-connection.json (validated through the old read
+// shape: route cli-reuse, a non-empty string binary, a
+// string connectedAt, authState signed-in, the auth method
+// slug-sanitized exactly as the old reader did) and renames
+// it engine-connection.json.migrated - imported, never
+// deleted; a malformed file or a payload failing that shape
+// imports nothing and is left in place (the migrated shape
+// reads it as no connection, exactly the old forgiving
+// contract). A pure read on an install with neither file
+// creates nothing, and a non-signed-in verdict still saves
+// nothing - verify-before-save is untouched. The marker
+// stays non-secret by design: it never held the CLI's
+// tokens, an email, or an org, and the migrated store holds
+// exactly the same fields. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried
+// with no backup change.
+function parseEngineConnection(data: unknown): EngineConnection | null {
+  const value = data as EngineConnection | null;
+  if (value?.route !== "cli-reuse" || typeof value?.binary !== "string" || !value.binary) return null;
+  if (typeof value?.connectedAt !== "string" || value?.authState !== "signed-in") return null;
+  return { route: "cli-reuse", binary: value.binary, connectedAt: value.connectedAt, authState: "signed-in", authMethod: cleanMethod(value.authMethod) };
+}
+function openConnectionStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(connectionDbPath(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS engine_connection (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyConnection(db, root);
+  return db;
+}
+function migrateLegacyConnection(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM engine_connection WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
   const file = connectionPath(root);
-  if (!existsSync(file)) return null;
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const record = parseEngineConnection(data);
+  if (!record) return;
+  db.prepare("INSERT OR IGNORE INTO engine_connection (id, data) VALUES (1, ?)").run(JSON.stringify(record));
+  renameSync(file, file + ".migrated");
+}
+function connectionStoreExists(root: string): boolean {
+  return existsSync(connectionDbPath(root)) || existsSync(connectionPath(root));
+}
+function saveEngineConnection(root: string, record: EngineConnection): void {
+  const db = openConnectionStore(root);
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as EngineConnection;
-    if (value?.route !== "cli-reuse" || typeof value?.binary !== "string" || !value.binary) return null;
-    if (typeof value?.connectedAt !== "string" || value?.authState !== "signed-in") return null;
-    return { route: "cli-reuse", binary: value.binary, connectedAt: value.connectedAt, authState: "signed-in", authMethod: cleanMethod(value.authMethod) };
-  } catch { return null; }
+    db.prepare("INSERT INTO engine_connection (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
+  } finally { db.close(); }
+}
+function deleteEngineConnection(root: string): boolean {
+  if (!connectionStoreExists(root)) return false;
+  const db = openConnectionStore(root);
+  try {
+    const result = db.prepare("DELETE FROM engine_connection WHERE id = 1").run();
+    return result.changes > 0;
+  } finally { db.close(); }
+}
+
+// The store's read door: the recorded route marker through
+// the store's own shape, or null when no connection has ever
+// been recorded - and a read on an install with no store at
+// all creates nothing.
+export function readEngineConnection(root: string): EngineConnection | null {
+  if (!connectionStoreExists(root)) return null;
+  const db = openConnectionStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM engine_connection WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return null;
+    try { return parseEngineConnection(JSON.parse(row.data)); } catch { return null; }
+  } finally { db.close(); }
 }
 
 /** The connection state every surface reads WITHOUT probing: the
@@ -162,18 +246,15 @@ export async function connectEngine(root: string, env: NodeJS.ProcessEnv = proce
   const probe = await probeEngineAuth(env, run);
   if (probe.state !== "signed-in" || !probe.binary) return { connected: false, probe, saved: null };
   const saved: EngineConnection = { route: "cli-reuse", binary: probe.binary, connectedAt: new Date().toISOString(), authState: "signed-in", authMethod: probe.method };
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(connectionPath(root), JSON.stringify(saved, null, 2), { mode: 0o600 });
-  recordActivity(root, "owner", "engine-connected", "Claude Code connected as the coding-engine route via CLI reuse (auth verified by `claude auth status`; SAM stored only a route marker, no credentials)");
+  saveEngineConnection(root, saved);
+  recordActivity(root, "owner", "engine-connected", "Claude Code connected as the coding-engine route via CLI reuse (auth verified by `claude auth status`; SAM stored only a route marker in the engine connection store, no credentials)");
   return { connected: true, probe, saved };
 }
 
 /** Disconnect: remove ONLY SAM's route marker. Claude Code's own
  *  login on this machine is untouched - SAM has no door to it. */
 export function disconnectEngine(root: string): { disconnected: boolean; note: string } {
-  const file = connectionPath(root);
-  if (!existsSync(file)) return { disconnected: false, note: "No engine connection is recorded on this install; nothing was removed." };
-  rmSync(file, { force: true });
+  if (!deleteEngineConnection(root)) return { disconnected: false, note: "No engine connection is recorded on this install; nothing was removed." };
   recordActivity(root, "owner", "engine-disconnected", "Claude Code engine connection marker removed (CLI reuse route disconnected; the CLI's own login was not touched)");
   return { disconnected: true, note: "SAM's route marker is removed. Claude Code's own login on this machine is untouched - SAM never held it." };
 }
