@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,7 +43,8 @@ test("failover: unsafe primary falls to the next route before any tool, and the 
   try {
     addProvider(root, { id: "openai", endpoint: "https://api.openai.com/v1/chat/completions", keyEnv: "OPENAI_API_KEY", model: "gpt-4.1" });
     addFallbackRoute(root, "sam", { provider: "openai", model: "gpt-4.1" });
-    assert.equal(statSync(join(root, ".sam", "fallbacks.json")).mode & 0o777, 0o600);
+    assert.equal(existsSync(join(root, ".sam", "fallbacks.db")), true);
+    assert.equal(existsSync(join(root, ".sam", "fallbacks.json")), false);
     globalThis.fetch = async (input) => {
       const url = String(input);
       calls.push(url);
