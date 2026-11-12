@@ -11,6 +11,7 @@ import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
 import { runChatTurn } from "./agent-turn.js";
+import { cliSourceMark } from "./message-provenance.js";
 import { lastSkillByChat } from "./skill-use.js";
 import { samBanner } from "./banner.js";
 import { detectSetup } from "./config-wizard.js";
@@ -189,9 +190,11 @@ export async function runTui(root: string, opts: { profile?: string; bannerOnly?
     }
     busy = true;
     const startedAt = Date.now();
+    const mark = cliSourceMark("ts-cli");
+    if (mark) out.write(paint(DIM, mark) + "\r\n");
     startSpinner();
     try {
-      const reply = await runChatTurn(root, chatId, text);
+      const reply = await runChatTurn(root, chatId, text, { source: "ts-cli" });
       stopSpinner();
       printReply(reply);
       const used = lastSkillByChat(root).get(chatId);

@@ -18,11 +18,15 @@ import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
 import { buildRecallBlock } from "./recall.js";
+import { withMessageProvenance } from "./message-provenance.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
 // owner operates, not tools the model can call.
 const DASHBOARD_NOTE="This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities; explain how to use them accurately. You cannot operate dashboard controls or spawn agents, but you CAN manage your own profile's chats directly with the sam_manage_chats tool (list, create, rename, pin, branch, archive, search) - archive only, never delete. Do not invent folders or other unsupported UI features.";
+// Provenance is metadata, not part of what the owner typed. The line
+// is prepended only when a client stamp is known.
+const PROVENANCE_NOTE=" Owner messages may start with a provenance line [metadata source=<client>] that SAM recorded and the owner did not type. The client is dashboard, rust-cli, ts-cli, telegram, or api. When that line is absent, the client is unknown. The latest such line is the client they are using right now.";
 
 // One chat turn, shared by the dashboard and the heartbeat runner so SAM behaves
 // identically however you reach it. The turn: captures the person's preferences
@@ -73,7 +77,7 @@ export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,erro
   }catch{/* best effort: the line lands under the core actor */}
   recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
 }
-export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown}):Promise<string>{
   try{
     return await runChatTurnInner(root,chatId,content,opts);
   }catch(error){
@@ -81,8 +85,9 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     throw error;
   }
 }
-async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute}):Promise<string>{
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown}):Promise<string>{
   const route=opts?.route??"chat";
+  const source=opts?.source;
   const budget=toolBudget(route);
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
   try{const found=look.list().find(c=>c.id===chatId);chatAgent=found?.agent_name??null;visitor=found?.visitor===1;profiles=look.agents();}finally{look.close();}
@@ -97,7 +102,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     const capStatus=sessionCapStatus(root,chatId);
     if(capStatus.capped){
       const capText=sessionCapReply(capStatus);
-      try{const db=new ChatStore(root);try{db.add(chatId,"user",content);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
+      try{const db=new ChatStore(root);try{db.add(chatId,"user",content,source);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
       return capText;
     }
     const targets=relayTargetsForProfile(root,profileName,active?{provider:active.provider??null,model:active.model??null}:null);
@@ -106,7 +111,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     else note=(await relayPrompt(root,relayText,targets,{actor:profileName})).text;
     if(note.length>20000)note=note.slice(0,19900)+"\n[truncated]";
     const db=new ChatStore(root);
-    try{db.add(chatId,"user",content);db.add(chatId,"assistant",note);}finally{db.close();}
+    try{db.add(chatId,"user",content,source);db.add(chatId,"assistant",note);}finally{db.close();}
     recordActivity(root,profileName,"turn","Relay answered in chat "+chatId.slice(0,8));
     return note;
   }
@@ -123,7 +128,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const capStatus=sessionCapStatus(root,chatId);
   if(capStatus.capped){
     const capText=sessionCapReply(capStatus);
-    try{const db=new ChatStore(root);try{db.add(chatId,"user",content);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
+    try{const db=new ChatStore(root);try{db.add(chatId,"user",content,source);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
     if(noteCapTrip(root,chatId,route,capStatus.reason??"turns"))
       recordActivity(root,profileName,"session-cap","Session cap reached in chat "+chatId.slice(0,8)+": "+capStatus.turnsUsed+" turns, "+capStatus.tokensUsed+" tokens today ("+(capStatus.reason??"turns")+" cap)");
     return capText;
@@ -140,7 +145,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     const open=db.openPartial(chatId);
     const prevUser=[...history].reverse().find(m=>m.role==="user");
     if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;}
-    else userMessageId=db.add(chatId,"user",content).id;
+    else userMessageId=db.add(chatId,"user",content,source).id;
     if(!resuming)history=db.messages(chatId);
   }finally{db.close();}
   // Reactions (Dip, 2026-11-10): on a live owner chat turn the
@@ -198,22 +203,22 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     context:[standing.context,recallBlock].filter(Boolean).join("\n"),
     volatile:visitorNote,
     law:lawBlock,
-  });
+  })+PROVENANCE_NOTE;
   // Context compression (Phase A item 2): when the history crossed a
   // trigger, the folded turns were flushed to memory first and are
   // replaced here by their summary; the newest exchanges stay
   // verbatim. Compaction never breaks a turn - on any error the raw
   // tail rides, exactly the pre-compaction behavior.
-  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string}>=history.slice(-24).map(m=>({role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content}));
+  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string;source?:string}>=history.slice(-24).map(m=>({role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content,source:m.source}));
   try{
     const ctx=buildChatContext(root,{chatId,profile:profileName,visitor,history});
     contextSummary=ctx.summary;keptHistory=ctx.kept;
     const partialText=new Set(history.filter(m=>m.partial===1).map(m=>m.content));
-    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{role:m.role,content:"[partial, incomplete reply]\n"+m.content}:m);
+    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{role:m.role,content:"[partial, incomplete reply]\n"+m.content,source:m.source}:m);
   }catch{/* fail open to the raw tail */}
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
-    ...keptHistory.map(m=>({role:m.role,content:m.content})),{role:"user" as const,content:resuming?"Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.":content}];
+    ...keptHistory.map(m=>({role:m.role,content:m.role==="user"?withMessageProvenance(m.content,m.source):m.content})),{role:"user" as const,content:resuming?"Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.":withMessageProvenance(content,source)}];
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;

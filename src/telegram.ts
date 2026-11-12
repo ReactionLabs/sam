@@ -5,6 +5,7 @@ import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
+import type { MessageSource } from "./message-provenance.js";
 
 // Telegram bridge: long-polls the bot API (no public webhook needed, so it works
 // from a NAT/tailnet box), maps each allowed Telegram chat to a SAM chat bound to
@@ -192,7 +193,7 @@ export class TelegramApi {
 // the dashboard running on this same host. Same machine, same owner, files are
 // owner-only; a stable service credential is the future replacement for this seam.
 export class DashboardSamClient implements SamClient {
- constructor(private baseUrl:string,private token:()=>string,private fetchFn:typeof fetch=fetch){}
+ constructor(private baseUrl:string,private token:()=>string,private fetchFn:typeof fetch=fetch,private source:MessageSource="api"){}
  private async api(path:string,init?:RequestInit):Promise<unknown>{
   const response=await this.fetchFn(this.baseUrl+"/api/"+this.token()+path,{...init,headers:{"Content-Type":"application/json","X-SAM-Request":"dashboard",...(init?.headers??{})}});
   if(!response.ok)throw Error("SAM dashboard request failed (HTTP "+response.status+")");
@@ -213,7 +214,7 @@ export class DashboardSamClient implements SamClient {
   return created.id;
  }
  async postMessage(chatId:string,content:string):Promise<string>{
-  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content})}) as {reply?:{content?:string}};
+  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string}};
   return result.reply?.content??"No response.";
  }
 }
