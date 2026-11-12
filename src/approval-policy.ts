@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 
 // Approvals engine (Plan Phase D item 1 - lands BEFORE coder hands;
 // the Hermes borrow recorded in the roadmap: named modes plus a
@@ -8,7 +9,7 @@ import { join, resolve } from "node:path";
 // it never executes anything itself, and it never widens the
 // executor allowlist - that stays Dip's ruling, untouched.
 //
-// MODES (stored in .sam/approval-policy.json, set ONLY by the
+// MODES (stored in .sam/approval-policy.db, set ONLY by the
 // operator through the CLI - a mode change is an owner act, never
 // a model act, and it is activity-ledgered by the caller):
 // - manual (the default, and the posture every install has had):
@@ -42,16 +43,88 @@ export function defaultApprovalPolicy(): ApprovalPolicy {
   return { mode: "manual", autoKinds: [], updatedAt: null };
 }
 function policyFile(root: string): string { return join(resolve(root), ".sam", "approval-policy.json"); }
+function policyDbFile(root: string): string { return join(resolve(root), ".sam", "approval-policy.db"); }
+
+// State convergence (UNIFICATION item 4, twenty-seventh store):
+// the approval policy is SQLite (.sam/approval-policy.db, the
+// telegram-state singleton pattern), ONE row holding the policy's
+// full JSON so the singleton keeps its exact shape. The old
+// approval-policy.json was rewritten whole on every
+// saveApprovalPolicy - a non-atomic writeFileSync by the operator
+// CLI - while loadApprovalPolicy readers run in every process
+// that consults the ONE gate: settleAutoApprovals in the
+// dashboard, Telegram, and heartbeat processes, plus dashboard
+// /api/status and the CLI overview. A torn write read fail-closed
+// to manual, which is the safe direction but silently REVERTED
+// the owner's chosen posture: a smart auto list vanished with no
+// error anywhere, listed internal kinds stopped auto-executing,
+// and an off posture silently became a gate again - the policy
+// the owner set was simply gone until someone noticed. Here each
+// save is a single-row UPSERT and connections carry a
+// busy_timeout, so no reader in any process can ever see a torn
+// policy. The migrated loader keeps the old fail-closed shape
+// exactly: a missing, malformed, or invalid-mode policy reads as
+// manual with an empty auto list. First open imports a legacy
+// approval-policy.json (normalized through the old read shape:
+// invalid auto kinds filtered, duplicates removed) and renames
+// it approval-policy.json.migrated - imported, never deleted; a
+// malformed file, a non-object payload, or an invalid mode
+// imports nothing and is left in place. A pure read on an
+// install with neither file creates nothing. The P9 backup
+// snapshots every .sam/*.db generically, so the migrated store
+// is carried with no backup change.
+function parsePolicy(data: unknown): ApprovalPolicy | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const raw = data as { mode?: unknown; autoKinds?: unknown; updatedAt?: unknown };
+  if (!APPROVAL_MODES.includes(raw.mode as ApprovalMode)) return null;
+  const autoKinds = Array.isArray(raw.autoKinds) ? raw.autoKinds.filter((k): k is string => typeof k === "string" && /^[a-z][a-z-]{0,31}$/.test(k)) : [];
+  return { mode: raw.mode as ApprovalMode, autoKinds: [...new Set(autoKinds)], updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : null };
+}
+function openPolicyStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(policyDbFile(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS approval_policy (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyPolicy(db, root);
+  return db;
+}
+function migrateLegacyPolicy(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM approval_policy WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
+  const file = policyFile(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const policy = parsePolicy(data);
+  if (!policy) return;
+  db.prepare("INSERT OR IGNORE INTO approval_policy (id, data) VALUES (1, ?)").run(JSON.stringify(policy));
+  renameSync(file, file + ".migrated");
+}
+function policyStoreExists(root: string): boolean {
+  return existsSync(policyDbFile(root)) || existsSync(policyFile(root));
+}
+function rowToPolicy(data: string): ApprovalPolicy {
+  try { return parsePolicy(JSON.parse(data)) ?? defaultApprovalPolicy(); } catch { return defaultApprovalPolicy(); }
+}
+
+// The store's read door: the full approval policy through the
+// store's own shape, or the fail-closed default when none has
+// ever been persisted - and a read on an install with no store
+// at all creates nothing.
+export function readApprovalPolicyStore(root: string): ApprovalPolicy {
+  return loadApprovalPolicy(root);
+}
 
 export function loadApprovalPolicy(root: string): ApprovalPolicy {
-  const file = policyFile(root);
-  if (!existsSync(file)) return defaultApprovalPolicy();
+  if (!policyStoreExists(root)) return defaultApprovalPolicy();
+  const db = openPolicyStore(root);
   try {
-    const data = JSON.parse(readFileSync(file, "utf8")) as { mode?: unknown; autoKinds?: unknown; updatedAt?: unknown };
-    if (!APPROVAL_MODES.includes(data.mode as ApprovalMode)) return defaultApprovalPolicy();
-    const autoKinds = Array.isArray(data.autoKinds) ? data.autoKinds.filter((k): k is string => typeof k === "string" && /^[a-z][a-z-]{0,31}$/.test(k)) : [];
-    return { mode: data.mode as ApprovalMode, autoKinds: [...new Set(autoKinds)], updatedAt: typeof data.updatedAt === "string" ? data.updatedAt : null };
-  } catch { return defaultApprovalPolicy(); }
+    const row = db.prepare("SELECT data FROM approval_policy WHERE id = 1").get() as { data: string } | undefined;
+    return row ? rowToPolicy(row.data) : defaultApprovalPolicy();
+  } finally { db.close(); }
 }
 
 export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; autoKinds?: string[] }): ApprovalPolicy {
@@ -70,8 +143,10 @@ export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; a
     const bad = next.autoKinds.filter(k => classifyProposal(k, null).risk !== "internal");
     if (bad.length) throw new Error("Smart mode cannot auto-approve consequential kind(s): " + bad.join(", ") + " - they always need the owner's decision. Remove them from the auto list, or use off mode if the owner truly means it.");
   }
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(policyFile(root), JSON.stringify(next, null, 2), { mode: 0o600 });
+  const db = openPolicyStore(root);
+  try {
+    db.prepare("INSERT INTO approval_policy (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(next));
+  } finally { db.close(); }
   return next;
 }
 

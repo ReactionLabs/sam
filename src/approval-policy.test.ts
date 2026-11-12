@@ -48,7 +48,7 @@ test("classification: Dip's gated kinds are consequential; notes and registry sk
   assert.equal(classifyProposal("shell", null).risk, "consequential");
 });
 
-test("policy: default is manual, a corrupt file fails closed to manual, save/load round-trips", () => {
+test("policy: default is manual, save/load round-trips through the SQLite store, and a stray corrupt legacy file cannot revert it", () => {
   const root = fresh();
   try {
     assert.deepEqual(loadApprovalPolicy(root), { mode: "manual", autoKinds: [], updatedAt: null });
@@ -56,9 +56,14 @@ test("policy: default is manual, a corrupt file fails closed to manual, save/loa
     assert.deepEqual(saved.autoKinds.sort(), ["note", "skill"]);
     assert.equal(saved.mode, "smart");
     assert.deepEqual(loadApprovalPolicy(root).autoKinds.sort(), ["note", "skill"]);
+    // State convergence (UNIFICATION item 4, twenty-seventh store):
+    // the policy rides approval-policy.db now - a corrupt legacy
+    // JSON written beside it is not the store and changes nothing.
+    // (The malformed-legacy fail-closed case itself is pinned in
+    // approval-policy-store.test.ts.)
     mkdirSync(join(root, ".sam"), { recursive: true });
     writeFileSync(join(root, ".sam", "approval-policy.json"), "{not json");
-    assert.equal(loadApprovalPolicy(root).mode, "manual");
+    assert.equal(loadApprovalPolicy(root).mode, "smart");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
