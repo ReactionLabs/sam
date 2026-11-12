@@ -36,7 +36,8 @@ import { pairConnector, validatePairDetail } from "./connector-pairing.js";
 // cannot execute is never shown, consequential so smart mode can
 // never auto-approve it, and with no force flag and no PR creation.
 // One more kind rides on the coder program's end state (C6, Phase D
-// item 6): "engine" queues a managed Claude Code run inside the C4
+// item 6): "engine" queues a managed engine run (the provider
+// selected in config - Claude Code or Codex) inside the C4
 // branch sandbox; SAM records, verifies, reviews, and commits the
 // engine's work itself, and the run executes nothing until the owner
 // approves - approval queues it, the drain runs it.
@@ -413,7 +414,7 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     // checks still cannot queue an unrunnable task.
     const { task, chatId } = validateEngineDetail(root, a.detail);
     const queued = queueEngineTask(root, { actor: a.actor, chatId: a.chatId ?? chatId ?? "", spec: task });
-    return "Engine run queued (" + queued.id + ") - the managed engine (Claude Code) will run it inside a sam/<task> branch sandbox on the next drain; SAM verifies, reviews, and commits its work, and the summary posts into the chat";
+    return "Engine run queued (" + queued.id + ") - the managed engine (" + (queued.provider === "codex" ? "Codex" : "Claude Code") + ", the provider selected at queue time) will run it inside a sam/<task> branch sandbox on the next drain; SAM verifies, reviews, and commits its work, and the summary posts into the chat";
   }
   const summary = await installSkill(root, a.detail, { actor: a.actor });
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));

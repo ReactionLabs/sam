@@ -19,7 +19,9 @@ import type { GoldfishRecord } from "./goldfish.js";
  * goldfish, and C4 git discipline it rides on).
  *
  * SAM is the orchestrator and the verifier, not the typist: it
- * hands a coding task to a real coding engine (Claude Code) running
+ * hands a coding task to a real coding engine - the provider the
+ * owner selected in config (Claude Code or Codex; the run layer
+ * landed 2026-11-12 on top of the 16:04 config choice) - running
  * as a managed subprocess, then does every closing act itself.
  * The shape, seam by seam:
  *
@@ -39,14 +41,19 @@ import type { GoldfishRecord } from "./goldfish.js";
  *   the C3 loop's shape; the engine is one heavy pass. The task's
  *   sam/<task> branch is prepared first (C4: a dirty tree or a
  *   non-git root closes the task blocked; the engine never runs
- *   in an unbranched tree). The engine is a FIXED binary - the
- *   operator's SAM_ENGINE_BIN, else "claude" found on PATH - run
- *   with a FIXED argv: -p <task> --output-format text
- *   --permission-mode acceptEdits, cwd pinned to the code root.
- *   The model supplies only the task text; there is no way to
- *   name a command, a flag, or a shell. A 10-minute timeout caps
- *   the run; its output is captured, capped, and carried on the
- *   task record.
+ *   in an unbranched tree). The engine is the SELECTED provider's
+ *   FIXED binary, snapshotted onto the task at queue time (the
+ *   provider the owner approved is the provider that runs):
+ *   Claude Code resolves SAM_ENGINE_BIN, else "claude" on PATH,
+ *   and runs -p <task> --output-format text --permission-mode
+ *   acceptEdits; Codex resolves SAM_CODEX_BIN, else "codex" on
+ *   PATH, and runs exec --skip-git-repo-check --sandbox
+ *   workspace-write -- <task> (the coding-operatives adapter
+ *   shape). Cwd is pinned to the code root either way. The model
+ *   supplies only the task text; there is no way to name a
+ *   command, a flag, or a shell. A 10-minute timeout caps the
+ *   run; its output is captured, capped, and carried on the task
+ *   record.
  * - RECORD: the engine writes files directly, so afterwards SAM
  *   enumerates its changes from git porcelain against the task
  *   branch's base and records each one through the C1 ledger
@@ -75,8 +82,18 @@ import type { GoldfishRecord } from "./goldfish.js";
  */
 
 export type EngineStatus = "queued" | "running" | "done" | "blocked" | "failed";
+/** The providers a managed run can ride - the same two the
+ *  engine config choice names (engine-connect.ts ENGINE_PROVIDERS).
+ *  Kept as a local union so this module never imports
+ *  engine-connect (which imports engineBinary from here). */
+export type EngineRunProvider = "claude-code" | "codex";
 export interface EngineTask {
   id: string; actor: string; chatId: string; spec: string; title: string;
+  /** The provider selected when the run was queued - the provider
+   *  the owner approved is the provider that runs. Absent/null on
+   *  tasks queued before provider-selectable runs existed; those
+   *  resolve the install's current selection at drain time. */
+  provider?: EngineRunProvider | null;
   status: EngineStatus;
   createdAt: string; startedAt: string | null; finishedAt: string | null;
   result: string | null; output: string | null; exitCode: number | null;
@@ -205,33 +222,89 @@ export function updateEngineTask(root: string, id: string, patch: Partial<Engine
  *  beside it. The two lstatSync lines are the reserved probe:
  *  they stay byte-identical, and a symlink is still not a file. */
 export function engineBinary(env: NodeJS.ProcessEnv = process.env, probe?: BinaryProbe): string | null {
+  return resolveCommandBinary("claude", env.SAM_ENGINE_BIN, env, probe);
+}
+
+/** The one binary resolver both engine providers ride: a named
+ *  executable (the provider's env var) when it names a real file,
+ *  else the command found on PATH. The two lstatSync lines below
+ *  are the reserved probe (the win-path guard pins them
+ *  byte-identical in this file): a symlink is still not a file. */
+function resolveCommandBinary(command: string, rawNamed: string | undefined, env: NodeJS.ProcessEnv, probe?: BinaryProbe): string | null {
   const platform = probePlatform(probe);
   const delimiter = probeDelimiter(probe);
-  const rawNamed = env.SAM_ENGINE_BIN;
   const named = rawNamed ? namedExecutable(rawNamed, platform) : rawNamed;
   if (named) {
     try { return lstatSync(named).isFile() ? named : null; } catch { return null; }
   }
-  for (const candidate of commandCandidates(env.PATH, delimiter, "claude", platform)) {
+  for (const candidate of commandCandidates(env.PATH, delimiter, command, platform)) {
     try { if (lstatSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
   }
   return null;
 }
 
-export function engineStatus(root: string, env: NodeJS.ProcessEnv = process.env): { installed: boolean; binary: string | null; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[] } {
-  const items = listEngineTasks(root);
-  const count = (s: EngineStatus) => items.filter(t => t.status === s).length;
-  const binary = engineBinary(env);
-  return { installed: binary !== null, binary, queued: count("queued"), running: count("running"), done: count("done"), blocked: count("blocked"), failed: count("failed"), recent: items.slice(-10) };
+export function engineRunProviderLabel(provider: EngineRunProvider): string {
+  return provider === "codex" ? "Codex" : "Claude Code";
 }
 
-const NOT_INSTALLED = "The managed coding engine (Claude Code) is not installed on this machine - no SAM_ENGINE_BIN is set and no \"claude\" binary is on PATH. Installing it is the operator's act; until then an engine run cannot execute.";
+/** The provider this install's engine route is set to, read from
+ *  the engine-connection store. engine-connect.ts is that store's
+ *  only writer (setEngineProvider); this is its read-only mirror
+ *  for the run layer, kept here so engine-connect's import of
+ *  engineBinary stays cycle-free. A pure read: no store, no
+ *  provider table, or an unreadable row all read as the default
+ *  (claude-code), and nothing is ever created here. */
+export function selectedEngineProvider(root: string): EngineRunProvider {
+  const dbFile = join(resolve(root), ".sam", "engine-connection.db");
+  if (!existsSync(dbFile)) return "claude-code";
+  let db: Database.Database | null = null;
+  try {
+    db = openDatabase(dbFile, { readonly: true });
+    const table = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'engine_provider'").get();
+    if (!table) return "claude-code";
+    const row = db.prepare("SELECT data FROM engine_provider WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return "claude-code";
+    const value = JSON.parse(row.data) as { provider?: unknown };
+    return value?.provider === "codex" ? "codex" : "claude-code";
+  } catch { return "claude-code"; }
+  finally { try { db?.close(); } catch { /* already closed */ } }
+}
+
+/** The binary ONE provider's run would spawn: Claude Code rides
+ *  engineBinary (SAM_ENGINE_BIN, else claude on PATH); Codex
+ *  resolves SAM_CODEX_BIN, else "codex" on PATH through the same
+ *  bin-path helpers engine-connect's providerBinary uses. Null
+ *  means that provider is not installed. */
+export function engineRunBinary(provider: EngineRunProvider, env: NodeJS.ProcessEnv = process.env, probe?: BinaryProbe): string | null {
+  if (provider === "claude-code") return engineBinary(env, probe);
+  return resolveCommandBinary("codex", env.SAM_CODEX_BIN, env, probe);
+}
+
+/** The provider a task runs under: its queue-time snapshot when it
+ *  carries one, else the install's current selection. */
+export function engineTaskProvider(root: string, task: EngineTask): EngineRunProvider {
+  return task.provider === "codex" || task.provider === "claude-code" ? task.provider : selectedEngineProvider(root);
+}
+
+function notInstalledMessage(provider: EngineRunProvider): string {
+  return provider === "codex"
+    ? "The managed coding engine (Codex, the selected provider) is not installed on this machine - no SAM_CODEX_BIN is set and no \"codex\" binary is on PATH. Installing it is the operator's act; until then an engine run cannot execute."
+    : "The managed coding engine (Claude Code) is not installed on this machine - no SAM_ENGINE_BIN is set and no \"claude\" binary is on PATH. Installing it is the operator's act; until then an engine run cannot execute.";
+}
+
+export function engineStatus(root: string, env: NodeJS.ProcessEnv = process.env): { installed: boolean; binary: string | null; provider: EngineRunProvider; queued: number; running: number; done: number; blocked: number; failed: number; recent: EngineTask[] } {
+  const items = listEngineTasks(root);
+  const count = (s: EngineStatus) => items.filter(t => t.status === s).length;
+  const provider = selectedEngineProvider(root);
+  const binary = engineRunBinary(provider, env);
+  return { installed: binary !== null, binary, provider, queued: count("queued"), running: count("running"), done: count("done"), blocked: count("blocked"), failed: count("failed"), recent: items.slice(-10) };
+}
 
 /** Proposal-time validation for the ONE gate's engine kind: the
  *  detail is JSON {task, chatId?}; the task must be runnable the
  *  moment the owner approves, so everything execution needs is
  *  checked NOW - a card that cannot execute is never shown. */
-export function validateEngineDetail(root: string, detail: string, env: NodeJS.ProcessEnv = process.env): { task: string; chatId: string | null } {
+export function validateEngineDetail(root: string, detail: string, env: NodeJS.ProcessEnv = process.env): { task: string; chatId: string | null; provider: EngineRunProvider } {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid engine detail: expected JSON {task}"); }
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid engine detail: expected JSON {task}");
@@ -241,8 +314,9 @@ export function validateEngineDetail(root: string, detail: string, env: NodeJS.P
   const chatId = typeof s.chatId === "string" && s.chatId ? s.chatId : null;
   if (!codeRoot(root)) throw new Error("No code root is designated on this install, so an engine run has nowhere to work. The operator designates one with: sam code set-root <path>.");
   if (!gitRepoRoot(root)) throw new Error("The designated code root is not a git repository rooted at itself - engine runs work inside the C4 branch sandbox (a sam/<task> branch in that repo), never in an unbranched tree. Initialize or designate a git tree first.");
-  if (!engineBinary(env)) throw new Error(NOT_INSTALLED);
-  return { task, chatId };
+  const provider = selectedEngineProvider(root);
+  if (!engineRunBinary(provider, env)) throw new Error(notInstalledMessage(provider));
+  return { task, chatId, provider };
 }
 
 export function queueEngineTask(root: string, input: { actor: string; chatId: string; spec: string }): EngineTask {
@@ -251,21 +325,23 @@ export function queueEngineTask(root: string, input: { actor: string; chatId: st
   if (!spec || spec.length > 4000) throw new Error("Invalid engine task spec");
   if (!input.chatId) throw new Error("A chat is required");
   // Same executability bar as the proposal gate, so a direct queue
-  // can never create a run that can only fail.
-  validateEngineDetail(root, JSON.stringify({ task: spec }));
+  // can never create a run that can only fail. The validation also
+  // resolves the selected provider, snapshotted onto the task:
+  // the provider the owner approved is the provider that runs.
+  const { provider } = validateEngineDetail(root, JSON.stringify({ task: spec }));
   const db = new ChatStore(root);
   try { db.messages(input.chatId); } finally { db.close(); }
   const items = listEngineTasks(root);
   if (items.filter(t => t.status === "queued" || t.status === "running").length >= MAX_OPEN) throw new Error("Engine queue is full");
   const item: EngineTask = {
     id: randomUUID(), actor: input.actor, chatId: input.chatId, spec,
-    title: spec.slice(0, 120), status: "queued",
+    title: spec.slice(0, 120), provider, status: "queued",
     createdAt: new Date().toISOString(), startedAt: null, finishedAt: null,
     result: null, output: null, exitCode: null,
     changes: [], unreviewable: [], verification: null, review: null, git: null,
   };
   insertEngineTask(root, item);
-  recordActivity(root, input.actor, "engine-queued", "Queued engine run: " + item.title);
+  recordActivity(root, input.actor, "engine-queued", "Queued engine run (" + engineRunProviderLabel(provider) + "): " + item.title);
   return item;
 }
 
@@ -283,6 +359,7 @@ export function engineSummaryText(task: EngineTask): string {
       ? "Engine run blocked (not done): " + task.title
       : "Engine run failed: " + task.title;
   const lines = [outcome, "Verification: " + (task.verification ?? "unknown") + "."];
+  if (task.provider === "codex" || task.provider === "claude-code") lines.splice(1, 0, "Engine: " + engineRunProviderLabel(task.provider) + " (the provider selected when this run was queued).");
   if (task.git?.mode === "branch") {
     lines.push("Git: branch " + task.git.branch + ", " + task.git.commits.length + " local commit(s)" + (task.git.commits.length ? " (" + task.git.commits.map(c => c.sha.slice(0, 8)).join(", ") + ")" : "") + " - not pushed; pushing the branch is an owner-approved git-push proposal." + (task.git.pending.length ? " Not committed: " + task.git.pending.join(", ") + "." : ""));
   }
@@ -309,11 +386,21 @@ export const defaultEngineRunner: EngineRunner = (binary, args, cwd, timeoutMs) 
   });
 });
 
-/** The fixed argv an engine run is spawned with. The task text is
- *  the ONLY caller-supplied element, passed as one argv item -
- *  never a shell string, never a flag. Exported for tests. */
-export function engineArgv(task: EngineTask): string[] {
-  return ["-p", task.spec + ENGINE_FOOTER, "--output-format", "text", "--permission-mode", "acceptEdits"];
+/** The fixed argv an engine run is spawned with, per provider.
+ *  The task text is the ONLY caller-supplied element, passed as
+ *  one argv item - never a shell string, never a flag. Claude
+ *  Code keeps its original argv exactly; Codex rides the
+ *  coding-operatives adapter shape (exec in a workspace-write
+ *  sandbox; --skip-git-repo-check is belt-and-braces - the drain
+ *  has already proven the code root is a git repo rooted at
+ *  itself). The provider defaults to the task's queue-time
+ *  snapshot, then claude-code for a bare legacy task. Exported
+ *  for tests. */
+export function engineArgv(task: EngineTask, provider?: EngineRunProvider): string[] {
+  const selected = provider ?? (task.provider === "codex" || task.provider === "claude-code" ? task.provider : "claude-code");
+  const prompt = task.spec + ENGINE_FOOTER;
+  if (selected === "codex") return ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--", prompt];
+  return ["-p", prompt, "--output-format", "text", "--permission-mode", "acceptEdits"];
 }
 
 export interface EngineDrainDeps {
@@ -361,7 +448,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
         // Carry every field the run accumulated on `current` - the
         // record on disk only holds what the mid-run updates wrote.
         const done = updateEngineTask(root, task.id, {
-          exitCode: current.exitCode, output: current.output,
+          exitCode: current.exitCode, output: current.output, provider: current.provider ?? null,
           changes: current.changes, unreviewable: current.unreviewable,
           verification: current.verification, review: current.review, git: current.git,
           status, result: result.slice(0, 600), finishedAt: new Date().toISOString(),
@@ -386,13 +473,20 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
           : "Git discipline refused the run: " + (gitState.error ?? "the code root's git state could not be prepared"));
         continue;
       }
-      const binary = engineBinary(deps.env ?? process.env);
-      if (!binary) { close("failed", NOT_INSTALLED); continue; }
+      // The run rides the task's queue-time provider snapshot (a
+      // legacy task resolves the current selection), and the
+      // resolved provider is stamped onto the record so the
+      // closing summary names the engine that actually ran.
+      const provider = engineTaskProvider(root, current);
+      current.provider = provider;
+      updateEngineTask(root, task.id, { provider });
+      const binary = engineRunBinary(provider, deps.env ?? process.env);
+      if (!binary) { close("failed", notInstalledMessage(provider)); continue; }
       const base = codeRoot(root);
       if (!base) { close("blocked", "The designated code root vanished before the run could start."); continue; }
       const runner = deps.runEngine ?? defaultEngineRunner;
       let outcome: { exitCode: number | null; output: string; timedOut?: boolean };
-      try { outcome = await runner(binary, engineArgv(current), base, ENGINE_TIMEOUT_MS); }
+      try { outcome = await runner(binary, engineArgv(current, provider), base, ENGINE_TIMEOUT_MS); }
       catch (e) { outcome = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
       current.exitCode = outcome.exitCode;
       current.output = (outcome.output ?? "").slice(-OUTPUT_TAIL_CHARS);
