@@ -27,6 +27,7 @@ import { engineConnectStatus, type EngineConnection } from "./engine-connect.js"
 import { sensesStatus } from "./senses.js";
 import { briefStatus } from "./brief.js";
 import { readSelfAudit, type SelfAudit } from "./self-audit.js";
+import { readSelfWork, type SelfWorkRun } from "./self-work.js";
 import { readSetupRecord, type SetupRecord } from "./config-wizard.js";
 import { authStatus, type AuthStatus } from "./auth-status.js";
 import { stackWatchStatus } from "./stack-watch.js";
@@ -79,6 +80,7 @@ export function statusSnapshot(root: string): {
   senses: { installed: boolean; binary: string | null; coreOnly: true; senses: string[] };
   brief: { installed: boolean; job: unknown; script: string };
   selfAudit: SelfAudit | null;
+  selfWork: SelfWorkRun | null;
   setup: SetupRecord | null;
   auth: AuthStatus;
   stackWatch: { connector: string | null; script: string };
@@ -113,6 +115,7 @@ export function statusSnapshot(root: string): {
     senses: sensesStatus(),
     brief: briefStatus(root),
     selfAudit: readSelfAudit(root),
+    selfWork: readSelfWork(root),
     setup: readSetupRecord(root),
     auth: authStatus(root),
     stackWatch: stackWatchStatus(root),
