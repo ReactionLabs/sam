@@ -23,7 +23,7 @@ import { doorEnabled, listDoors } from "./mini-door.js";
 import { listDrafts } from "./drafts.js";
 import { listContacts } from "./contacts.js";
 import type { DoorGuardStats } from "./door-guard.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { channels } from "./channels.js";
 import { installedSkills } from "./skill-registry.js";
 import { listSubagents } from "./subagents.js";
@@ -118,7 +118,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     skillUse: recentSkillUse(root, 10),
     agents: agents(root),
     config: readDashboardConfig(root),
-    connectors: connectors(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
+    connectors: connectors(root).map(c => ({ ...c, credentialPresent: connectorCredentialPresent(root, c) })),
     channels: channels(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
     preferences,
     heartbeatJobs: jobs,

@@ -8,7 +8,7 @@ import { loadApprovalPolicy, neverListSummary } from "./approval-policy.js";
 import { authStatus } from "./auth-status.js";
 import { channels } from "./channels.js";
 import { codeCommandNames, codeSummary } from "./code.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { engineStatus } from "./engine.js";
 import { engineConnectStatus } from "./engine-connect.js";
 import { heartbeatJobs } from "./heartbeat.js";
@@ -133,7 +133,7 @@ function saveSelfAudit(root: string, audit: SelfAudit): void {
  *  same map the service would. */
 export function buildSelfAudit(root: string, env: NodeJS.ProcessEnv = process.env): SelfAudit {
   const own = OWN_TOOLS.map(toolNameOf).filter(Boolean).sort();
-  const conns = connectors(root).map(c => ({ name: c.name, enabled: c.enabled, credentialPresent: !!env[c.tokenEnv], tools: c.allowedTools.length }));
+  const conns = connectors(root).map(c => ({ name: c.name, enabled: c.enabled, credentialPresent: c.tokenEnv ? !!env[c.tokenEnv] : connectorCredentialPresent(root, c), tools: c.allowedTools.length }));
   const chans = channels(root).map(c => ({ name: c.name, kind: c.kind, profile: c.profile, owners: c.ownerIds.length, enabled: c.enabled }));
   const code = codeSummary(root);
   const policy = loadApprovalPolicy(root);
@@ -153,7 +153,7 @@ export function buildSelfAudit(root: string, env: NodeJS.ProcessEnv = process.en
   else cannot.push({ capability: "model turns", detail: "the chat route does not resolve a working model/key - the operator checks 'sam models status'" });
   can.push({ capability: "propose gated actions", detail: "the ONE gate in " + policy.mode + " mode" + (policy.autoKinds.length ? " (smart-auto: " + policy.autoKinds.join(", ") + ")" : "") + "; the never-list (" + String(neverListSummary().length) + " patterns) binds in every mode" });
   for (const c of conns) {
-    if (c.enabled && c.credentialPresent) can.push({ capability: "read through the " + c.name + " connector", detail: String(c.tools) + " read-only tools, credential env present" });
+    if (c.enabled && c.credentialPresent) can.push({ capability: "read through the " + c.name + " connector", detail: String(c.tools) + " read-only tools, credential present" });
     else cannot.push({ capability: "read through the " + c.name + " connector", detail: c.enabled ? "its credential env is not present in this process" : "the connector is disabled in the registry" });
   }
   if (!conns.length) cannot.push({ capability: "connector reads", detail: "no connector is registered - a scoped profile's world is its connector pin, registered by the operator" });

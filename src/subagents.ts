@@ -4,7 +4,7 @@ import { executeOwnToolAsync, OWN_TOOLS, ownToolsChat } from "./own-tools.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, partitionTools, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { turnRoutes } from "./failover.js";
 import { readProviderKey } from "./providers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -196,7 +196,7 @@ async function defaultComplete(env: NodeJS.ProcessEnv): Promise<SubagentComplete
 async function connectorComplete(root: string, profile: string, env: NodeJS.ProcessEnv): Promise<SubagentCompleter> {
   const connectorId = profileRecord(root, profile)?.connectorId ?? null;
   const pinned = connectorId ? connectors(root).find(c => c.id === connectorId) : undefined;
-  if (!pinned || !pinned.enabled || !env[pinned.tokenEnv]) throw new Error("Profile connector unavailable");
+  if (!pinned || !pinned.enabled || !(pinned.tokenEnv ? !!env[pinned.tokenEnv] : connectorCredentialPresent(root, pinned))) throw new Error("Profile connector unavailable");
   return defaultComplete(env);
 }
 

@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { channels, addChannel, type Channel } from "./channels.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { modelRoutingTable } from "./model-routing.js";
 import { engineBinary } from "./engine.js";
@@ -123,7 +123,7 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
     apiKey: modelApiKey(env) ? "present" : "absent",
     profiles,
     channels: chans.map(c => ({ name: c.name, kind: c.kind, profile: c.profile, tokenEnv: c.tokenEnv, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const, owners: c.ownerIds.length, enabled: c.enabled })),
-    connectors: conns.map(c => ({ name: c.name, enabled: c.enabled, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const })),
+    connectors: conns.map(c => ({ name: c.name, enabled: c.enabled, credential: (c.vaultKey ? connectorCredentialPresent(root, c) : !!clean(env[c.tokenEnv])) ? "present" as const : "absent" as const })),
     keys,
     engine: (() => { const c = engineConnectStatus(root, env); return { installed: !!engineBin, binary: engineBin, connected: c.connected, stale: c.stale, connection: c.connection }; })(),
     senses: { installed: senses.installed, binary: senses.binary },

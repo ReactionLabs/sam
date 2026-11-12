@@ -1,4 +1,4 @@
-import { connectors, testConnector, readConnectorTool, type Connector } from "./connectors.js";
+import { connectors, connectorCredentialPresent, testConnector, readConnectorTool, type Connector } from "./connectors.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt } from "./own-tools.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, type ToolBudget } from "./budgets.js";
@@ -21,12 +21,12 @@ function safeArgs(raw:Record<string,unknown>):Record<string,unknown>|null{
 }
 export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string; userMessageId?:string }
 export async function connectorChat(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat"),guard?:{toolsStarted:boolean}):Promise<string>{
- const connected=connectors(root).filter(c=>c.enabled&&!!process.env[c.tokenEnv]&&(!connectorId||c.id===connectorId));
+ const connected=connectors(root).filter(c=>c.enabled&&connectorCredentialPresent(root,c)&&(!connectorId||c.id===connectorId));
  if(!connected.length)throw Error(connectorId?"Profile connector unavailable":"No configured MCP connector credentials");
  // Without a profile pin, only one connector may be live for chat; never silently route across tenants.
  if(!connectorId&&connected.length!==1)throw Error("Select exactly one enabled MCP connector for chat");
  const connector:Connector=connected[0];
- const discovered=await testConnector(connector);
+ const discovered=await testConnector(connector,root);
  const allowed=discovered.approved;
  if(!allowed.length)throw Error("No approved MCP read tools discovered");
  const toolMap=new Map<string,string>();
@@ -132,7 +132,7 @@ export async function connectorChat(root:string,provider:OpenAICompatibleProvide
     else{
      const args=safeArgs(call.args);
      if(!args)outputs.set(call.id,{error:"Tool arguments not supported"});
-     else { sigById.set(call.id,failureSignature(call.name,call.args)); pending.push({id:call.id,run:async()=>{try{return await readConnectorTool(connector,name,args);}catch{return {error:"MCP tool failed"};}}}); }
+     else { sigById.set(call.id,failureSignature(call.name,call.args)); pending.push({id:call.id,run:async()=>{try{return await readConnectorTool(connector,name,args,root);}catch{return {error:"MCP tool failed"};}}}); }
     }
    }
   }

@@ -20,6 +20,7 @@ import { queueEngineTask, validateEngineDetail } from "./engine.js";
 import { spawnMini, validateSpawnDetail } from "./minis.js";
 import { createLink } from "./links.js";
 import { runApprovedDelegation, validateDelegateDetail } from "./coding-operatives.js";
+import { pairConnector, validatePairDetail } from "./connector-pairing.js";
 
 // Hands, with a gate. SAM (any profile) can PROPOSE an action; nothing executes
 // until the owner approves it in the dashboard or by CLI. The executor allowlist
@@ -45,7 +46,7 @@ import { runApprovedDelegation, validateDelegateDetail } from "./coding-operativ
 // always cards the owner with adapter, repo, branch, and prompt, and the
 // process does not start until that card is approved. Every step lands in the
 // activity ledger, so a proposal's whole life is auditable.
-export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine" | "spawn" | "delegate";
+export type ActionKind = "note" | "law" | "heartbeat" | "say" | "skill" | "draft" | "skill-author" | "git-push" | "engine" | "spawn" | "delegate" | "pair";
 export type ActionStatus = "pending" | "done" | "rejected" | "failed";
 export interface ActionProposal {
   id: string; actor: string; kind: ActionKind; title: string; detail: string;
@@ -63,7 +64,7 @@ export interface ActionProposal {
   risk: ProposalRisk | null;
   decidedBy: string | null;
 }
-const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn", "delegate"];
+const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn", "delegate", "pair"];
 export const ACTION_KINDS: readonly string[] = KINDS;
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 function actionsDbFile(root: string): string { return join(resolve(root), ".sam", "actions.db"); }
@@ -247,6 +248,11 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // proposal time - fresh name, real person and instructions, a real
   // connector pin - so the card the owner sees can always execute.
   if (input.kind === "spawn") validateSpawnDetail(root, detail);
+  // Self-pairing (Dip, 2026-11-12): a pair proposal is validated at
+  // proposal time - fresh connector name, a vault credential that
+  // exists by name, a known profile, a plain https or loopback URL -
+  // so the card the owner sees can always execute.
+  if (input.kind === "pair") validatePairDetail(root, detail);
   if (input.kind === "delegate") validateDelegateDetail(detail);
   if (input.kind === "engine") {
     const parsed = validateEngineDetail(root, detail);
@@ -372,6 +378,22 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
       linkNote = "; linked to " + a.actor + " ('" + group.name + "') so they can work together through the link";
     } catch (e) { linkNote = "; the agent exists but linking it to " + a.actor + " failed: " + (e instanceof Error ? e.message : "unknown error"); }
     return "Agent " + mini.name + " created for " + mini.person + " (profile + welcome chat 'Meet " + mini.person + "'" + (spec.starterHeartbeat ? " + a starter daily digest" : "") + ")" + linkNote;
+  }
+  if (a.kind === "pair") {
+    // Self-pairing execution: register the connector bound to the
+    // named vault credential, allowlist its loopback host when it
+    // has one, test the endpoint with the harmless list call, and
+    // pin it to the profile. Validation runs again inside
+    // pairConnector, and a failed test or pin rolls the
+    // registration back - approval never leaves a broken connector
+    // enabled. The credential VALUE is resolved by the connector
+    // executor at call time; it never passes through here.
+    const spec = validatePairDetail(root, a.detail);
+    const paired = await pairConnector(root, a.actor, spec);
+    return "Paired connector " + paired.connector.name + " for profile " + paired.profile +
+      (paired.pinned ? " (pinned to it)" : " (the core profile routes to enabled connectors directly)") +
+      " using vault credential " + spec.vaultKey + " - " + paired.approvedTools.length +
+      " approved read-only tool(s): " + (paired.approvedTools.join(", ") || "none");
   }
   if (a.kind === "delegate") {
     // Owner-approved coding operative. The card already named the

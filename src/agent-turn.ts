@@ -2,7 +2,7 @@ import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider, stripModelMarkup } from "./openai-compatible.js";
 import { connectorChat } from "./connector-chat.js";
 import { ownToolsChat } from "./own-tools.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
@@ -240,12 +240,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
-        if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
+        if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
         reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
       }else if(chatAgent){
         reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
       }else{
-        const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+        const useConnectors=connectors(root).some(c=>c.enabled&&connectorCredentialPresent(root,c));
         if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
         else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
       }

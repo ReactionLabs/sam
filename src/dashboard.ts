@@ -129,14 +129,14 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       try{await post();const id=connectorRoute[1],action=connectorRoute[2];
         if(action==="delete"){json(removeConnector(workspace,id)?200:404,{ok:true});return;}
         const c=getConnector(workspace,id);
-        if(action==="test"){json(200,await testConnector(c));return;}
+        if(action==="test"){json(200,await testConnector(c,workspace));return;}
         const b=await Promise.resolve({}); // read parameters are intentionally fixed for this first slice
         void b;
-        const tools=await testConnector(c);
+        const tools=await testConnector(c,workspace);
         if(!tools.approved.includes("whoami")||!tools.approved.includes("pipeline_summary")||!tools.approved.includes("list_leads"))throw Error("Required read tools unavailable");
-        const identity=await readConnectorTool(c,"whoami");
-        const summary=await readConnectorTool(c,"pipeline_summary");
-        const leads=await readConnectorTool(c,"list_leads",{limit:10});
+        const identity=await readConnectorTool(c,"whoami",{},workspace);
+        const summary=await readConnectorTool(c,"pipeline_summary",{},workspace);
+        const leads=await readConnectorTool(c,"list_leads",{limit:10},workspace);
         json(200,{identity,summary,leads});
       }catch(e){const m=e instanceof Error?e.message:"Connector request failed";json(400,{error:m.startsWith("MCP ")||m.startsWith("Connector ")||m.startsWith("Required ")||m.startsWith("Tool ") ?m:"Connector request failed"});}return;
     }

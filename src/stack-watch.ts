@@ -170,7 +170,7 @@ export async function buildStackWatchReport(root: string, opts: { call?: StackTo
     const registered = connectors(root).map(c => c.name);
     throw new Error("No enabled connector offers the Nines stack tools (stack_health, paper_setups), so the stack watch has nothing to read. Registered connectors: " + (registered.length ? registered.join(", ") : "(none)"));
   }
-  const call = opts.call ?? readConnectorTool;
+  const call = opts.call ?? ((c: Connector, tool: string, args: Record<string, unknown>) => readConnectorTool(c, tool, args, root));
   const health = parseStackHealth(await call(connector, "stack_health", {}));
   const entered = countEnteredSetups(await call(connector, "paper_setups", { state: ENTERED_STATE, limit: ENTERED_PAGE_LIMIT }));
   const frozen = isFrozenStack(health.candidatesNewest);

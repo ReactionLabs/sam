@@ -28,6 +28,9 @@ import { recordActivity } from "./activity.js";
  * var on the child process alone. The second consumer is the
  * gated git-push executor (git-work.ts): the same host-matched
  * injection into the push child alone, after an owner approval.
+ * The third consumer is a vault-bound MCP connector
+ * (connectors.ts, SELF-PAIRING): the executor resolves the value
+ * at call time into the Authorization header alone.
  * The value never enters argv, a tool result, or the ledger.
  * Credentials with no declared hosts never auto-inject; they
  * wait for a named consumer.
