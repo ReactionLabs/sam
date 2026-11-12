@@ -116,7 +116,7 @@ test("providers: a probe verdict is persisted per provider, and a missing pin fa
     assert.equal(providerRow?.kind, "provider");
     const stored = readProbeStore(root);
     assert.equal(stored?.results.find(r => r.target === "provider:anthropic")?.bucket, "ok");
-    assert.ok(!readFileSync(join(root, ".sam", "auth-probes.json"), "utf8").includes("anthropic-secret"));
+    assert.ok(!readFileSync(join(root, ".sam", "auth-probes.db"), "utf8").includes("anthropic-secret"));
     const status = authStatus(root, env);
     assert.equal(status.providers.find(p => p.id === "anthropic")?.lastProbe?.bucket, "ok");
     for (const key of Object.keys(process.env)) delete process.env[key];

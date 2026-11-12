@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
 import { ChatStore } from "./chats.js";
 import { modelRoutingTable, type ModelSource, type ModelTier } from "./model-routing.js";
 import { parseSamConfig } from "./config.js";
@@ -29,7 +30,7 @@ export { modelKeyEnvName };
 // Probing is explicit: `models status --probe --live` runs ONE real
 // completion per DISTINCT resolved model through the existing
 // provider, buckets the result, and persists it
-// (.sam/auth-probes.json) so plain status reads the last verdict
+// (.sam/auth-probes.db) so plain status reads the last verdict
 // back without spending another call.
 
 export type ProbeBucket = "ok" | "auth" | "rate_limit" | "billing" | "timeout" | "network" | "empty" | "missing" | "error";
@@ -111,14 +112,81 @@ function targets(root: string, env: NodeJS.ProcessEnv): { routes: Array<Omit<Aut
 interface ProbeStore { at: string; results: ProbeRecord[] }
 
 function probePath(root: string) { return join(resolve(root), ".sam", "auth-probes.json"); }
+function probeDbPath(root: string) { return join(resolve(root), ".sam", "auth-probes.db"); }
 
-export function readProbeStore(root: string): ProbeStore | null {
+// State convergence (UNIFICATION item 4, twenty-eighth store):
+// the auth probe verdicts are SQLite (.sam/auth-probes.db, the
+// approval-policy singleton pattern), ONE row holding the probe
+// store's full JSON so the singleton keeps its exact shape. The
+// old auth-probes.json was rewritten whole by probeAuth on every
+// probe run - a non-atomic writeFileSync - while readProbeStore
+// readers run in every process that builds auth status (the
+// dashboard status path, the CLI overview and `models status`,
+// observability). A torn write read back as no probe store at
+// all, so the last verdicts silently vanished: a chat route
+// whose latest probe failed read as never-probed, and
+// authCheckOk passed it again. Here each probe run is a
+// single-row UPSERT and connections carry a busy_timeout, so
+// no reader in any process can ever see a torn verdict set.
+// First open imports a legacy auth-probes.json (validated
+// through the old read shape: a string at plus a results array)
+// and renames it auth-probes.json.migrated - imported, never
+// deleted; a malformed file or a payload failing that shape
+// imports nothing and is left in place (the migrated shape
+// reads it as no probe store, exactly the old forgiving
+// contract). A pure read on an install with neither file
+// creates nothing. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup
+// change.
+function parseProbeStore(data: unknown): ProbeStore | null {
+  const value = data as ProbeStore | null;
+  return typeof value?.at === "string" && Array.isArray(value?.results) ? { at: value.at, results: value.results } : null;
+}
+function openProbeStore(root: string): Database.Database {
+  const dir = join(resolve(root), ".sam");
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
+  const db = new Database(probeDbPath(root));
+  db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
+  db.exec("CREATE TABLE IF NOT EXISTS auth_probes (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyProbes(db, root);
+  return db;
+}
+function migrateLegacyProbes(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM auth_probes WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
   const file = probePath(root);
-  if (!existsSync(file)) return null;
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const store = parseProbeStore(data);
+  if (!store) return;
+  db.prepare("INSERT OR IGNORE INTO auth_probes (id, data) VALUES (1, ?)").run(JSON.stringify(store));
+  renameSync(file, file + ".migrated");
+}
+function probeStoreExists(root: string): boolean {
+  return existsSync(probeDbPath(root)) || existsSync(probePath(root));
+}
+function saveProbeStore(root: string, store: ProbeStore): void {
+  const db = openProbeStore(root);
   try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as ProbeStore;
-    return typeof value?.at === "string" && Array.isArray(value?.results) ? value : null;
-  } catch { return null; }
+    db.prepare("INSERT INTO auth_probes (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(store));
+  } finally { db.close(); }
+}
+
+// The store's read door: the last probe run's verdicts through
+// the store's own shape, or null when no probe has ever been
+// persisted - and a read on an install with no store at all
+// creates nothing.
+export function readProbeStore(root: string): ProbeStore | null {
+  if (!probeStoreExists(root)) return null;
+  const db = openProbeStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM auth_probes WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return null;
+    try { return parseProbeStore(JSON.parse(row.data)); } catch { return null; }
+  } finally { db.close(); }
 }
 
 export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): AuthStatus {
@@ -227,8 +295,7 @@ export async function probeAuth(root: string, env: NodeJS.ProcessEnv = process.e
     const v = verdicts.get((t.endpoint ?? "") + "\n" + t.model + "\n" + t.keyEnv)!;
     return { target: t.target, kind: t.kind, model: t.model, bucket: v.bucket, reason: v.reason, at, latencyMs: v.latencyMs };
   });
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(probePath(root), JSON.stringify({ at, results }, null, 2), { mode: 0o600 });
+  saveProbeStore(root, { at, results });
   const bad = results.filter(r => r.bucket !== "ok");
   recordActivity(root, "owner", "auth-probe", "Auth probe: " + (results.length - bad.length) + "/" + results.length + " targets ok (" + calls + " model call(s))" + (bad.length ? "; not ok: " + bad.map(r => r.target + "=" + r.bucket).join(", ") : ""));
   return { at, results, ok: bad.length === 0, calls };

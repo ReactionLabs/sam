@@ -97,8 +97,9 @@ test("probe: one call per distinct model, buckets persist, and status reads the 
     const pin = run.results.find(r => r.target === "profile:trading")!;
     assert.equal(pin.bucket, "auth");
     assert.ok(readProbeStore(root));
-    assert.ok(existsSync(join(root, ".sam", "auth-probes.json")));
-    assert.ok(!readFileSync(join(root, ".sam", "auth-probes.json"), "utf8").includes("<redacted>"));
+    assert.ok(existsSync(join(root, ".sam", "auth-probes.db")));
+    assert.equal(existsSync(join(root, ".sam", "auth-probes.json")), false, "the verdicts ride the SQLite store; no JSON is recreated");
+    assert.ok(!readFileSync(join(root, ".sam", "auth-probes.db"), "utf8").includes("<redacted>"));
     const s = authStatus(root, configuredEnv());
     assert.equal(s.lastProbeAt, run.at);
     assert.equal(s.routes.find(r => r.route === "chat")!.lastProbe?.bucket, "ok");
