@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { setCodeRoot } from "./code.js";
 import { drainEngineTasks, getEngineTask, listEngineTasks, queueEngineTask, updateEngineTask, type EngineTask } from "./engine.js";
+import { installFakeEngine } from "./fake-engine.js";
 
 // State convergence (UNIFICATION item 4, seventh store): the
 // managed engine queue migrated from whole-file engine.json
@@ -35,9 +36,7 @@ function fixture() {
   git(proj, "init", "-q");
   git(proj, "add", "package.json", "tracked.txt");
   git(proj, "commit", "-q", "-m", "initial");
-  const fake = join(binDir, "claude");
-  writeFileSync(fake, "#!/bin/sh\nexit 0\n");
-  chmodSync(fake, 0o755);
+  const fake = installFakeEngine(binDir, { workFile: join(base, "engine-work.mjs"), projectDir: proj });
   const db = new ChatStore(sam);
   let chatId: string;
   try { chatId = db.create("Desk", "trading").id; } finally { db.close(); }

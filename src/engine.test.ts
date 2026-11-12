@@ -1,23 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { codeWrites, setCodeRoot } from "./code.js";
 import { verificationStatus } from "./verification.js";
 import { drainEngineTasks, engineArgv, engineBinary, engineStatus, listEngineTasks, queueEngineTask, validateEngineDetail, type EngineTask } from "./engine.js";
+import { installFakeEngine } from "./fake-engine.js";
 import { decideAction, listActions, proposeAction } from "./actions.js";
 import { classifyProposal, saveApprovalPolicy } from "./approval-policy.js";
 import type { GoldfishRecord } from "./goldfish.js";
 
 // Phase D item 6 (coder C6): the managed coding-engine runtime.
-// Fixtures use REAL git and a REAL fake engine binary (a shell
-// script SAM_ENGINE_BIN points at), so the fixed-argv spawn, the
-// branch sandbox, the change recording, and the commit are all
-// exercised as behavior, not as mocks of themselves. The drain's
-// verify step runs the fixture's real npm scripts through C2.
+// Fixtures use REAL git and a REAL fake engine binary (a Node
+// script SAM_ENGINE_BIN points at; on win32 that path is a .cmd
+// shim that launches the same script), so the fixed-argv spawn,
+// the branch sandbox, the change recording, and the commit are
+// all exercised as behavior, not as mocks of themselves. The
+// drain's verify step runs the fixture's real npm scripts through C2.
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, "-c", "user.name=Test", "-c", "user.email=test@localhost", ...args], { encoding: "utf8" }).trim();
@@ -40,11 +42,10 @@ function fixture(opts: { gitInit?: boolean; testScript?: string } = {}) {
     git(proj, "add", "package.json", "tracked.txt");
     git(proj, "commit", "-q", "-m", "initial");
   }
-  // The fake engine: ignores its argv, writes the change the test
-  // staged for it (engine-script.sh in the fixture root), exits 0.
-  const fake = join(binDir, "claude");
-  writeFileSync(fake, "#!/bin/sh\nsh \"" + join(base, "engine-script.sh") + "\" \"" + proj + "\"\necho \"engine: work complete\"\n");
-  chmodSync(fake, 0o755);
+  // The fake engine: ignores its argv, runs the Node work file the
+  // test staged (engine-work.mjs), and exits 0. Windows cannot exec
+  // a shell script, so the entrypoint is a .cmd shim there.
+  const fake = installFakeEngine(binDir, { workFile: join(base, "engine-work.mjs"), projectDir: proj });
   const db = new ChatStore(sam);
   let chatId: string;
   try { chatId = db.create("Desk", "trading").id; } finally { db.close(); }
@@ -61,7 +62,7 @@ function fixture(opts: { gitInit?: boolean; testScript?: string } = {}) {
 }
 
 function engineScript(f: { base: string }, body: string) {
-  writeFileSync(join(f.base, "engine-script.sh"), body);
+  writeFileSync(join(f.base, "engine-work.mjs"), body);
 }
 
 test("binary resolution: SAM_ENGINE_BIN wins, a missing binary reads not-installed cleanly", () => {
@@ -116,7 +117,7 @@ test("the gate: engine is consequential (smart can never auto it), approval queu
 test("happy path: the engine runs in the branch sandbox; SAM records, verifies, reviews, and commits its work", async () => {
   const f = fixture();
   try {
-    engineScript(f, "printf 'hello from the engine\\n' > \"$1/hello.txt\"\nprintf 'original\\nengine line\\n' > \"$1/tracked.txt\"\n");
+    engineScript(f, "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst proj = process.argv[2];\nwriteFileSync(join(proj, 'hello.txt'), 'hello from the engine\\n');\nwriteFileSync(join(proj, 'tracked.txt'), 'original\\nengine line\\n');\n");
     const task = queueEngineTask(f.sam, { actor: "trading", chatId: f.chatId, spec: "Add hello.txt and extend tracked.txt" });
     const result = await drainEngineTasks(f.sam, { review: async () => PASS_REVIEW });
     assert.deepEqual(result.ran, [task.id]);
@@ -153,7 +154,7 @@ test("happy path: the engine runs in the branch sandbox; SAM records, verifies, 
 test("an engine change outside the recordable shape (a protected .env) blocks the run, uncommitted", async () => {
   const f = fixture();
   try {
-    engineScript(f, "printf 'TOKEN=abc\\n' > \"$1/.env\"\nprintf 'fine\\n' > \"$1/hello.txt\"\n");
+    engineScript(f, "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst proj = process.argv[2];\nwriteFileSync(join(proj, '.env'), 'TOKEN=abc\\n');\nwriteFileSync(join(proj, 'hello.txt'), 'fine\\n');\n");
     queueEngineTask(f.sam, { actor: "trading", chatId: f.chatId, spec: "Write config files" });
     const result = await drainEngineTasks(f.sam, { review: async () => PASS_REVIEW });
     assert.equal(result.blocked.length, 1);
@@ -169,7 +170,7 @@ test("an engine change outside the recordable shape (a protected .env) blocks th
 test("a failing engine closes failed with its output; a dirty tree blocks before the engine ever runs", async () => {
   const f = fixture();
   try {
-    engineScript(f, "echo 'engine exploded' >&2\nexit 3\n");
+    engineScript(f, "console.error('engine exploded');\nprocess.exit(3);\n");
     // The fake binary exits 0 regardless (it runs the script last);
     // a non-zero exit is exercised through the injected runner.
     const task = queueEngineTask(f.sam, { actor: "trading", chatId: f.chatId, spec: "Boom" });
@@ -195,7 +196,7 @@ test("a failing engine closes failed with its output; a dirty tree blocks before
 test("verification failure and a review BLOCK both close blocked, never done, with nothing committed", async () => {
   const f = fixture({ testScript: "node -e \"process.exit(1)\"" });
   try {
-    engineScript(f, "printf 'x\\n' > \"$1/hello.txt\"\n");
+    engineScript(f, "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst proj = process.argv[2];\nwriteFileSync(join(proj, 'hello.txt'), 'x\\n');\n");
     queueEngineTask(f.sam, { actor: "trading", chatId: f.chatId, spec: "Add hello" });
     const result = await drainEngineTasks(f.sam, { review: async () => PASS_REVIEW });
     assert.equal(result.blocked.length, 1);
@@ -207,7 +208,7 @@ test("verification failure and a review BLOCK both close blocked, never done, wi
 
   const g = fixture();
   try {
-    engineScript(g, "printf 'x\\n' > \"$1/hello.txt\"\n");
+    engineScript(g, "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst proj = process.argv[2];\nwriteFileSync(join(proj, 'hello.txt'), 'x\\n');\n");
     queueEngineTask(g.sam, { actor: "trading", chatId: g.chatId, spec: "Add hello" });
     const block: GoldfishRecord = { ...PASS_REVIEW, verdict: "BLOCK", summary: "the change is wrong" };
     const result = await drainEngineTasks(g.sam, { review: async () => block });
@@ -218,7 +219,7 @@ test("verification failure and a review BLOCK both close blocked, never done, wi
     // Review unavailable is also blocked, never done.
     const h = fixture();
     try {
-      engineScript(h, "printf 'x\\n' > \"$1/hello.txt\"\n");
+      engineScript(h, "import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\nconst proj = process.argv[2];\nwriteFileSync(join(proj, 'hello.txt'), 'x\\n');\n");
       queueEngineTask(h.sam, { actor: "trading", chatId: h.chatId, spec: "Add hello" });
       const r2 = await drainEngineTasks(h.sam, { review: async () => { throw new Error("no catalog"); } });
       assert.equal(r2.blocked.length, 1);
@@ -230,7 +231,7 @@ test("verification failure and a review BLOCK both close blocked, never done, wi
 test("a no-change engine run closes done plainly, and the fixed argv carries only the task text", async () => {
   const f = fixture();
   try {
-    engineScript(f, "true\n");
+    engineScript(f, "process.exit(0);\n");
     const task = queueEngineTask(f.sam, { actor: "trading", chatId: f.chatId, spec: "Look around and change nothing" });
     const result = await drainEngineTasks(f.sam, { review: async () => PASS_REVIEW });
     assert.deepEqual(result.ran, [task.id]);
