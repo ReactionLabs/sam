@@ -458,8 +458,29 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
- const consolidation=consolidatePreferences(root);
+// Tick-stage isolation (gap found 2026-11-13): the per-job isolation
+// keeps one job's failure from wedging a tick, but the tick's own
+// stages ran bare - a throw out of consolidation (which runs FIRST)
+// or out of any drain leg propagated out of runHeartbeat, killed
+// every later stage, and left no trace in SAM's own ledgers (only
+// the caller's stderr), so a persistent stage failure silently
+// stopped the whole heartbeat on every tick. Each stage now runs
+// through this guard: a throw writes ONE tick-failed line to
+// heartbeats.jsonl and ONE tick-failed activity line (stage +
+// verbatim reason, capped; never message content), the stage's
+// empty result stands in, and the tick continues.
+export function tickStageFailure(root:string,stage:string,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
+ recordActivity(root,"sam","tick-failed",("Heartbeat tick stage '"+stage+"' failed: "+reason).slice(0,200));
+}
+async function guardTickStage<T>(root:string,stage:string,fallback:T,stageFailures:string[],run:()=>T|Promise<T>):Promise<T>{
+ try{return await run();}
+ catch(e){tickStageFailure(root,stage,e);stageFailures.push(stage);return fallback;}
+}
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];stageFailures:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
+ const stageFailures:string[]=[];
+ const consolidation=await guardTickStage(root,"consolidate",{scanned:0,noted:0,promoted:[],episodes:[],corrections:0,visitorSkipped:0,curator:[]},stageFailures,()=>consolidatePreferences(root));
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
  // Durable delivery outbox (Phase C item 1): deliveries a previous
@@ -601,26 +622,26 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // handed off runs within one tick on the deep background budget tier and
  // posts its result back into its chat. Drained after due jobs so a poll's
  // cheap tier never competes with the deep work.
- const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
+ const background=await guardTickStage(root,"background",{ran:[],failed:[],recovered:[]},stageFailures,()=>drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn}));
  if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
  // Coder C3: the same tick drains the coding loop, after background
  // work, on the same deep tier - a queued coding task plans, edits,
  // verifies, and iterates without the owner watching it happen.
- const coding=await drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn,review:deps.reviewCoding});
+ const coding=await guardTickStage(root,"coding",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn,review:deps.reviewCoding}));
  if(coding.ran.length||coding.blocked.length||coding.failed.length||coding.recovered.length)appendLog(root,{type:"coding",ran:coding.ran.length,blocked:coding.blocked.length,failed:coding.failed.length,recovered:coding.recovered.length});
  // Coder C6: the same tick drains the managed engine queue, after
  // the coding loop - one owner-approved engine run per tick inside
  // its branch sandbox, with SAM verifying and reviewing its work.
- const engine=await drainEngineTasks(root,{review:deps.reviewEngine});
+ const engine=await guardTickStage(root,"engine",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainEngineTasks(root,{review:deps.reviewEngine}));
  if(engine.ran.length||engine.blocked.length||engine.failed.length||engine.recovered.length)appendLog(root,{type:"engine",ran:engine.ran.length,blocked:engine.blocked.length,failed:engine.failed.length,recovered:engine.recovered.length});
  // SECOND ANSWERS: the same tick revisits due open loops, last -
  // a loop's re-check is a cheap-tier turn in its own check chat,
  // and only a proven change crosses into the owner's conversation
  // (plus its channel, through the outbox and the S5 gate, inside
  // the revisit engine itself).
- const loops=await revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver});
+ const loops=await guardTickStage(root,"loops",{checked:[],changed:[],resolved:[],failed:[],held:[]},stageFailures,()=>revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver}));
  if(loops.checked.length)appendLog(root,{type:"loops",checked:loops.checked.length,changed:loops.changed.length,resolved:loops.resolved.length,failed:loops.failed.length,held:loops.held.length});
- return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding,engine,loops};
+ return {consolidation,ran,changed,unchanged,failed,stageFailures,deliveries:deliveryResult,background,coding,engine,loops};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Anything else is a no-op for this tick.

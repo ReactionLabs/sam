@@ -221,6 +221,12 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The job's next runs complete with their normal verdict (changed, unchanged, or a script output) instead of job-failed lines",
      "A failure in this job still never wedges the tick: the other jobs and the drains in the same tick still run",
      "The full suite is green, including the heartbeat failure-isolation tests"]);
+  if (key.startsWith("tick-failed:")) return base(
+    ["heartbeat.ts"],
+    "The failing heartbeat tick stage stops failing: '" + label + "' has ledgered " + n + " stage failures, and the stage must complete its work (or be fixed at its cause) instead of being skipped by the tick guard on every tick.",
+    ["The stage's next ticks complete their normal work (consolidation watermarks advance, or the drain runs its queued tasks) instead of tick-failed lines",
+     "A failure in this stage still never wedges the tick: the jobs and the other stages in the same tick still run, and exactly one tick-failed line lands per failed stage",
+     "The full suite is green, including the heartbeat tick-stage isolation tests"]);
   if (key === "skill-install-failure") return base(
     ["skill-registry.ts"],
     "Skill installs stop failing on resolvable references: " + n + " ledgered install failures, and a search result SAM picks must either install or refuse at proposal time with the real reason, never die mid-install on a reference that was never installable.",
@@ -292,6 +298,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/Heartbeat '([^']+)'/);
       const name = m ? m[1] : "unnamed";
       return { key: "heartbeat-failed:" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-"), label: "heartbeat job failures (" + name + ")" };
+    }
+    case "tick-failed": {
+      const m = summary.match(/tick stage '([^']+)'/);
+      const stage = m ? m[1] : "unknown";
+      return { key: "tick-failed:" + stage.toLowerCase().replace(/[^a-z0-9]+/g, "-"), label: "heartbeat tick stage failures (" + stage + ")" };
     }
     case "failed":
       if (/^skill:/i.test(summary)) return { key: "skill-install-failure", label: "skill install failures" };
