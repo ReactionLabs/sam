@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, mkdirSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { recordActivity } from "./activity.js";
 import { PreferenceStore } from "./preferences.js";
 
 /**
@@ -24,6 +25,20 @@ import { PreferenceStore } from "./preferences.js";
  * Every assessment, delivered or held, appends to
  * .sam/delivery-ledger.jsonl so the owner can audit what SAM
  * chose not to bother them with (sam deliveries list).
+ *
+ * The gate follows the house ledger contract: an assessment
+ * never breaks the delivery it judges, and a ledger failure
+ * is never silent. assessDelivery owns both of its ledger
+ * touches - a failed read ledgers one worthiness-failed line
+ * and the assessment proceeds on law rules alone, and a
+ * failed append ledgers one line and the verdict returns
+ * regardless. Without that, a dead ledger threw the verdict
+ * away (the heartbeat jobs stage ate it as a generic tick
+ * failure with the delivery left pending and undecided, the
+ * loop revisit aborted before its state advanced) while the
+ * gate's duplicate/rate memory - and the status counts that
+ * fold the same ledger - kept reading the frozen file as
+ * truth with no trace anywhere.
  */
 
 export interface DeliveryAssessment { deliver: boolean; reason: string }
@@ -86,10 +101,26 @@ export function notificationRules(root: string, profile: string): NotificationRu
   return { denyTerms, onlyTerms };
 }
 
+// One ledger line per failed worthiness-ledger touch (gap
+// found 2026-11-13): the phase (read / append), the profile
+// and kind, the verdict on an append failure, and the
+// verbatim reason (collapsed, capped) - never the message
+// text; its fingerprint is a hash, not content.
+export function worthinessFailureSummary(phase: "read" | "append", profile: string, kind: string, verdict: DeliveryAssessment | null, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Worthiness " + phase + " failed for profile " + profile + " (" + kind + (verdict ? ", verdict " + (verdict.deliver ? "deliver" : "held") : "") + "): " + clean).slice(0, 200);
+}
+
+export function recordWorthinessFailure(root: string, phase: "read" | "append", profile: string, kind: string, verdict: DeliveryAssessment | null, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, profile, "worthiness-failed", worthinessFailureSummary(phase, profile, kind, verdict, reason));
+}
+
 export function assessDelivery(root: string, input: { profile: string; kind: string; text: string; now?: Date }): DeliveryAssessment {
   const now = input.now ?? new Date();
   const fingerprint = deliveryFingerprint(input.text);
-  const recent = readDeliveryLedger(root, 500);
+  let recent: DeliveryLedgerEntry[] = [];
+  try { recent = readDeliveryLedger(root, 500); } catch (error) { recordWorthinessFailure(root, "read", input.profile, input.kind, null, error); }
   const within = (e: DeliveryLedgerEntry, ms: number) => now.getTime() - Date.parse(e.at) < ms;
   let verdict: DeliveryAssessment;
   if (recent.some(e => e.deliver && e.profile === input.profile && e.kind === input.kind && e.fingerprint === fingerprint && within(e, COOLDOWN_MS))) {
@@ -106,6 +137,6 @@ export function assessDelivery(root: string, input: { profile: string; kind: str
     else verdict = { deliver: true, reason: "worthy" };
   }
   const entry: DeliveryLedgerEntry = { at: now.toISOString(), profile: input.profile, kind: input.kind, deliver: verdict.deliver, reason: verdict.reason, fingerprint, preview: input.text.replace(/\s+/g, " ").trim().slice(0, 160) };
-  appendFileSync(ledgerPath(root), JSON.stringify(entry) + "\n", { mode: 0o600 });
+  try { appendFileSync(ledgerPath(root), JSON.stringify(entry) + "\n", { mode: 0o600 }); } catch (error) { recordWorthinessFailure(root, "append", input.profile, input.kind, verdict, error); }
   return verdict;
 }

@@ -261,6 +261,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one skill-use-failed ledger line still lands per genuinely failed write, naming the skill and the verbatim reason, so the class stays countable",
      "Visibility still never breaks the read: recordSkillUse never throws, the sam_read_skill result returns exactly as before, and no success skill-use activity line rides a record that did not land",
      "The full suite is green, including the skill-use failure-ledger tests"]);
+  if (key.startsWith("worthiness-failed:")) return base(
+    ["worthiness.ts", "heartbeat.ts", "loop-revisit.ts"],
+    "The worthiness gate's ledger stops failing: '" + label + "' has ledgered " + n + " failures, and an assessment must land in .sam/delivery-ledger.jsonl instead of dying at the read or the append - the ledger is the gate's only memory (the duplicate cooldown and the hourly rate cap read nothing else), so while it is dead the gate decides on a frozen past and the status delivered/suppressed counts keep folding that frozen file as truth.",
+    ["The next proactive deliveries record their assessments in delivery-ledger.jsonl again instead of worthiness-failed lines, and duplicate/rate decisions move with them",
+     "Exactly one worthiness-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The gate still never breaks the delivery it judges: assessDelivery returns its verdict on a dead ledger (law rules alone when the read died) exactly as callers expect",
+     "The full suite is green, including the worthiness failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -394,6 +401,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "session-caps-failed", label: "session-cap ledger failures" };
     case "skill-use-failed":
       return { key: "skill-use-failed", label: "skill-use ledger failures" };
+    case "worthiness-failed": {
+      const m = summary.match(/^Worthiness ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "worthiness-failed:" + phase, label: "worthiness ledger failures (" + phase + " step)" };
+    }
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
     case "delivery-failed":
