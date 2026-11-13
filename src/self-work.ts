@@ -254,6 +254,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one session-caps-failed ledger line still lands per genuinely failed write, naming which write and the verbatim reason, so the class stays countable",
      "Accounting still never breaks a turn: recordSessionTurn and noteCapTrip never throw, and the graceful cap reply still returns",
      "The full suite is green, including the accounting failure-ledger tests"]);
+  if (key === "skill-use-failed") return base(
+    ["skill-use.ts", "own-tools.ts"],
+    "Skill-use visibility stops failing: " + n + " ledgered skill-use record failures, and a model's skill read must land in .sam/skill-use.jsonl instead of dying at the append - the dashboard rail, chat header, and status keep folding the frozen ledger as truth while it is dead, so an unrecorded use is also an invisible one.",
+    ["The next skill reads record their skill-use lines again instead of skill-use-failed lines",
+     "Exactly one skill-use-failed ledger line still lands per genuinely failed write, naming the skill and the verbatim reason, so the class stays countable",
+     "Visibility still never breaks the read: recordSkillUse never throws, the sam_read_skill result returns exactly as before, and no success skill-use activity line rides a record that did not land",
+     "The full suite is green, including the skill-use failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -385,6 +392,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "usage-failed", label: "usage accounting failures" };
     case "session-caps-failed":
       return { key: "session-caps-failed", label: "session-cap ledger failures" };
+    case "skill-use-failed":
+      return { key: "skill-use-failed", label: "skill-use ledger failures" };
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
     case "delivery-failed":

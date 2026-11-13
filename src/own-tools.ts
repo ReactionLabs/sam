@@ -303,7 +303,11 @@ export function executeOwnTool(root:string,actor:string,name:string,args:Record<
         // activity rail so the owner sees which skill a chat is
         // riding while it rides it. The operator CLI read never
         // passes through here and never counts as use.
-        try{recordSkillUse(root,{actor,chatId:chatId??null,skill:read.name});recordActivity(root,actor,"skill-use","Used skill "+read.name+(chatId?" in chat "+chatId.slice(0,8):""));}catch{/* visibility never breaks the read */}
+        // recordSkillUse never throws and ledgers its own failure
+        // (skill-use-failed); the success activity line rides only
+        // a record that actually landed, so a dead ledger is never
+        // dressed as a success on the rail.
+        if(recordSkillUse(root,{actor,chatId:chatId??null,skill:read.name}))recordActivity(root,actor,"skill-use","Used skill "+read.name+(chatId?" in chat "+chatId.slice(0,8):""));
         return read;}
       catch(e){return {error:e instanceof Error?e.message:"Skill read failed"};}
     }
