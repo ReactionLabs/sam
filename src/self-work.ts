@@ -234,9 +234,9 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one backup-failed ledger line still lands per genuinely failed run, with the verbatim reason, so the class stays countable",
      "The full suite is green, including the backup failure-ledger tests"]);
   if (key === "delivery-failed") return base(
-    ["heartbeat.ts", "delivery-outbox.ts"],
+    ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
-    ["The next changed heartbeat updates land delivered in the outbox instead of delivery-failed lines, on both the fresh-send and the recovery path",
+    ["The next changed heartbeat updates land delivered in the outbox instead of delivery-failed lines, on the fresh-send, recovery, and second-answer paths",
      "Exactly one delivery-failed ledger line still lands per genuinely failed attempt, with the verbatim reason and attempt count, and the terminal settle at the cap is named, so the class stays countable",
      "The full suite is green, including the delivery failure-ledger tests"]);
   if (key === "skill-install-failure") return base(

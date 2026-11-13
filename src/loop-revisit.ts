@@ -125,6 +125,28 @@ function postToChat(root: string, chatId: string, text: string): boolean {
   finally { db.close(); }
 }
 
+// The activity line for a failed second-answer channel delivery
+// (gap found 2026-11-13, hourly run 08:04): heartbeat's two
+// delivery paths ledger every failed attempt as delivery-failed
+// (the 06:04 seam), but this engine - the outbox's third sender -
+// caught its deliver throw into markAttemptFailed alone, so a
+// failed second-answer push was visible only inside the outbox
+// fold, and a failure later recovered by the heartbeat leg
+// vanished from every owner-facing record entirely. One line per
+// failed attempt, shaped like the heartbeat seam's (attempt count,
+// the terminal settle named at the cap, the verbatim reason
+// capped; never the delivery text or the question), under the
+// same kind, so self-work's delivery-failed class counts it.
+export function loopDeliveryFailureSummary(reason: string, attempts: number, settled: boolean): string {
+  const base = "Delivery for second answer failed (attempt " + attempts + " of 5): " + reason.replace(/\s+/g, " ").trim();
+  return (settled ? base + " - gave up after 5 attempts; the update will not be retried" : base).slice(0, 200);
+}
+
+export function recordLoopDeliveryFailure(root: string, profile: string, error: unknown, failure: { attempts: number; settled: boolean }): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, profile, "delivery-failed", loopDeliveryFailureSummary(reason, failure.attempts, failure.settled));
+}
+
 const revisiting = new Set<string>();
 
 export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Promise<LoopRevisitResult> {
@@ -189,7 +211,7 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
           recordActivity(root, loop.profile, "delivery-suppressed", "Second-answer channel update held: " + assessment.reason);
         } else if (deps.deliver) {
           try { await deps.deliver(channelId, queued.text); markDelivered(root, queued.id, false); }
-          catch (e) { markAttemptFailed(root, queued.id, e instanceof Error ? e.message : String(e)); }
+          catch (e) { const failure = markAttemptFailed(root, queued.id, e instanceof Error ? e.message : String(e)); recordLoopDeliveryFailure(root, loop.profile, e, failure); }
         }
       }
       if (verdict === "resolved") {
