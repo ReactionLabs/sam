@@ -275,6 +275,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one verification-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "Recording still never breaks the work it records: recordChange and recordVerification return whether the record landed instead of throwing on an append failure, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
      "The full suite is green, including the verification failure-ledger tests"]);
+  if (key.startsWith("goldfish-failed:")) return base(
+    ["goldfish.ts", "coding.ts", "engine.ts", "status.ts"],
+    "The goldfish records ledger stops failing: '" + label + "' has ledgered " + n + " failures, and a fresh-context review (or its record) must land in .sam/goldfish.jsonl instead of dying at the append or the read - the records are the reviewer's own coverage ledger and the last word on done, so while they are dead a spent review's verdict is lost (the drains close blocked on a misleading 'could not run') and every status / session-gate fold keeps reading the frozen records as truth.",
+    ["The next fresh-context reviews record their verdicts in goldfish.jsonl again instead of goldfish-failed lines, and goldfish status / coverage move with them",
+     "Exactly one goldfish-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The reviewer still fails closed on a dead ledger: a failed append ledgers and rethrows (an unrecorded PASS is never spent as reviewed-and-done), and a failed read ledgers and rethrows exactly as callers expect",
+     "The full suite is green, including the goldfish failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -417,6 +424,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Verification ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "verification-failed:" + phase, label: "verification ledger failures (" + phase + " step)" };
+    }
+    case "goldfish-failed": {
+      const m = summary.match(/^Goldfish ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "goldfish-failed:" + phase, label: "goldfish ledger failures (" + phase + " step)" };
     }
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
