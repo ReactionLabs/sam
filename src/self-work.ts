@@ -298,6 +298,10 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "action-failed", label: "gated action execution failures" };
     case "loop-failed":
       return { key: "loop-failed", label: "open-loop revisit failures" };
+    case "bridge-failed":
+      return { key: "bridge-failed", label: "telegram bridge update failures" };
+    case "bridge-poll-failed":
+      return { key: "bridge-poll-failed", label: "telegram bridge poll failures" };
     case "background-failed":
       return { key: "background-failed", label: "background task failures" };
     case "coding-failed":

@@ -46,6 +46,8 @@ test("self-work: classification is deterministic - kind first, then the summary'
   assert.equal(classifyDefect(line("heartbeat-failed", "Heartbeat 'stack watch' failed: x"))?.key, "heartbeat-failed:stack-watch");
   assert.equal(classifyDefect(line("failed", "skill: Install x skill - HTTP 404"))?.key, "skill-install-failure");
   assert.equal(classifyDefect(line("failed", "heartbeat: Invalid profile"))?.key, "action-failed");
+  assert.equal(classifyDefect(line("bridge-failed", "Telegram bridge failed on update 10 for channel Dip Telegram: SAM dashboard request failed (HTTP 500)"))?.key, "bridge-failed");
+  assert.equal(classifyDefect(line("bridge-poll-failed", "Telegram bridge poll failed for channel Dip Telegram: Telegram request failed (HTTP 502)"))?.key, "bridge-poll-failed");
   assert.equal(classifyDefect(line("turn", "Answered in chat abc")), null);
   assert.equal(classifyDefect(line("stack-watch", "Stack watch (deterministic): ...")), null);
 });
