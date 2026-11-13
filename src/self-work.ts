@@ -268,6 +268,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one worthiness-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "The gate still never breaks the delivery it judges: assessDelivery returns its verdict on a dead ledger (law rules alone when the read died) exactly as callers expect",
      "The full suite is green, including the worthiness failure-ledger tests"]);
+  if (key.startsWith("verification-failed:")) return base(
+    ["verification.ts", "file-edits.ts", "code.ts", "approved-test-runner.ts"],
+    "The verification ledger stops failing: '" + label + "' has ledgered " + n + " failures, and a code change (or a build/test verdict) must land in .sam/verifications.jsonl instead of dying at the append or the read - the ledger is the verify-on-stop gate every done claim answers to, so while it is dead the gate folds a frozen past: an unrecorded change can read clean, a lost verdict leaves verified work unverified, and a dead read throws out of status and close checks.",
+    ["The next code changes and approved build/test runs record their events in verifications.jsonl again instead of verification-failed lines, and the gate state moves with them",
+     "Exactly one verification-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Recording still never breaks the work it records: recordChange and recordVerification return whether the record landed instead of throwing on an append failure, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
+     "The full suite is green, including the verification failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -405,6 +412,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Worthiness ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "worthiness-failed:" + phase, label: "worthiness ledger failures (" + phase + " step)" };
+    }
+    case "verification-failed": {
+      const m = summary.match(/^Verification ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "verification-failed:" + phase, label: "verification ledger failures (" + phase + " step)" };
     }
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };

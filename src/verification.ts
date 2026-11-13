@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { recordActivity } from "./activity.js";
 
 /**
  * Verify-on-stop (Harness Implementation Order item 1, Dip 2026-11-09,
@@ -47,15 +48,58 @@ function ledgerPath(root: string): string {
   return join(dir, "verifications.jsonl");
 }
 
-function append(root: string, event: LedgerEvent): void {
-  appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
+// The ledger follows the house contract, with verification's
+// fail-closed twist (gap found 2026-11-13). APPENDING never
+// breaks the work it records and never fails silently: a
+// change or a verdict already happened in the world (the file
+// is on disk, the build/test already ran), so a dead append
+// ledgers one verification-failed line and the recorder
+// returns whether the record landed, instead of throwing the
+// work away or - the C2 code-run caller's old silent catch -
+// losing the verdict with no trace anywhere. READING is the
+// opposite call: a status folded from an unreadable ledger
+// would read clean and lie in the unsafe direction, so a
+// failed read ledgers one line and rethrows exactly -
+// verification exists to fail closed, and the truth failure
+// stays a failure, now countable instead of invisible.
+export function verificationFailureSummary(phase: "read" | "append", eventLabel: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Verification " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
+}
+
+export function recordVerificationFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "verification-failed", verificationFailureSummary(phase, eventLabel, reason));
+}
+
+function eventLabel(event: LedgerEvent): string {
+  return event.type === "change"
+    ? "change " + event.path + " (source " + event.source + ")"
+    : "verification " + event.kind + " " + (event.passed ? "passed" : "failed") + " (run " + event.runId.slice(0, 8) + ")";
+}
+
+function append(root: string, event: LedgerEvent): boolean {
+  try {
+    appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
+    return true;
+  } catch (error) {
+    recordVerificationFailure(root, "append", eventLabel(event), error);
+    return false;
+  }
 }
 
 function readEvents(root: string): LedgerEvent[] {
-  const path = ledgerPath(root);
-  if (!existsSync(path)) return [];
+  let raw: string;
+  try {
+    const path = ledgerPath(root);
+    if (!existsSync(path)) return [];
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    recordVerificationFailure(root, "read", "ledger", error);
+    throw error;
+  }
   const events: LedgerEvent[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as LedgerEvent;
@@ -66,9 +110,11 @@ function readEvents(root: string): LedgerEvent[] {
 }
 
 /** Record that code changed. Called by the edit apply path; the only
- *  door through which a change enters the ledger. */
-export function recordChange(root: string, change: { path: string; replacementHash: string; source: string }): void {
-  append(root, { type: "change", at: new Date().toISOString(), path: change.path, replacementHash: change.replacementHash, source: change.source });
+ *  door through which a change enters the ledger. Returns whether
+ *  the record landed; an append failure ledgers one
+ *  verification-failed line and never throws (see above). */
+export function recordChange(root: string, change: { path: string; replacementHash: string; source: string }): boolean {
+  return append(root, { type: "change", at: new Date().toISOString(), path: change.path, replacementHash: change.replacementHash, source: change.source });
 }
 
 /** Every recorded change, in ledger order. The goldfish verifier
@@ -81,9 +127,11 @@ export function listChanges(root: string): PendingChange[] {
 }
 
 /** Record an approved verification run's verdict. Called by the
- *  approved test runner for both kinds (build, test). */
-export function recordVerification(root: string, run: { kind: "build" | "test"; passed: boolean; runId: string }): void {
-  append(root, { type: "verification", at: new Date().toISOString(), kind: run.kind, passed: run.passed, runId: run.runId });
+ *  approved test runner for both kinds (build, test). Returns
+ *  whether the record landed; an append failure ledgers one
+ *  verification-failed line and never throws (see above). */
+export function recordVerification(root: string, run: { kind: "build" | "test"; passed: boolean; runId: string }): boolean {
+  return append(root, { type: "verification", at: new Date().toISOString(), kind: run.kind, passed: run.passed, runId: run.runId });
 }
 
 export function verificationStatus(root: string): VerificationStatus {
