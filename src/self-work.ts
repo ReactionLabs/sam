@@ -224,7 +224,7 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
   if (key.startsWith("tick-failed:")) return base(
     ["heartbeat.ts"],
     "The failing heartbeat tick stage stops failing: '" + label + "' has ledgered " + n + " stage failures, and the stage must complete its work (or be fixed at its cause) instead of being skipped by the tick guard on every tick.",
-    ["The stage's next ticks complete their normal work (consolidation watermarks advance, or the drain runs its queued tasks) instead of tick-failed lines",
+    ["The stage's next ticks complete their normal work (consolidation watermarks advance, the pending deliveries drain, the due jobs run and their rows save, or a drain runs its queued tasks) instead of tick-failed lines",
      "A failure in this stage still never wedges the tick: the jobs and the other stages in the same tick still run, and exactly one tick-failed line lands per failed stage",
      "The full suite is green, including the heartbeat tick-stage isolation tests"]);
   if (key === "skill-install-failure") return base(

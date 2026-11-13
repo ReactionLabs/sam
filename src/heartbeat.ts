@@ -469,6 +469,19 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
 // heartbeats.jsonl and ONE tick-failed activity line (stage +
 // verbatim reason, capped; never message content), the stage's
 // empty result stands in, and the tick continues.
+// Follow-on (gap found 2026-11-13, 04:04 run): the guard's first
+// pass covered consolidate and the four drains, but the tick's
+// other two sections still ran bare - the delivery-recovery leg
+// (a throw in the pending read or in a mark append killed the
+// tick before any job ran) and the jobs section's own
+// infrastructure (the registry load, the state load, the outbox
+// queue / worthiness / mark calls around a changed reply, and
+// the closing row / state saves - a throw there also lost the
+// ran jobs' lastRun advances, so those jobs refired and
+// re-delivered next tick). Both sections now run as guarded
+// stages too ("deliveries" and "jobs"); the jobs stage fills a
+// shared result object incrementally, so progress made before a
+// throw stays reported instead of being discarded.
 export function tickStageFailure(root:string,stage:string,error:unknown):void{
  const reason=error instanceof Error?error.message:String(error);
  appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
@@ -490,18 +503,24 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // at-least-once leg of the ledger. Without a deliver door the
  // pending records simply stay pending, untouched.
  if(deps.deliver){
+  const deliverPending=deps.deliver;
+  await guardTickStage(root,"deliveries",undefined,stageFailures,async()=>{
   for(const pending of pendingDeliveries(root)){
    const recovered=pending.attempts>0||Date.parse(pending.queuedAt)<tickStart.getTime();
    try{
-    await deps.deliver(pending.channelId,pending.text);
+    await deliverPending(pending.channelId,pending.text);
     markDelivered(root,pending.id,recovered);
     deliveryResult.delivered.push(pending.jobName);
     if(recovered)deliveryResult.recovered.push(pending.jobName);
     appendLog(root,{type:"delivery-recovered",name:pending.jobName,profile:pending.profile,recovered});
    }catch(e){markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));}
   }
+  });
  }
- const jobs=heartbeatJobs(root);const now=new Date();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];const failed:string[]=[];
+ const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];const failed:string[]=[];
+ const jobsResult={ran,changed,unchanged,failed};
+ const runJobsStage=async()=>{
+ const jobs=heartbeatJobs(root);const now=new Date();
  // Loaded after consolidation, which saves this same state file for its
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
@@ -618,6 +637,9 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  for(const id of retired)deleteJobRow(root,id);
  if(stateDirty)saveState(root,state);
  deliveryResult.pending=pendingDeliveries(root).length;
+ return jobsResult;
+ };
+ await guardTickStage(root,"jobs",jobsResult,stageFailures,runJobsStage);
  // Legs (P5): every tick also drains the background queue, so a task a chat
  // handed off runs within one tick on the deep background budget tier and
  // posts its result back into its chat. Drained after due jobs so a poll's
