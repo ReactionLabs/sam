@@ -51,6 +51,20 @@ import { readSelfAudit, type SelfAudit } from "./self-audit.js";
  *   operator names the channel - e.g. the SAM Telegram channel
  *   Dip designated for self-work updates - or none).
  *
+ * Stable spec identity: a run whose top defect class is
+ * unchanged from the previous recorded run's spec (same key,
+ * same count, same last sighting) REUSES that spec's id instead
+ * of minting a fresh one. Without this, the step-2 guard "a
+ * spec is worked once" could never bind across runs - every
+ * daily run would re-spec the identical class under a new id
+ * and the bridge would treat it as new work. Growth mints a
+ * fresh id: a class that recurs past its specced count (or a
+ * different class topping the queue) is speccable again,
+ * exactly once more. Only the id is reused - every other spec
+ * field is rebuilt fresh, so a block that has since cleared
+ * (a code root designated after the spec was stamped blocked)
+ * unblocks the same spec instead of freezing the old stamp.
+ *
  * Known-defect seeding (the later-step design call the step-1
  * and step-2 landings left open): the picker also sees a
  * code-declared registry of KNOWN defects that no ledger line
@@ -334,7 +348,12 @@ export function rankDefects(root: string): DefectClass[] {
 
 /** Build the spec for the top defect, grounded in the recorded
  *  audit (read, never run - refreshing the map is the audit's
- *  own job). Pure assembly: records nothing. */
+ *  own job). Pure assembly: records nothing. Spec identity is
+ *  stable: when the previous recorded run's spec names this
+ *  same top class with the same count and the same last
+ *  sighting, its id is reused (see the module header), so the
+ *  work bridge's worked-once guard binds across runs; any
+ *  growth mints a fresh id. */
 export function buildSelfWorkSpec(root: string, audit: SelfAudit | null = readSelfAudit(root), now: Date = new Date()): SelfWorkRun {
   const ranked = rankDefects(root);
   const top = ranked[0] ?? null;
@@ -345,8 +364,15 @@ export function buildSelfWorkSpec(root: string, audit: SelfAudit | null = readSe
     let blockedBy: string | null = null;
     if (!audit) blockedBy = "no capability self-audit has been recorded yet - run 'sam self-audit run' first, so the pick rests on the true map (SELF-WORK step 0)";
     else if (t.files.length && !audit.code.root) blockedBy = "the recorded self-audit reads no designated code root (cannot: coder hands) - designating one is the operator's act, so this fix has no workbench yet";
+    let previous: SelfWorkRun | null = null;
+    try { previous = readSelfWork(root); } catch { previous = null; }
+    const prevSpec = previous?.spec ?? null;
+    const prevTop = previous?.ranked?.[0] ?? null;
+    const unchanged = prevSpec !== null && prevTop !== null
+      && prevSpec.defectKey === top.key && prevSpec.count === top.count
+      && prevTop.key === top.key && prevTop.lastAt === top.lastAt;
     spec = {
-      id: "selfwork-" + randomUUID().slice(0, 8),
+      id: unchanged ? prevSpec.id : "selfwork-" + randomUUID().slice(0, 8),
       defectKey: top.key, label: top.label, count: top.count, source: top.source ?? "ledger", evidence: top.evidence,
       endGoal: t.endGoal, doneLooksLike: t.doneLooksLike, notDone: t.notDone,
       files: t.files, ownerOnly, blockedBy,

@@ -192,6 +192,55 @@ test("self-work: a run records through the store, ledgers counts only, and an em
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("self-work: an unchanged top class reuses its spec id across runs; growth mints a fresh one", () => {
+  const root = fresh();
+  const codeRoot = fresh();
+  try {
+    seedLedger(root);
+    writeFileSync(join(codeRoot, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+    setCodeRoot(root, codeRoot);
+    runSelfAudit(root, {});
+    const first = runSelfWork(root);
+    assert.ok(first.spec);
+    const second = runSelfWork(root);
+    assert.ok(second.spec);
+    // Same key, same count, same last sighting: the SAME spec,
+    // re-issued - not a new record the bridge could queue again.
+    assert.equal(second.spec.id, first.spec.id);
+    assert.equal(second.spec.defectKey, "tool-budget");
+    assert.equal(second.spec.count, 3);
+    // Growth: one more occurrence of the top class mints a
+    // fresh spec at the new count, speccable exactly once more.
+    recordActivity(root, "dip", "tool-budget", "Tool budget exhausted: 6/6 calls used (sam_read_skill)");
+    const third = runSelfWork(root);
+    assert.ok(third.spec);
+    assert.notEqual(third.spec.id, first.spec.id);
+    assert.equal(third.spec.count, 4);
+    const fourth = runSelfWork(root);
+    assert.ok(fourth.spec);
+    assert.equal(fourth.spec.id, third.spec.id);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRoot, { recursive: true, force: true }); }
+});
+
+test("self-work: a reused spec's block is rebuilt fresh - a code root designated since unblocks the same spec", () => {
+  const root = fresh();
+  const codeRoot = fresh();
+  try {
+    seedLedger(root);
+    runSelfAudit(root, {});
+    const blocked = runSelfWork(root);
+    assert.ok(blocked.spec);
+    assert.match(blocked.spec.blockedBy ?? "", /no designated code root/);
+    writeFileSync(join(codeRoot, "package.json"), JSON.stringify({ name: "x", scripts: { build: "true", test: "true" } }));
+    setCodeRoot(root, codeRoot);
+    runSelfAudit(root, {});
+    const cleared = runSelfWork(root);
+    assert.ok(cleared.spec);
+    assert.equal(cleared.spec.id, blocked.spec.id);
+    assert.equal(cleared.spec.blockedBy, null);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRoot, { recursive: true, force: true }); }
+});
+
 test("self-work: a legacy self-work.json imports once and is renamed; a malformed one imports nothing and stays", () => {
   const root = fresh();
   try {
@@ -370,6 +419,32 @@ test("self-work work: a done fix on a branch earns its git-push proposal and exa
     assert.ok(run);
     assert.match(selfWorkText(run, { fixes: selfWorkFixViews(root) }), /Self-fix .*tool-budget/);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(repo, { recursive: true, force: true }); rmSync(origin, { recursive: true, force: true }); }
+});
+
+test("self-work work: a worked spec stays worked across later runs until its class recurs", () => {
+  const { root, codeRootDir } = workableRoot();
+  try {
+    const fix = queueSelfWorkFix(root);
+    updateCodingTask(root, fix.taskId, { status: "blocked", result: "Iterations exhausted with the work unverified." });
+    reconcileSelfWorkFixes(root);
+    // The daily loop runs again over an unchanged ledger: the
+    // spec is re-issued under the same id, and the bridge
+    // refuses it as already worked instead of queueing a twin.
+    const rerun = runSelfWork(root);
+    assert.ok(rerun.spec);
+    assert.equal(rerun.spec.id, fix.specId);
+    assert.throws(() => queueSelfWorkFix(root), /already has a fix record/);
+    assert.equal(listCodingTasks(root).length, 1);
+    // The class recurs past its specced count: a fresh spec
+    // mints and queues as new work.
+    recordActivity(root, "dip", "tool-budget", "Tool budget exhausted: 6/6 calls used (sam_read_skill)");
+    const grown = runSelfWork(root);
+    assert.ok(grown.spec);
+    assert.notEqual(grown.spec.id, fix.specId);
+    const fix2 = queueSelfWorkFix(root);
+    assert.equal(fix2.specId, grown.spec.id);
+    assert.equal(listCodingTasks(root).length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(codeRootDir, { recursive: true, force: true }); }
 });
 
 test("self-work work: a blocked fix earns a digest naming the block and no proposal is created", () => {
