@@ -687,16 +687,29 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  return {consolidation,ran,changed,unchanged,failed,stageFailures,deliveries:deliveryResult,background,coding,engine,loops};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
-// channels post via webhook. Anything else is a no-op for this tick.
+// channels post via webhook. Delivered must mean at least one real send was
+// handed to the channel's transport (gap found 2026-11-13): this door used to
+// no-op silently for a missing or disabled channel, for a telegram channel
+// with zero bridged chats, and for a webhook channel (an inbound trigger
+// door with no outbound handler), and every caller then marked the outbox
+// record DELIVERED - a false success record the brief's stuck-deliveries
+// item trusts. Each undeliverable shape now throws a named refusal, so the
+// failure rides the delivery-failed seam (ledgered with the reason, the
+// record stays pending, retries settle it failed at the attempt cap).
 export async function deliverToChannel(root:string,channelId:string,text:string,sendTelegram:(chatId:number,text:string)=>Promise<void>,postDiscordFn:(channel:ReturnType<typeof channels>[number],text:string)=>Promise<number>):Promise<void>{
- const channel=channels(root).find(c=>c.id===channelId&&c.enabled);
- if(!channel)return;
+ const channel=channels(root).find(c=>c.id===channelId);
+ if(!channel)throw Error("Delivery channel not found: "+channelId);
+ if(!channel.enabled)throw Error("Delivery channel disabled: "+channel.name);
  if(channel.kind==="discord"){await postDiscordFn(channel,text);return;}
  if(channel.kind==="telegram"){
   const state=loadBridgeState(root);
+  const keys=Object.keys(state.chats);
+  if(keys.length===0)throw Error("Telegram channel '"+channel.name+"' has no bridged chats to deliver to");
   // Chat keys are telegram chat ids, optionally suffixed ":<profile>"
   // when a binding routed that chat to another profile (Phase C item 3);
   // the numeric id is always the part before the suffix.
-  for(const key of Object.keys(state.chats))await sendTelegram(Number(key.split(":")[0]),text);
+  for(const key of keys)await sendTelegram(Number(key.split(":")[0]),text);
+  return;
  }
+ throw Error("Channel '"+channel.name+"' ("+channel.kind+") cannot deliver messages");
 }
