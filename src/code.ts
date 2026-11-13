@@ -667,7 +667,10 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: "git is not installed on this machine - git-clone cannot run until it is installed (installing it is the operator's act)" } : {}),
   };
   const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
-  recordActivity(root, actor, "git-clone", boundedLedger("Cloned " + canonical + " into " + destination + ": " + status, destination));
+  // The ledger verb follows the outcome: a failed clone is never
+  // ledgered as "Cloned" - the ledger is the surface the owner and
+  // the self-audit read, so its wording must not claim success.
+  recordActivity(root, actor, "git-clone", boundedLedger((result.ok ? "Cloned " : "Clone failed for ") + canonical + " into " + destination + ": " + status, destination));
   if (injected.credentialName) {
     let host = "";
     try { host = new URL(canonical).hostname; } catch { /* the URL was canonicalized above */ }
@@ -985,6 +988,7 @@ export async function installSandboxPackage(root: string, actor: string, name: s
     exitCode: raw.exitCode, timedOut: !!raw.timedOut,
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
   };
-  recordActivity(root, actor, "sandbox-pip", "Installed " + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
+  // Same honesty rule as git-clone: the verb follows the outcome.
+  recordActivity(root, actor, "sandbox-pip", (result.ok ? "Installed " : "Install failed for ") + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
   return result;
 }

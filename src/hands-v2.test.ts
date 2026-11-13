@@ -290,6 +290,7 @@ test("sandboxes: create, list, pip argv, and delete only a sandbox SAM created",
     assert.throws(() => sandboxPipArgv(sam, "demo", "requests", ">=2"), /exact version/);
     const pipLine = readActivity(sam, 20).filter(l => l.kind === "sandbox-pip").at(-1);
     assert.ok(pipLine);
+    assert.match(pipLine.summary, /^Installed requests==2\.32\.3 into sandbox demo: ok$/);
     assert.match(pipLine.summary, /requests==2\.32\.3/);
     assert.match(pipLine.summary, /demo/);
 
@@ -405,6 +406,39 @@ test("pip failure is ledgered with the package and the version", async () => {
     assert.match(line.summary, /requests==2\.32\.3/);
     assert.match(line.summary, /exit 2/);
     assert.match(line.summary, /demo/);
+    // The verb follows the outcome: a failed install is never
+    // ledgered with the success verb.
+    assert.match(line.summary, /^Install failed for /);
+    assert.equal(/^Installed /.test(line.summary), false);
+  } finally { rmSync(base, { recursive: true, force: true }); }
+});
+
+test("git-clone failure is ledgered as a failure, never with the success verb", async () => {
+  const { base, sam } = fixture();
+  try {
+    const failing: CodeRunner = async () => ({ exitCode: 128, output: "fatal: could not read from remote" });
+    const failed = await cloneIntoCodeRoot(sam, "sam", "https://github.com/ReactionLabs/agent-bridge", "agent-bridge", { runner: failing });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.exitCode, 128);
+    const line = readActivity(sam, 10).filter(l => l.kind === "git-clone").at(-1);
+    assert.ok(line);
+    assert.match(line.summary, /^Clone failed for https:\/\/github\.com\/ReactionLabs\/agent-bridge into agent-bridge: exit 128$/);
+    assert.equal(line.summary.includes("Cloned "), false);
+    // A success still ledgers the success verb, unchanged.
+    const okRunner: CodeRunner = async () => ({ exitCode: 0, output: "cloned" });
+    const ok = await cloneIntoCodeRoot(sam, "sam", "https://example.com/repo.git", "vendor/lib", { runner: okRunner });
+    assert.equal(ok.ok, true);
+    const okLine = readActivity(sam, 10).filter(l => l.kind === "git-clone").at(-1);
+    assert.ok(okLine);
+    assert.match(okLine.summary, /^Cloned https:\/\/example\.com\/repo\.git into vendor\/lib: ok$/);
+    // A timed-out clone is a failure too.
+    const slow: CodeRunner = async () => ({ exitCode: null, output: "partial", timedOut: true });
+    const timed = await cloneIntoCodeRoot(sam, "sam", "https://example.com/slow.git", "vendor/slow", { runner: slow });
+    assert.equal(timed.ok, false);
+    const timedLine = readActivity(sam, 10).filter(l => l.kind === "git-clone").at(-1);
+    assert.ok(timedLine);
+    assert.match(timedLine.summary, /^Clone failed for /);
+    assert.match(timedLine.summary, /timed out/);
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
