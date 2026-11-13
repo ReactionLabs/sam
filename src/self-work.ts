@@ -233,6 +233,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The sub-step's next consolidation runs complete their normal work (a correction in a chat produces its deduped law proposal on the gate, or the curator records its finding set) instead of consolidate-failed lines",
      "Exactly one consolidate-failed ledger line still lands per failed sub-step per consolidation run, with the verbatim reason, so the class stays countable",
      "The full suite is green, including the consolidation sub-step failure-ledger tests"]);
+  if (key.startsWith("compaction-failed:")) return base(
+    ["compaction.ts", "memory.ts", "chats.ts"],
+    "The failing compaction step stops failing: '" + label + "' has ledgered " + n + " failures, and a long chat's fold must complete its durable writes (the stored-compaction read, the memory flush, or the summary save) instead of silently riding the raw tail on every turn - a flush-step failure wedges the chat uncompacted forever, and a save-step failure is what the retry-safe flush keeps from duplicating the segment's flush record.",
+    ["The failing step's next folds complete (the chat's compaction record advances and exactly one flush record exists per folded segment) instead of compaction-failed lines",
+     "Exactly one compaction-failed ledger line still lands per genuinely failed fold attempt, with the phase and verbatim reason, so the class stays countable",
+     "Compaction still never breaks a turn: the caller fail-opens to the raw tail exactly as before",
+     "The full suite is green, including the compaction failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -349,6 +356,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     case "consolidate-failed": {
       if (/skill curator/i.test(summary)) return { key: "consolidate-failed:curator", label: "consolidation sub-step failures (skill curator)" };
       return { key: "consolidate-failed:corrections", label: "consolidation sub-step failures (correction routing)" };
+    }
+    case "compaction-failed": {
+      const m = summary.match(/^Compaction ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "compaction-failed:" + phase, label: "compaction failures (" + phase + " step)" };
     }
     case "failed":
       if (/^skill:/i.test(summary)) return { key: "skill-install-failure", label: "skill install failures" };
