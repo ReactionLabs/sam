@@ -263,11 +263,60 @@ export interface CodeWriteRecord {
 
 function writesPath(root: string): string { return join(resolve(root), ".sam", "code-writes.jsonl"); }
 
+// The writes ledger follows the house contract, with the
+// split the work's shape demands (gap found 2026-11-13).
+// The APPEND is verification-shaped: the file is already on
+// disk in the code root when persistCodeWrite runs, so a
+// failed append never throws and never blocks the remaining
+// records (goldfish artifact, activity line, verify-on-stop
+// entry still land, binding the change exactly as a recorded
+// write binds it) - it ledgers one code-write-failed line
+// and reports whether the record landed, instead of the old
+// shape where a dead ledger threw the already-landed write's
+// whole record set away and the caller reported failure for
+// work that was real. The READ is goldfish-shaped
+// (fail-closed): one line, then the rethrow exactly, because
+// counts and close summaries folded from an unreadable
+// writes ledger would understate the hands' work - the
+// coding loop counts a task's new writes by slicing this
+// ledger, so a folded-empty read would close it "no changes"
+// over work it actually wrote.
+export function codeWriteFailureSummary(phase: "read" | "append", eventLabel: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Code write " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
+}
+
+export function recordCodeWriteFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "code-write-failed", codeWriteFailureSummary(phase, eventLabel, reason));
+}
+
+function writeLabel(record: CodeWriteRecord): string {
+  return "write " + record.path + " (" + (record.created ? "created" : "edited") + ", +" + record.addedLines + "/-" + record.removedLines + " lines)";
+}
+
+function appendCodeWrite(root: string, record: CodeWriteRecord): boolean {
+  try {
+    appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
+    return true;
+  } catch (error) {
+    recordCodeWriteFailure(root, "append", writeLabel(record), error);
+    return false;
+  }
+}
+
 export function codeWrites(root: string, limit = 20): CodeWriteRecord[] {
   const file = writesPath(root);
-  if (!existsSync(file)) return [];
+  let raw: string;
+  try {
+    if (!existsSync(file)) return [];
+    raw = readFileSync(file, "utf8");
+  } catch (error) {
+    recordCodeWriteFailure(root, "read", "ledger", error);
+    throw error;
+  }
   const records: CodeWriteRecord[] = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
+  for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try { const parsed = JSON.parse(line) as CodeWriteRecord; if (parsed && typeof parsed.path === "string") records.push(parsed); } catch { /* torn line ignored */ }
   }
@@ -331,10 +380,15 @@ function writeCodeFileInternal(root: string, actor: string, rel: string, content
  *  ledger line, the goldfish change artifact, the activity line, and
  *  the verify-on-stop change entry - the exact four records
  *  writeCodeFileInternal writes for its own writes. */
-function persistCodeWrite(root: string, record: CodeWriteRecord, before: string, after: string): void {
+function persistCodeWrite(root: string, record: CodeWriteRecord, before: string, after: string): boolean {
   const rel = record.path;
   mkdirSync(join(resolve(root), ".sam"), { recursive: true, mode: 0o700 });
-  appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
+  // The writes-ledger append never breaks the write it records
+  // and never blocks the records below (see appendCodeWrite):
+  // the file is already on disk, so the artifact, the activity
+  // line, and the verify-on-stop entry land regardless. The
+  // return says whether the writes-ledger record itself landed.
+  const ledgered = appendCodeWrite(root, record);
   // Change artifact for the goldfish verifier (Phase D item 4, C5):
   // the before/after pair keyed by the after-hash, the file-edits
   // shape, so a fresh-context reviewer can reconstruct exactly what
@@ -354,6 +408,7 @@ function persistCodeWrite(root: string, record: CodeWriteRecord, before: string,
   // Verify-on-stop: the write enters the ledger as an unverified change;
   // only a fresh C2 build/test verdict can settle it.
   recordChange(root, { path: rel, replacementHash: record.afterHash, source: "code-write" });
+  return ledgered;
 }
 
 /** Record a change an EXTERNAL writer already made in the code root

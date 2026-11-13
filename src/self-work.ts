@@ -282,6 +282,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one goldfish-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "The reviewer still fails closed on a dead ledger: a failed append ledgers and rethrows (an unrecorded PASS is never spent as reviewed-and-done), and a failed read ledgers and rethrows exactly as callers expect",
      "The full suite is green, including the goldfish failure-ledger tests"]);
+  if (key.startsWith("code-write-failed:")) return base(
+    ["code.ts", "coding.ts", "status.ts"],
+    "The code-writes ledger stops failing: '" + label + "' has ledgered " + n + " failures, and a C1 code write (or its record) must land in .sam/code-writes.jsonl instead of dying at the append or the read - the ledger is the hands' own record and the coding loop counts a task's new writes by slicing it, so while it is dead the close summary loses the write's diff, and a folded-empty read would close a task 'no changes' over work it actually wrote.",
+    ["The next code writes record their writes-ledger lines again instead of code-write-failed lines, and code writes / coding close summaries move with them",
+     "Exactly one code-write-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Recording still never breaks the write it records: a failed append ledgers once and the write returns with its artifact, activity, and verify-on-stop records landed, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
+     "The full suite is green, including the code-writes failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -429,6 +436,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Goldfish ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "goldfish-failed:" + phase, label: "goldfish ledger failures (" + phase + " step)" };
+    }
+    case "code-write-failed": {
+      const m = summary.match(/^Code write ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "code-write-failed:" + phase, label: "code-writes ledger failures (" + phase + " step)" };
     }
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
