@@ -482,6 +482,27 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
 // stages too ("deliveries" and "jobs"); the jobs stage fills a
 // shared result object incrementally, so progress made before a
 // throw stays reported instead of being discarded.
+// Delivery failures ledger in the activity record (gap found
+// 2026-11-13, hourly run 06:04): a failed channel delivery used
+// to exist only in the outbox's own event fold - the fresh-send
+// path wrote a reason-less heartbeats line, the recovery leg
+// wrote nothing outside the outbox, and the terminal settle at
+// the attempt cap was announced nowhere - while a delivery
+// SUPPRESSED by the worthiness gate (a deliberate hold) did
+// write an activity line. Both send paths now write ONE
+// delivery-failed activity line per failed attempt through this
+// seam (actor = the delivery's profile, the verbatim reason
+// capped, the attempt count, the terminal settle named; never
+// the delivery text), so the owner console, the brief, and
+// self-work's defect queue can count the class.
+export function deliveryFailureSummary(jobName:string,reason:string,attempts:number,settled:boolean):string{
+ const base="Delivery for heartbeat '"+jobName+"' failed (attempt "+attempts+" of 5): "+reason.replace(/\s+/g," ").trim();
+ return (settled?base+" - gave up after 5 attempts; the update will not be retried":base).slice(0,200);
+}
+export function recordDeliveryFailure(root:string,profile:string,jobName:string,error:unknown,failure:{attempts:number;settled:boolean}):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,profile,"delivery-failed",deliveryFailureSummary(jobName,reason,failure.attempts,failure.settled));
+}
 export function tickStageFailure(root:string,stage:string,error:unknown):void{
  const reason=error instanceof Error?error.message:String(error);
  appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
@@ -513,7 +534,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     deliveryResult.delivered.push(pending.jobName);
     if(recovered)deliveryResult.recovered.push(pending.jobName);
     appendLog(root,{type:"delivery-recovered",name:pending.jobName,profile:pending.profile,recovered});
-   }catch(e){markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));}
+   }catch(e){const failure=markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:pending.jobName,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,pending.profile,pending.jobName,e,failure);}
   }
   });
  }
@@ -628,7 +649,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
    }else if(deps.deliver){
     try{await deps.deliver(job.channelId,queued.text);markDelivered(root,queued.id,false);deliveryResult.delivered.push(job.name);}
-    catch(e){markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name});}
+    catch(e){const failure=markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,job.profile,job.name,e,failure);}
    }
   }
   retireIfOnce(job);

@@ -233,6 +233,12 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The nightly backup run completes and writes its success line with a manifest-verified archive instead of backup-failed lines",
      "Exactly one backup-failed ledger line still lands per genuinely failed run, with the verbatim reason, so the class stays countable",
      "The full suite is green, including the backup failure-ledger tests"]);
+  if (key === "delivery-failed") return base(
+    ["heartbeat.ts", "delivery-outbox.ts"],
+    "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
+    ["The next changed heartbeat updates land delivered in the outbox instead of delivery-failed lines, on both the fresh-send and the recovery path",
+     "Exactly one delivery-failed ledger line still lands per genuinely failed attempt, with the verbatim reason and attempt count, and the terminal settle at the cap is named, so the class stays countable",
+     "The full suite is green, including the delivery failure-ledger tests"]);
   if (key === "skill-install-failure") return base(
     ["skill-registry.ts"],
     "Skill installs stop failing on resolvable references: " + n + " ledgered install failures, and a search result SAM picks must either install or refuse at proposal time with the real reason, never die mid-install on a reference that was never installable.",
@@ -317,6 +323,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "loop-failed", label: "open-loop revisit failures" };
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
+    case "delivery-failed":
+      return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":
       return { key: "bridge-failed", label: "telegram bridge update failures" };
     case "bridge-poll-failed":

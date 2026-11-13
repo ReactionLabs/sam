@@ -76,8 +76,19 @@ export function queueDelivery(root: string, input: { jobId: string; jobName: str
 export function markDelivered(root: string, id: string, recovered: boolean): void {
   append(root, { type: "delivered", at: new Date().toISOString(), id, recovered });
 }
-export function markAttemptFailed(root: string, id: string, reason: string): void {
+export function markAttemptFailed(root: string, id: string, reason: string): { attempts: number; settled: boolean } {
+  // The fold settles a record when its attempts reach the cap, so
+  // the caller needs to know whether THIS attempt was the terminal
+  // one: before this return, a delivery that gave up after 5
+  // attempts was announced nowhere - the record simply stopped
+  // being pending (gap found 2026-11-13, hourly run 06:04). The
+  // count comes from the pre-append fold, exactly the state the
+  // appended event will produce.
+  const before = readDeliveries(root).find(d => d.id === id);
+  const attempts = before ? before.attempts + 1 : 0;
+  const settled = !!before && before.status === "pending" && attempts >= MAX_ATTEMPTS;
   append(root, { type: "attempt-failed", at: new Date().toISOString(), id, reason: String(reason).slice(0, 200) });
+  return { attempts, settled };
 }
 export function markSuppressed(root: string, id: string, reason: string): void {
   append(root, { type: "suppressed", at: new Date().toISOString(), id, reason });
