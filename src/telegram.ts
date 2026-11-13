@@ -170,6 +170,10 @@ export async function handleTelegramUpdate(deps:{channel:Channel;sam:SamClient;s
   deps.state.chats[key]=chatId;
  }
  const reply=await deps.sam.postMessage(chatId,msg.text.trim());
+ // Silence is a reply shape, not an error: an empty reply (the
+ // rate-limit grace episode already spoke for this cap) sends
+ // nothing at all - never an empty Telegram message.
+ if(!reply.trim())return;
  for(const part of chunkText(reply))await deps.send(msg.chat.id,part);
 }
 export class TelegramApi {

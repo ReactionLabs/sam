@@ -17,6 +17,7 @@ import { failureSignature, repeatedFailureStubContent } from "./loop-guards.js";
 import { codeWrites, readCodeFile, setCodeRoot, writeCodeFile } from "./code.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { sensesStatus, SENSES_NOT_INSTALLED } from "./senses.js";
+import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { engineStatus } from "./engine.js";
 import { runRedTeamPack } from "./door-guard.js";
 
@@ -55,7 +56,7 @@ import { runRedTeamPack } from "./door-guard.js";
  */
 
 export const EVAL_BATTERY_SCRIPT = "sam-eval-battery";
-export const EVAL_TASK_TOTAL = 22;
+export const EVAL_TASK_TOTAL = 23;
 
 export interface EvalTaskResult { id: string; label: string; passed: boolean }
 export interface EvalCategory { id: string; label: string; passed: number; total: number; tasks: EvalTaskResult[] }
@@ -112,6 +113,7 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
     { id: "senses-absent", label: "\"check my email\" with no reader installed says so plainly, naming the operator's act", missing: "the senses not-installed answer (plain, named, no invented mail)", run: () => { const s = sensesStatus({ PATH: "/nonexistent-eval" }); return !s.installed && s.binary === null && /not installed/.test(SENSES_NOT_INSTALLED) && /operator's act/.test(SENSES_NOT_INSTALLED); } },
     { id: "engine-absent", label: "with no coding engine on the machine, engine status reads not installed, never queued-and-hoped", missing: "engine status that reports not-installed from the binary probe", run: () => scratch(root => { const s = engineStatus(root, { PATH: "/nonexistent-eval" }); return !s.installed && s.binary === null && s.queued === 0; }) },
     { id: "door-guard-pack", label: "the door guard blocks the whole injection pack and passes the whole benign pack", missing: "the door guard's red-team coverage (injections blocked, ordinary talk untouched)", run: () => runRedTeamPack().pass },
+    { id: "rate-limit-grace", label: "\"are you there?\" while the provider cap is maxed gets the one plain grace message, never the raw platform error - and a second capped message gets silence", missing: "the rate-limit grace (a simulated quota response classifies, the first capped failure opens the episode and speaks the plain message with zero platform error text, the second stays silent, a success closes the episode)", run: () => scratch(root => { if (!isRateLimitError(new Error("Model connector request failed (HTTP 429)"))) return false; if (!isRateLimitError(new Error("insufficient_quota: quota exceeded"))) return false; if (isRateLimitError(new Error("Model request failed (HTTP 401)"))) return false; if (isRateLimitError(new Error("Model request timed out"))) return false; if (/HTTP|429|Something went wrong|platform|error code/i.test(RATE_LIMIT_GRACE_MESSAGE)) return false; if (!openRateLimitEpisode(root, "eval-chat")) return false; if (openRateLimitEpisode(root, "eval-chat")) return false; if (!closeRateLimitEpisode(root)) return false; return openRateLimitEpisode(root, "eval-chat"); }) },
   ] },
 ];
 

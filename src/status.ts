@@ -42,6 +42,7 @@ import { standingSummary } from "./standing-files.js";
 import { verificationStatus } from "./verification.js";
 import { goldfishStatus } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
+import { rateLimitStatus } from "./rate-limit.js";
 import { dueLoops, openLoopCount } from "./loops.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { stackWatchStatus } from "./stack-watch.js";
@@ -184,6 +185,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     verification: verificationStatus(root),
     goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
     sessionCaps: (() => { const caps = sessionCaps(); return { maxTurns: caps.maxTurns, maxTokens: caps.maxTokens, cappedToday: sessionUsageToday(root).filter(s => s.capped).map(s => s.chatId) }; })(),
+    rateLimit: rateLimitStatus(root),
     loops: { open: openLoopCount(root), due: dueLoops(root).length },
     deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
   };

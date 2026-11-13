@@ -17,6 +17,7 @@ import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
+import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 
@@ -227,6 +228,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;
+  let graceSpoke=false;
   for(let i=0;i<routes.length;i++){
     const conn=routes[i];
     const guard:TurnToolGuard={toolsStarted:false};
@@ -258,19 +260,55 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       break;
     }catch(error){
       const next=routes[i+1];
-      if(!next||!failoverEligible(error,guard)){
-        // A turn that dies mid-flight still spent what it spent; the
-        // session ledger records it so the caps see the true total.
+      if(next&&failoverEligible(error,guard)){
+        const reason=error instanceof Error?error.message:String(error);
+        recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+        continue;
+      }
+      // Rate-limit grace (Dip, 2026-11-12): on the chat route, for
+      // a non-visitor turn, a rate-limit / quota failure on the
+      // LAST route never reaches the person as a raw platform
+      // error. The first capped failure opens the episode and the
+      // turn answers with the one plain grace message; a capped
+      // failure while the episode is open stays silent - the
+      // person's message is already stored above, no assistant
+      // row is written, and delivering surfaces send nothing for
+      // an empty reply. Machine routes keep the throw: a
+      // heartbeat job's failure isolation (job-failed) is its
+      // contract, and its output must never become the grace
+      // text. A visitor hears the door's plain failure instead -
+      // the owner's token state is not a customer's business.
+      if(!visitor&&route==="chat"&&isRateLimitError(error)){
+        let opened=false;
+        try{opened=openRateLimitEpisode(root,chatId);}catch{opened=true;/* the store never breaks a turn: speak once-ish rather than raw */}
+        if(opened){
+          recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode opened, grace message sent (the raw provider error never reaches the owner)");
+          reply=RATE_LIMIT_GRACE_MESSAGE;
+          graceSpoke=true;
+          answered=true;
+          break;
+        }
+        recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode already open, staying silent");
         if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
         recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-        throw error;
+        return "";
       }
-      const reason=error instanceof Error?error.message:String(error);
-      recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+      // A turn that dies mid-flight still spent what it spent; the
+      // session ledger records it so the caps see the true total.
+      if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
+      recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+      throw error;
     }
   }
   if(!answered)throw Error("Model not configured");
-  const finalText=resuming?joinPartial(resuming.content,reply):reply;
+  // The first successful model call closes a rate-limit episode:
+  // the cap has reset, so the next capped failure speaks again.
+  // The grace reply itself is not a model success and never
+  // closes the episode it just opened.
+  if(!graceSpoke){
+    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn */}
+  }
+  const finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
   const saved=new ChatStore(root);
   try{
     if(partialId){if(!saved.finishPartial(chatId,partialId,finalText))saved.add(chatId,"assistant",finalText);}
