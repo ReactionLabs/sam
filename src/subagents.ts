@@ -8,8 +8,10 @@ import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { turnRoutes } from "./failover.js";
 import { readProviderKey } from "./providers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
+import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 
 // Sub-agents (item 10, F3). During a normal chat turn SAM can start an
 // invisible helper (research, a build step, a review) and keep talking.
@@ -74,28 +76,108 @@ export function defaultRoleTools(role: "research" | "build" | "review", inherite
 }
 
 function file(root: string): string { return join(resolve(root), ".sam", "subagents.json"); }
+function registryDbFile(root: string): string { return join(resolve(root), ".sam", "subagent-registry.db"); }
 function journalPath(root: string): string { return join(resolve(root), ".sam", "subagents.db"); }
 
 export function profileToolNames(): string[] {
   return OWN_TOOLS.map(toolNameOf).filter(name => name.length > 0);
 }
 
-function read(root: string): Subagent[] {
-  if (!existsSync(file(root))) return [];
-  try {
-    const data = JSON.parse(readFileSync(file(root), "utf8")) as unknown;
-    if (!Array.isArray(data)) return [];
-    return (data as Subagent[]).map(item => ({ ...item, role: item.role ?? "task", quiet: item.quiet === true }));
-  } catch { return []; }
-}
-function save(root: string, items: Subagent[]): void {
+// State convergence (UNIFICATION item 4, thirty-third store): the
+// sub-agent registry is SQLite (.sam/subagent-registry.db - a NEW
+// file, because .sam/subagents.db is already the AgentLoopJournal's
+// database and the two stores must never share a file - the coding
+// pattern otherwise: better-sqlite3, WAL, busy_timeout 5000, one
+// row per sub-agent holding the record's full JSON, rowid order =
+// the old file order). The old subagents.json was rewritten whole
+// on every spawn, every finish, and every orphan sweep, and three
+// turn-running processes write this store (dashboard/chat, the
+// Telegram bridge, the CLI), so two writers holding the same
+// snapshot silently lost the second one's record: a cancelled
+// helper could resurrect as running, a finished helper's result
+// could revert, and a lost record freed the parent-pool budget it
+// had carved. Here each mutation is a single-row INSERT or
+// UPDATE. First open imports a legacy subagents.json in file
+// order and renames it subagents.json.migrated - imported, never
+// deleted; a malformed file or a non-array payload imports
+// nothing and is left in place (reading as no helpers, exactly
+// the old forgiving contract). A pure read on an install with
+// neither file creates nothing. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried with
+// no backup change.
+function openRegistryStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(file(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+  const db = openDatabase(registryDbFile(root));
+  db.exec("CREATE TABLE IF NOT EXISTS subagents (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacySubagents(db, root);
+  return db;
+}
+function normalizeSubagent(item: Subagent): Subagent {
+  return { ...item, role: item.role ?? "task", quiet: item.quiet === true };
+}
+function migrateLegacySubagents(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM subagents").get() as { n: number };
+  if (n > 0) return;
+  const legacy = file(root);
+  if (!existsSync(legacy)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(legacy, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO subagents (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Partial<Subagent>;
+      if (typeof item.id !== "string" || !item.id) continue;
+      insert.run(item.id, JSON.stringify(normalizeSubagent(item as Subagent)));
+    }
+  });
+  importAll(data);
+  renameSync(legacy, legacy + ".migrated");
+}
+function rowToSubagent(data: string): Subagent | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? normalizeSubagent(value as Subagent) : null; }
+  catch { return null; }
+}
+function storeExists(root: string): boolean {
+  return existsSync(registryDbFile(root)) || existsSync(file(root));
+}
+function read(root: string): Subagent[] {
+  if (!storeExists(root)) return [];
+  const db = openRegistryStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM subagents ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: Subagent[] = [];
+    for (const row of rows) { const item = rowToSubagent(row.data); if (item) items.push(item); }
+    return items;
+  } finally { db.close(); }
+}
+function readOne(root: string, id: string): Subagent | null {
+  if (!storeExists(root)) return null;
+  const db = openRegistryStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM subagents WHERE id = ?").get(id) as { data: string } | undefined;
+    return row ? rowToSubagent(row.data) : null;
+  } finally { db.close(); }
 }
 function put(root: string, item: Subagent): void {
-  const items = read(root).filter(s => s.id !== item.id);
-  items.push(item);
-  save(root, items);
+  const db = openRegistryStore(root);
+  try {
+    db.prepare("INSERT INTO subagents (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+      .run(item.id, JSON.stringify(normalizeSubagent(item)));
+  } finally { db.close(); }
+}
+// The store's update door (the updateCodingTask precedent): patch
+// one record by id through the store's own shape. Returns the
+// updated record, or null when no such sub-agent exists - and a
+// miss on an install with no store at all creates nothing.
+export function updateSubagent(root: string, id: string, patch: Partial<Subagent>): Subagent | null {
+  if (!storeExists(root)) return null;
+  const current = readOne(root, id);
+  if (!current) return null;
+  const next: Subagent = { ...current, ...patch, id: current.id };
+  put(root, next);
+  return next;
 }
 
 function finishLoop(root: string, loopId: string | null, state: "completed" | "failed" | "interrupted", result: string): void {
@@ -111,17 +193,15 @@ function finishLoop(root: string, loopId: string | null, state: "completed" | "f
  *  uses: interrupted, with the evidence left in place, never replayed. */
 export function listSubagents(root: string, profile?: string): Subagent[] {
   const items = read(root);
-  let changed = false;
   for (const item of items) {
     if (item.status !== "running" || live.has(item.id)) continue;
     finishLoop(root, item.loopId, "interrupted", "Process ended before completion; inspect evidence before resuming");
     item.status = "interrupted";
     item.result = "Process ended before completion; inspect evidence before resuming";
     item.finishedAt = new Date().toISOString();
-    changed = true;
+    put(root, item);
     recordActivity(root, item.profile, "subagent-interrupted", "Sub-agent " + item.id.slice(0, 8) + " was still running when the process ended; checkpoint kept, tools not replayed");
   }
-  if (changed) save(root, items);
   return profile ? items.filter(s => s.profile === profile) : items;
 }
 
@@ -433,14 +513,13 @@ async function runChild(root: string, item: Subagent, complete: SubagentComplete
 }
 
 export function cancelSubagent(root: string, id: string): Subagent {
-  const items = read(root);
-  const item = items.find(s => s.id === id);
+  const item = readOne(root, id);
   if (!item) throw new Error("Unknown sub-agent: " + id);
   if (item.status !== "running") throw new Error("Sub-agent is already " + item.status);
   item.status = "cancelled";
   item.result = "Cancelled by the owner";
   item.finishedAt = new Date().toISOString();
-  save(root, items);
+  put(root, item);
   finishLoop(root, item.loopId, "failed", "Cancelled by the owner");
   recordActivity(root, item.profile, "subagent-cancelled", "Cancelled sub-agent " + item.id.slice(0, 8));
   return item;
