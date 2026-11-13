@@ -240,6 +240,20 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one compaction-failed ledger line still lands per genuinely failed fold attempt, with the phase and verbatim reason, so the class stays countable",
      "Compaction still never breaks a turn: the caller fail-opens to the raw tail exactly as before",
      "The full suite is green, including the compaction failure-ledger tests"]);
+  if (key === "usage-failed") return base(
+    ["usage.ts"],
+    "Usage accounting stops failing: " + n + " ledgered usage-record failures, and model spend must land in .sam/usage.jsonl instead of dying at the append - the usage summaries and the dashboard's usage-today number keep reporting the frozen totals as truth while the ledger is dead, so an unrecorded spend is also an understated one.",
+    ["The next model responses record their usage lines in usage.jsonl again instead of usage-failed lines",
+     "Exactly one usage-failed ledger line still lands per genuinely failed write, with the model and verbatim reason, so the class stays countable",
+     "Accounting still never breaks a turn: a failed usage write returns null and the turn completes exactly as before",
+     "The full suite is green, including the accounting failure-ledger tests"]);
+  if (key === "session-caps-failed") return base(
+    ["session-caps.ts"],
+    "The session-cap ledger stops failing: " + n + " ledgered session-caps failures, and a completed turn's spend record (or a cap trip) must land in .sam/session-caps.jsonl instead of dying at the append - while the write threw, a finished turn could be reported failed and a real model error masked by the accounting error in its place.",
+    ["The next turns record their session-cap lines (and a cap trip records once) instead of session-caps-failed lines",
+     "Exactly one session-caps-failed ledger line still lands per genuinely failed write, naming which write and the verbatim reason, so the class stays countable",
+     "Accounting still never breaks a turn: recordSessionTurn and noteCapTrip never throw, and the graceful cap reply still returns",
+     "The full suite is green, including the accounting failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -367,6 +381,10 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "action-failed", label: "gated action execution failures" };
     case "loop-failed":
       return { key: "loop-failed", label: "open-loop revisit failures" };
+    case "usage-failed":
+      return { key: "usage-failed", label: "usage accounting failures" };
+    case "session-caps-failed":
+      return { key: "session-caps-failed", label: "session-cap ledger failures" };
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
     case "delivery-failed":

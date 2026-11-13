@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
 import type { ModelTier } from "./model-routing.js";
+import { recordActivity } from "./activity.js";
 
 // Token spend accounting (program P11): every model response that carries
 // a provider usage object lands one line in .sam/usage.jsonl, stamped with
@@ -9,7 +10,10 @@ import type { ModelTier } from "./model-routing.js";
 // and `sam usage` aggregate the same ledger, so spend is visible per model,
 // per route/tier, and per profile - a heartbeat poll on the cheap tier
 // reads differently from a deep background run because it IS recorded
-// differently. Recording is best-effort: accounting never breaks a turn.
+// differently. Recording is best-effort: accounting never breaks a turn,
+// and a failed write ledgers one usage-failed activity line instead of
+// vanishing (the summaries keep reading the frozen totals as truth, so
+// the failure line is the only signal they have stopped moving).
 // A provider that reports no usage records nothing (never an invented 0).
 export interface UsageEntry {
   at: string;
@@ -30,29 +34,49 @@ function validCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+// One ledger line per failed usage write (gap found 2026-11-13):
+// accounting never breaks a turn, but a dead usage ledger must not
+// read as frozen-but-true spend forever either - the summaries
+// below keep reporting the totals they can read, so the failure
+// line in the activity ledger is the only signal that the numbers
+// have stopped moving. The reason is the error's own words
+// (collapsed, capped); the entry's token counts never enter it.
+export function usageFailureSummary(model: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Usage record failed for model " + model + ": " + clean).slice(0, 200);
+}
+
+export function recordUsageFailure(root: string, actor: string, model: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, actor, "usage-failed", usageFailureSummary(model, reason));
+}
+
 export function recordUsage(
   root: string,
   entry: Omit<UsageEntry, "at" | "totalTokens"> & { totalTokens?: number },
 ): UsageEntry | null {
+  // Validation stays silent by design: a provider that reports no
+  // (or malformed) usage records nothing - that is not a failure.
+  if (!validCount(entry.promptTokens) || !validCount(entry.completionTokens)) return null;
+  const total = validCount(entry.totalTokens)
+    ? entry.totalTokens
+    : entry.promptTokens + entry.completionTokens;
+  const line: UsageEntry = {
+    at: new Date().toISOString(),
+    actor: String(entry.actor || "sam").slice(0, 64),
+    route: entry.route,
+    tier: entry.tier,
+    model: String(entry.model || "unknown").slice(0, 128),
+    promptTokens: entry.promptTokens,
+    completionTokens: entry.completionTokens,
+    totalTokens: total,
+  };
   try {
-    if (!validCount(entry.promptTokens) || !validCount(entry.completionTokens)) return null;
-    const total = validCount(entry.totalTokens)
-      ? entry.totalTokens
-      : entry.promptTokens + entry.completionTokens;
-    const line: UsageEntry = {
-      at: new Date().toISOString(),
-      actor: String(entry.actor || "sam").slice(0, 64),
-      route: entry.route,
-      tier: entry.tier,
-      model: String(entry.model || "unknown").slice(0, 128),
-      promptTokens: entry.promptTokens,
-      completionTokens: entry.completionTokens,
-      totalTokens: total,
-    };
     mkdirSync(join(resolve(root), ".sam"), { recursive: true });
     appendFileSync(usagePath(root), JSON.stringify(line) + "\n");
     return line;
-  } catch {
+  } catch (error) {
+    recordUsageFailure(root, line.actor, line.model, error);
     return null;
   }
 }
