@@ -275,6 +275,30 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The closing shape is reproduced with a fake engine binary and the close names its true cause",
      "Unreviewed or unverified engine work still never closes done",
      "The full suite is green, including the engine drain tests"]);
+  if (key === "subagent-failed") return base(
+    ["subagents.ts"],
+    "Sub-agent runs stop closing failed: " + n + " ledgered failures, and a helper child's turn must either return its result (folded into the owner's chat when quiet) or fail with the true cause fixed at its seam instead of recurring.",
+    ["The failing child shape is reproduced in a test and the child either returns or fails once with its verbatim reason on the record",
+     "Exactly one subagent-failed ledger line still lands per genuinely failed child, so the class stays countable",
+     "The full suite is green, including the sub-agent drive tests"]);
+  if (key === "delegate-failed") return base(
+    ["coding-operatives.ts"],
+    "Coding delegations stop closing failed: " + n + " ledgered failures, and an approved delegation must either finish its run with its diff and test record or close failed naming the exact cause (launch, lease, worktree, or the operative's own exit) instead of recurring.",
+    ["The closing shape is reproduced with a fake operative spawn and the close names its true cause",
+     "A delegation still never pushes and never opens a pull request, whatever its outcome",
+     "The full suite is green, including the coding-operatives tests"]);
+  if (key === "team-failed" || key === "team-blocked") return base(
+    ["team-runtime.ts"],
+    "Standing team runs stop closing " + (key === "team-failed" ? "failed" : "blocked") + ": " + n + " ledgered, and a run must either finish with the reviewer's verdict on the record or close naming the exact cause (a member call dying, the budget, or review never approving) instead of recurring.",
+    ["The closing shape is reproduced with a stub completer and the close names its true cause",
+     "Exactly one team-" + (key === "team-failed" ? "failed" : "blocked") + " ledger line still lands per closed run, so the class stays countable",
+     "The full suite is green, including the standing team tests"]);
+  if (key === "connector-pair-failed") return base(
+    ["connector-pairing.ts"],
+    "Connector self-pairing stops failing on resolvable shapes: " + n + " ledgered failures, and a pairing attempt must either complete (registered, bound, tested, pinned) or refuse before any state is written with the real reason, never die mid-pairing and roll back.",
+    ["The failing pairing shape refuses up front naming the reason, and a sound pairing completes end to end",
+     "A genuinely dead pairing still ledgers connector-pair-failed with its verbatim reason and rolls back fully - failures stay honest and countable",
+     "The full suite is green, including the connector-pairing tests"]);
   return base(
     [],
     "The '" + label + "' class stops recurring: it is the top ledgered defect with " + n + " occurrences, and its cause must be found from the ledgered evidence and fixed at that seam.",
@@ -339,6 +363,16 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "engine-failed", label: "engine runs closing failed" };
     case "engine-blocked":
       return { key: "engine-blocked", label: "engine runs closing blocked" };
+    case "subagent-failed":
+      return { key: "subagent-failed", label: "sub-agent runs closing failed" };
+    case "delegate-failed":
+      return { key: "delegate-failed", label: "coding delegations closing failed" };
+    case "team-failed":
+      return { key: "team-failed", label: "standing team runs closing failed" };
+    case "team-blocked":
+      return { key: "team-blocked", label: "standing team runs closing blocked" };
+    case "connector-pair-failed":
+      return { key: "connector-pair-failed", label: "connector self-pairing failures" };
     default:
       return null;
   }

@@ -436,7 +436,9 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
   } catch (error) {
     run.status = "failed";
     run.result = error instanceof Error ? error.message : "Team run failed";
-    recordActivity(root, lead, "team-failed", run.result.slice(0, 220));
+    // No ledger line here: the terminal line below is the ONE
+    // team-failed line per failed run (it now carries this reason) -
+    // a second line in the catch double-counted the thrown shape.
   } finally {
     try { if (operativeId) reg.release(operativeId); } catch { /* capacity release is best-effort */ }
     reg.close();
@@ -447,6 +449,6 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
   }
   run.finishedAt = new Date().toISOString();
   putRun(root, run);
-  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")");
+  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")" + (run.status === "failed" ? ": " + (run.result ?? "Team run failed").replace(/\s+/g, " ").slice(0, 160) : ""));
   return run;
 }
