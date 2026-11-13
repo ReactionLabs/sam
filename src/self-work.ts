@@ -227,6 +227,12 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The stage's next ticks complete their normal work (consolidation watermarks advance, the pending deliveries drain, the due jobs run and their rows save, or a drain runs its queued tasks) instead of tick-failed lines",
      "A failure in this stage still never wedges the tick: the jobs and the other stages in the same tick still run, and exactly one tick-failed line lands per failed stage",
      "The full suite is green, including the heartbeat tick-stage isolation tests"]);
+  if (key.startsWith("consolidate-failed:")) return base(
+    ["heartbeat.ts", "corrections.ts", "skill-author.ts"],
+    "The failing consolidation sub-step stops failing: '" + label + "' has ledgered " + n + " failures, and the sub-step must complete its work (owner corrections routed to the approval gate, or the skill library curated) instead of being silently skipped inside every consolidation run - a correction the routing drops is lost for good once the scan watermark passes it.",
+    ["The sub-step's next consolidation runs complete their normal work (a correction in a chat produces its deduped law proposal on the gate, or the curator records its finding set) instead of consolidate-failed lines",
+     "Exactly one consolidate-failed ledger line still lands per failed sub-step per consolidation run, with the verbatim reason, so the class stays countable",
+     "The full suite is green, including the consolidation sub-step failure-ledger tests"]);
   if (key === "backup-failed") return base(
     ["backup.ts"],
     "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
@@ -339,6 +345,10 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/tick stage '([^']+)'/);
       const stage = m ? m[1] : "unknown";
       return { key: "tick-failed:" + stage.toLowerCase().replace(/[^a-z0-9]+/g, "-"), label: "heartbeat tick stage failures (" + stage + ")" };
+    }
+    case "consolidate-failed": {
+      if (/skill curator/i.test(summary)) return { key: "consolidate-failed:curator", label: "consolidation sub-step failures (skill curator)" };
+      return { key: "consolidate-failed:corrections", label: "consolidation sub-step failures (correction routing)" };
     }
     case "failed":
       if (/^skill:/i.test(summary)) return { key: "skill-install-failure", label: "skill install failures" };

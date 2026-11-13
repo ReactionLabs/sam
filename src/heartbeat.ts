@@ -365,11 +365,20 @@ export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>
  return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
 }
 function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
-export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[]}{
+export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[];correctionFailures:number;curatorFailed:boolean}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
  const db=new ChatStore(root);const prefs=new PreferenceStore(root);
  let scanned=0,noted=0,corrections=0,visitorSkipped=0;
+ // Sub-step failure tallies (gap found 2026-11-13, hourly run
+ // 10:04): the correction routing and curator catches below
+ // used to swallow their throws outright, so a failing
+ // sub-step read exactly like a healthy one in every record.
+ // The failures are counted here and ledgered ONCE per run
+ // through recordConsolidationFailure after the scan - the
+ // guards still never break the tick.
+ let correctionFailures=0;let correctionFailureError:unknown=null;
+ let curatorFailed=false;let curatorFailureError:unknown=null;
  // Episodic evidence (P4): every new message, both roles, grouped by
  // profile and by the message's own date, on the same watermark scan.
  const evidence=new Map<string,Map<string,Map<string,EpisodeChat>>>();
@@ -398,7 +407,7 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     // corrections to the same P1 gate (deduped against the turn path) and
     // never lets a corrected rule slip in here as instant law.
     let correction=null as ReturnType<typeof detectCorrection>;
-    try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch{/* the gate never breaks a tick */}
+    try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch(e){/* the gate never breaks a tick - but its failure is counted and ledgered once per run below, never silent: this scan is the last capture path and the watermark advances past the message either way */correctionFailures++;if(correctionFailureError===null)correctionFailureError=e;}
     for(const found of withoutCorrectedRules(extractPreferences(msg.content),correction)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
@@ -418,10 +427,16 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   // patch each, and ledgers only when the finding set changes. A
   // curator failure never breaks a tick.
   let curator:string[]=[];
-  try{curator=runSkillCurator(root).findings.map(f=>f.kind+":"+f.skills.join("+"));}catch{/* the curator never breaks a tick */}
+  try{curator=runSkillCurator(root).findings.map(f=>f.kind+":"+f.skills.join("+"));}catch(e){/* the curator never breaks a tick - but its failure is ledgered once below, never silent: a dead curator otherwise reads curator:[] forever */curatorFailed=true;curatorFailureError=e;}
+  // One ledger line per failed sub-step per run (the seam in
+  // recordConsolidationFailure): the tick guard around this
+  // whole stage can only see a throw that escapes, and these
+  // two catches are inside it by design.
+  if(correctionFailures>0)recordConsolidationFailure(root,"corrections",correctionFailures,correctionFailureError);
+  if(curatorFailed)recordConsolidationFailure(root,"curator",1,curatorFailureError);
   state.lastTick=new Date().toISOString();saveState(root,state);
-  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped,curator});
-  return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
+  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped,curator,correctionFailures,curatorFailed});
+  return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator,correctionFailures,curatorFailed};
  }finally{db.close();prefs.close();}
 }
 export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number;stderr?:string}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
@@ -503,6 +518,38 @@ export function recordDeliveryFailure(root:string,profile:string,jobName:string,
  const reason=error instanceof Error?error.message:String(error);
  recordActivity(root,profile,"delivery-failed",deliveryFailureSummary(jobName,reason,failure.attempts,failure.settled));
 }
+// Consolidation sub-step failures ledger in the activity
+// record (gap found 2026-11-13, hourly run 10:04): inside
+// consolidatePreferences, two sub-steps swallowed their throws
+// entirely - the scan's correction routing ("the gate never
+// breaks a tick") and the skill curator pass ("the curator
+// never breaks a tick") - so the tick-stage guard around the
+// whole consolidation stage never saw them, and the
+// consolidate line read corrections:0 / curator:[] exactly as
+// a healthy run's does. The correction step is the LAST
+// capture path for an owner's correction (the live turn
+// path's identical swallow is backstopped by this scan,
+// deduped through the gate), and the scan's watermark
+// advances past a failed message in the same run, so a
+// correction whose routing threw was lost for good, not
+// delayed; a curator whose store throws on open read as a
+// clean library on every tick while curation was dead. Each
+// failed sub-step now writes ONE consolidate-failed activity
+// line per consolidation run through this seam: the
+// corrections step aggregates the run's failures (a count
+// plus the first verbatim reason, capped; never a message's
+// content), the curator step names its reason, and self-work
+// classifyDefect keys the class by step. The guards do not
+// move: a failing sub-step still never breaks the tick.
+export function consolidationFailureSummary(step:string,count:number,reason:string):string{
+ const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+ if(step==="curator")return ("Consolidation skill curator failed: "+clean).slice(0,200);
+ return ("Consolidation correction routing failed for "+count+(count===1?" message":" messages")+": "+clean).slice(0,200);
+}
+export function recordConsolidationFailure(root:string,step:string,count:number,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,"sam","consolidate-failed",consolidationFailureSummary(step,count,reason));
+}
 export function tickStageFailure(root:string,stage:string,error:unknown):void{
  const reason=error instanceof Error?error.message:String(error);
  appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
@@ -514,7 +561,7 @@ async function guardTickStage<T>(root:string,stage:string,fallback:T,stageFailur
 }
 export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];stageFailures:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
  const stageFailures:string[]=[];
- const consolidation=await guardTickStage(root,"consolidate",{scanned:0,noted:0,promoted:[],episodes:[],corrections:0,visitorSkipped:0,curator:[]},stageFailures,()=>consolidatePreferences(root));
+ const consolidation=await guardTickStage(root,"consolidate",{scanned:0,noted:0,promoted:[],episodes:[],corrections:0,visitorSkipped:0,curator:[],correctionFailures:0,curatorFailed:false},stageFailures,()=>consolidatePreferences(root));
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
  // Durable delivery outbox (Phase C item 1): deliveries a previous
