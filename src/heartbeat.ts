@@ -424,20 +424,37 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number;stderr?:string}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
+// Script-failure reason (gap found 2026-11-13): a script job that
+// exits non-zero used to record ONLY its exit code - the journal,
+// heartbeats.jsonl, and the activity ledger all said "script
+// exited 1" while the script's actual diagnostic sat on stderr,
+// which defaultRunScript discarded. Every sibling failure path
+// in the tick (a thrown script run, a thrown agent turn) records
+// a reason; this is the non-zero path's. The reason is the
+// stderr tail's last non-empty line, whitespace-collapsed and
+// capped - a CLI report's error line, not its whole output -
+// and an empty stderr reads "no error output" so the record
+// says plainly there was nothing more to know.
+export function scriptFailureReason(stderr:string|undefined):string{
+ const lines=String(stderr??"").split(/\r?\n/).map(l=>l.replace(/\s+/g," ").trim()).filter(l=>l.length>0);
+ if(!lines.length)return "no error output";
+ const last=lines[lines.length-1];
+ return last.length>300?last.slice(0,297)+"...":last;
+}
 // Default no-agent script runner: execFile on the allowlist argv -
 // no shell, a 60s timeout, a bounded buffer. A non-zero exit is a
 // result the caller logs, not a throw; an unknown script name or a
 // spawn failure throws (the allowlist check happens at job creation
 // too, so this is a belt-and-braces refusal).
-export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:string;code:number}>{
+export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:string;code:number;stderr:string}>{
  return (name:string)=>new Promise((resolvePromise,reject)=>{
   let argv:string[];
   try{argv=scriptArgv(root,name);}catch(e){reject(e as Error);return;}
-  execFile(argv[0],argv.slice(1),{timeout:60000,maxBuffer:256*1024,windowsHide:true},(err,stdout)=>{
+  execFile(argv[0],argv.slice(1),{timeout:60000,maxBuffer:256*1024,windowsHide:true},(err,stdout,stderr)=>{
    const code=(err as (NodeJS.ErrnoException&{code?:number|string})|null)?.code;
    if(err&&typeof code!=="number"){reject(err);return;}
-   resolvePromise({stdout:String(stdout??""),code:typeof code==="number"?code:0});
+   resolvePromise({stdout:String(stdout??""),code:typeof code==="number"?code:0,stderr:String(stderr??"")});
   });
  });
 }
@@ -491,7 +508,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   let reply:string;
   if(isScript){
    const runScript=deps.runScript??defaultRunScript(root);
-   let outcome:{stdout:string;code:number};
+   let outcome:{stdout:string;code:number;stderr?:string};
    try{outcome=await runScript(job.script??"");}
    catch(e){
     job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
@@ -503,8 +520,9 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);
    if(outcome.code!==0){
     failed.push(job.name);
-    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
-    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script exited "+outcome.code);
+    const reason=scriptFailureReason(outcome.stderr);
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code,reason});
+    recordActivity(root,job.profile,"heartbeat-failed",("Heartbeat '"+job.name+"' script exited "+outcome.code+": "+reason).slice(0,200));
     retireIfOnce(job);
     continue;
    }

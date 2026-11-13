@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addHeartbeatJob, addScheduledJob, heartbeatJobs, jobDue, jobNextRun, runHeartbeat, updateHeartbeatJob } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, defaultRunScript, heartbeatJobs, jobDue, jobNextRun, runHeartbeat, scriptFailureReason, updateHeartbeatJob } from "./heartbeat.js";
 import { deliverySummary, pendingDeliveries, queueDelivery, readDeliveries } from "./delivery-outbox.js";
 import { scriptArgv, scriptCommandNames } from "./schedule.js";
 import { proposeAction, decideAction } from "./actions.js";
@@ -130,6 +130,58 @@ test("script mode: a failing script logs a failure and delivers nothing", async 
     assert.deepEqual(r.ran, ["backups watch"]);
     assert.deepEqual(r.changed, []);
     assert.equal(deliveries.length, 0);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("script mode: a non-zero exit ledgers its stderr reason, not just the code", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-cron-"));
+  try {
+    addScheduledJob(root, { name: "backups watch", profile: "sam", schedule: "every 30 minutes", script: "sam-backups", channelId: "chan-1" });
+    const deliveries: string[] = [];
+    const d = deps({
+      runScript: async () => ({ stdout: "", code: 1, stderr: "first noise line\n\nError: Connector Nines is not configured\n" }),
+      deliver: async (_id: string, text: string) => { deliveries.push(text); },
+    });
+    const r = await runHeartbeat(root, d);
+    assert.deepEqual(r.failed, ["backups watch"]);
+    assert.equal(deliveries.length, 0);
+    const hb = readFileSync(join(root, ".sam", "heartbeats.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l) as Record<string, unknown>);
+    const failed = hb.find(l => l.type === "job-failed");
+    assert.equal(failed?.code, 1);
+    assert.equal(failed?.reason, "Error: Connector Nines is not configured");
+    const act = readFileSync(join(root, ".sam", "activity.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l) as Record<string, unknown>);
+    const line = act.find(l => l.kind === "heartbeat-failed");
+    assert.match(String(line?.summary), /script exited 1: Error: Connector Nines is not configured/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("script mode: a silent non-zero exit records that there was no error output", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-cron-"));
+  try {
+    addScheduledJob(root, { name: "backups watch", profile: "sam", schedule: "every 30 minutes", script: "sam-backups" });
+    const r = await runHeartbeat(root, deps({ runScript: async () => ({ stdout: "boom", code: 2 }) }));
+    assert.deepEqual(r.failed, ["backups watch"]);
+    const hb = readFileSync(join(root, ".sam", "heartbeats.jsonl"), "utf8").trim().split("\n").map(l => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(hb.find(l => l.type === "job-failed")?.reason, "no error output");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("scriptFailureReason: last non-empty stderr line, collapsed and capped", () => {
+  assert.equal(scriptFailureReason(undefined), "no error output");
+  assert.equal(scriptFailureReason("  \n\n"), "no error output");
+  assert.equal(scriptFailureReason("warn one\nError:   spaced   out\n"), "Error: spaced out");
+  assert.equal(scriptFailureReason("x".repeat(400)).length, 300);
+});
+
+test("defaultRunScript: stderr is captured from the real child process", async () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-cron-"));
+  try {
+    // sam-stack-watch on an install with no Nines connector fails
+    // through the real CLI: exit non-zero, diagnostic on stderr.
+    const outcome = await defaultRunScript(root)("sam-stack-watch");
+    assert.notEqual(outcome.code, 0);
+    assert.ok(outcome.stderr.length > 0);
+    assert.notEqual(scriptFailureReason(outcome.stderr), "no error output");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
