@@ -227,6 +227,12 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The stage's next ticks complete their normal work (consolidation watermarks advance, the pending deliveries drain, the due jobs run and their rows save, or a drain runs its queued tasks) instead of tick-failed lines",
      "A failure in this stage still never wedges the tick: the jobs and the other stages in the same tick still run, and exactly one tick-failed line lands per failed stage",
      "The full suite is green, including the heartbeat tick-stage isolation tests"]);
+  if (key === "backup-failed") return base(
+    ["backup.ts"],
+    "The nightly state backup stops failing: " + n + " ledgered backup failures, and the P9 run must produce its verified archive instead of dying where only the systemd journal can see it.",
+    ["The nightly backup run completes and writes its success line with a manifest-verified archive instead of backup-failed lines",
+     "Exactly one backup-failed ledger line still lands per genuinely failed run, with the verbatim reason, so the class stays countable",
+     "The full suite is green, including the backup failure-ledger tests"]);
   if (key === "skill-install-failure") return base(
     ["skill-registry.ts"],
     "Skill installs stop failing on resolvable references: " + n + " ledgered install failures, and a search result SAM picks must either install or refuse at proposal time with the real reason, never die mid-install on a reference that was never installable.",
@@ -309,6 +315,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "action-failed", label: "gated action execution failures" };
     case "loop-failed":
       return { key: "loop-failed", label: "open-loop revisit failures" };
+    case "backup-failed":
+      return { key: "backup-failed", label: "state backup failures" };
     case "bridge-failed":
       return { key: "bridge-failed", label: "telegram bridge update failures" };
     case "bridge-poll-failed":

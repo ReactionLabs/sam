@@ -58,10 +58,37 @@ function snapshotDatabase(source: string, dest: string): void {
   rmSync(dest + "-shm", { force: true });
 }
 
+// A failed backup ledgers before it rethrows (the turn-failed /
+// tick-failed seam): success already writes its "backup" line, but a
+// throw anywhere in the work below used to exist only on the CLI's
+// stderr - on the box that is the systemd journal of the sam-backup
+// oneshot, invisible to the owner console, the brief, and self-work.
+// The summary carries the error's own message only (collapsed,
+// capped by recordActivity), never a file's contents.
+export function backupFailureSummary(error: unknown): string {
+  const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
+  return "Backup failed: " + (reason || "unknown error");
+}
+
+export function recordBackupFailure(root: string, error: unknown): void {
+  recordActivity(root, "sam", "backup-failed", backupFailureSummary(error).slice(0, 200));
+}
+
 export function createBackup(root: string, destDir: string, keep = 7): BackupInfo {
   const state = samDir(root);
   if (!existsSync(state)) throw new Error("No .sam state to back up at " + state);
   if (!Number.isInteger(keep) || keep < 1 || keep > 365) throw new Error("keep must be 1..365");
+  // Validation above is a usage error the caller sees synchronously;
+  // only a failure of the backup WORK ledgers (and rethrows exactly).
+  try { return createBackupWork(root, destDir, keep); }
+  catch (error) {
+    try { recordBackupFailure(root, error); } catch { /* the ledger never breaks the work it records */ }
+    throw error;
+  }
+}
+
+function createBackupWork(root: string, destDir: string, keep: number): BackupInfo {
+  const state = samDir(root);
   const dest = resolve(destDir);
   mkdirSync(dest, { recursive: true });
   const staging = mkdtempSync(join(tmpdir(), "sam-backup-"));
