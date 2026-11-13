@@ -1,8 +1,10 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import type Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
@@ -135,26 +137,104 @@ export function validateDelegateDetail(detail: string): { adapter: CodingAdapter
   });
 }
 
-function readAll(root: string): Delegation[] {
-  const file = delegationsPath(root);
-  if (!existsSync(file)) return [];
-  try {
-    const data = JSON.parse(readFileSync(file, "utf8")) as unknown;
-    return Array.isArray(data) ? data as Delegation[] : [];
-  } catch { return []; }
+// State convergence (UNIFICATION item 4, thirty-fourth store):
+// the delegations registry is SQLite (.sam/delegations.db, the
+// coding pattern: better-sqlite3, WAL, busy_timeout 5000, one row
+// per delegation holding the record's full JSON, rowid order =
+// the old file order). The old delegations.json was rewritten
+// whole on every put (propose, every run transition, cancel),
+// and its writers span the gate executor process, the CLI, and
+// any cancelling process, so two writers holding the same
+// snapshot silently lost the second one's record: a cancel
+// could revert under the run's next put (the run's own
+// cancelled re-check is the read that can be fooled), a done
+// mark could revert to pending and be run a second time, and a
+// fresh proposal could vanish under its card. Here each
+// mutation is a single-row INSERT or UPDATE. First open
+// imports a legacy delegations.json in file order and renames
+// it delegations.json.migrated - imported, never deleted; a
+// malformed file or a non-array payload imports nothing and is
+// left in place (reading as no delegations, exactly the old
+// forgiving contract). A pure read on an install with neither
+// file creates nothing. The P9 backup snapshots every
+// .sam/*.db generically, so the migrated store is carried with
+// no backup change. The per-delegation run logs
+// (.sam/delegations/<id>.log) are a different store and stay.
+function delegationsDbFile(root: string): string { return join(resolve(root), ".sam", "delegations.db"); }
+function openDelegationsStore(root: string): Database.Database {
+  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+  const db = openDatabase(delegationsDbFile(root));
+  db.exec("CREATE TABLE IF NOT EXISTS delegations (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyDelegations(db, root);
+  return db;
 }
-function saveAll(root: string, items: Delegation[]): void {
-  mkdirSync(dirname(delegationsPath(root)), { recursive: true });
-  writeFileSync(delegationsPath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+function migrateLegacyDelegations(db: Database.Database, root: string): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM delegations").get() as { n: number };
+  if (n > 0) return;
+  const legacy = delegationsPath(root);
+  if (!existsSync(legacy)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(legacy, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO delegations (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Partial<Delegation>;
+      if (typeof item.id !== "string" || !item.id) continue;
+      insert.run(item.id, JSON.stringify(item));
+    }
+  });
+  importAll(data);
+  renameSync(legacy, legacy + ".migrated");
+}
+function rowToDelegation(data: string): Delegation | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as Delegation : null; }
+  catch { return null; }
+}
+function storeExists(root: string): boolean {
+  return existsSync(delegationsDbFile(root)) || existsSync(delegationsPath(root));
+}
+function readAll(root: string): Delegation[] {
+  if (!storeExists(root)) return [];
+  const db = openDelegationsStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM delegations ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: Delegation[] = [];
+    for (const row of rows) { const item = rowToDelegation(row.data); if (item) items.push(item); }
+    return items;
+  } finally { db.close(); }
+}
+function readOne(root: string, id: string): Delegation | null {
+  if (!storeExists(root)) return null;
+  const db = openDelegationsStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM delegations WHERE id = ?").get(id) as { data: string } | undefined;
+    return row ? rowToDelegation(row.data) : null;
+  } finally { db.close(); }
 }
 export function listDelegations(root: string): Delegation[] { return readAll(root); }
 export function getDelegation(root: string, id: string): Delegation | null {
   return readAll(root).find(d => d.id === id || d.actionId === id) ?? null;
 }
 function put(root: string, job: Delegation): void {
-  const items = readAll(root).filter(d => d.id !== job.id);
-  items.push(job);
-  saveAll(root, items);
+  const db = openDelegationsStore(root);
+  try {
+    db.prepare("INSERT INTO delegations (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+      .run(job.id, JSON.stringify(job));
+  } finally { db.close(); }
+}
+// The store's update door (the updateCodingTask precedent): patch
+// one record by id through the store's own shape. Returns the
+// updated record, or null when no such delegation exists - and a
+// miss on an install with no store at all creates nothing.
+export function updateDelegation(root: string, id: string, patch: Partial<Delegation>): Delegation | null {
+  if (!storeExists(root)) return null;
+  const current = readOne(root, id);
+  if (!current) return null;
+  const next: Delegation = { ...current, ...patch, id: current.id };
+  put(root, next);
+  return next;
 }
 
 function ensureOperative(root: string, adapter: CodingAdapter): Operative {

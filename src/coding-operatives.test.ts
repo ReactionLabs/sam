@@ -77,9 +77,10 @@ test("delegate cards the owner and only the approval starts the fake operative",
     assert.equal(finished.testResult, "not-run: no package.json");
     assert.equal(finished.auth.key, "present");
     assert.equal(finished.auth.keyEnv, "CODEX_API_KEY");
-    const stored = readFileSync(join(root, ".sam", "delegations.json"), "utf8");
+    const stored = readFileSync(join(root, ".sam", "delegations.db"), "utf8");
     assert.ok(!stored.includes("sk-should-not-be-stored"));
     assert.ok(!stored.includes("sk-supersecretvalue"));
+    assert.equal(existsSync(join(root, ".sam", "delegations.json")), false);
     const activity = readActivity(root, 30).map(l => l.summary).join("\n");
     assert.match(activity, /hello-from-adapter/);
     assert.ok(!activity.includes("sk-supersecretvalue"));
