@@ -310,6 +310,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one heartbeat-log-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "The append still never breaks the tick it records: appendLog returns whether the line landed instead of throwing, and tickStageFailure's activity line lands even when the log append died, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
      "The full suite is green, including the heartbeat log failure-ledger tests"]);
+  if (key.startsWith("activity-failed:")) return base(
+    ["activity.ts", "self-work.ts", "observability.ts", "status.ts"],
+    "The activity ledger stops failing: '" + label + "' has ledgered " + n + " failures, and a read of .sam/activity.jsonl must return the recorded history instead of dying at the filesystem touch - this ledger is the record every failure kind lands in and the defect queue, observability, status, and the CLI all fold it as truth, so while its read is dead the queue reports zero defects and every failure count reads zero: perfect health reported by a blind instrument.",
+    ["The next activity reads return the recorded lines again instead of activity-failed lines, and the defect queue / observability / status folds move with them",
+     "Exactly one activity-failed ledger line still lands per genuinely failed read where the append path lives, naming the verbatim reason, so the class stays countable",
+     "Recording still never breaks the work it records: recordActivity still never throws, while a failed read still fails closed (one ledger attempt, then the rethrow) exactly as callers expect",
+     "The full suite is green, including the activity failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -468,6 +475,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Heartbeat log ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "heartbeat-log-failed:" + phase, label: "heartbeat log ledger failures (" + phase + " step)" };
+    }
+    case "activity-failed": {
+      const m = summary.match(/^Activity ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "activity-failed:" + phase, label: "activity ledger failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
