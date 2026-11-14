@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 /**
  * Rate-limit grace (Dip via main, 2026-11-12 ~20:25 EST).
@@ -88,12 +89,71 @@ function readEpisodeRow(db: Database.Database): RateLimitEpisode | null {
   return row ? parseEpisode(row.data) : null;
 }
 
+// Rate-limit episode failure visibility (hourly run
+// 2026-11-14): the episode store was touched at exactly three
+// places, all silent. agent-turn's open catch set opened=true
+// on ANY throw, so a dead store made EVERY capped turn speak
+// the grace message - the once-only contract inverted,
+// indistinguishable from a working store. Its close catch
+// swallowed any throw, so a failed close left the episode
+// state unknown while SAM kept answering (and a surviving
+// row silenced the next cap forever). And the direct reader
+// (status rides rateLimitStatus bare) threw raw out of
+// rateLimitEpisode, killing the whole status payload. Now
+// each exported touch owns its failure: a failed open / read
+// / close ledgers ONE rate-limit-failed line (phase, the
+// chat prefix when the touch knows it, the verbatim reason
+// collapsed and capped, never any episode content) and
+// rethrows exactly, tagged (the session-caps / bindings
+// precedent) so a catching caller records nothing more for
+// the same touch. agent-turn keeps its exact fallbacks -
+// an open failure still speaks once-ish rather than raw,
+// a close failure still never breaks a successful turn -
+// now countable instead of silent. An absent store still
+// reads null / closes false with no line and creates
+// nothing, and a pure read still creates nothing.
+export type RateLimitPhase = "read" | "open" | "close";
+
+export function rateLimitFailureSummary(phase: RateLimitPhase, reason: string, chatId?: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  const chat = chatId ? " for chat " + chatId.slice(0, 8) : "";
+  return ("Rate limit " + phase + " failed" + chat + ": " + clean).slice(0, 200);
+}
+
+export function recordRateLimitFailure(root: string, phase: RateLimitPhase, error: unknown, chatId?: string): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "rate-limit-failed", rateLimitFailureSummary(phase, reason, chatId));
+}
+
+function tagRateLimitLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { rateLimitLedgered?: boolean }).rateLimitLedgered = true;
+  }
+}
+
+export function isRateLimitLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { rateLimitLedgered?: boolean }).rateLimitLedgered === true;
+}
+
+function failRateLimit(root: string, phase: RateLimitPhase, error: unknown, chatId?: string): never {
+  if (!isRateLimitLedgered(error)) recordRateLimitFailure(root, phase, error, chatId);
+  tagRateLimitLedgered(error);
+  throw error;
+}
+
 /** The open episode, or null - and a read on an install with no
- *  store at all creates nothing. */
+ *  store at all creates nothing. A failed read ledgers one
+ *  rate-limit-failed line and rethrows exactly (fail-closed
+ *  for direct readers such as status). */
 export function rateLimitEpisode(root: string): RateLimitEpisode | null {
   if (!existsSync(episodeDbFile(root))) return null;
-  const db = openEpisodeStore(root);
-  try { return readEpisodeRow(db); } finally { db.close(); }
+  let db: Database.Database;
+  try {
+    db = openEpisodeStore(root);
+  } catch (error) { failRateLimit(root, "read", error); }
+  try { return readEpisodeRow(db!); } catch (error) { failRateLimit(root, "read", error); }
+  finally { db!.close(); }
 }
 
 export function rateLimitStatus(root: string): { open: boolean; since: string | null } {
@@ -103,24 +163,38 @@ export function rateLimitStatus(root: string): { open: boolean; since: string | 
 
 /** Open the episode if none is open. Returns true only for the
  *  call that opened it - that caller speaks the grace message;
- *  every later caller, while it stays open, stays silent. */
+ *  every later caller, while it stays open, stays silent. A
+ *  failed open ledgers one rate-limit-failed line and
+ *  rethrows exactly; agent-turn's catch keeps its speak
+ *  once-ish fallback, now countable. */
 export function openRateLimitEpisode(root: string, chatId?: string): boolean {
-  const db = openEpisodeStore(root);
+  let db: Database.Database;
   try {
-    if (readEpisodeRow(db)) return false;
+    db = openEpisodeStore(root);
+  } catch (error) { failRateLimit(root, "open", error, chatId); }
+  try {
+    if (readEpisodeRow(db!)) return false;
     const episode: RateLimitEpisode = { since: new Date().toISOString(), chatId: chatId ?? null };
-    db.prepare("INSERT OR IGNORE INTO rate_limit_episode (id, data) VALUES (1, ?)").run(JSON.stringify(episode));
-    return readEpisodeRow(db)?.since === episode.since;
-  } finally { db.close(); }
+    db!.prepare("INSERT OR IGNORE INTO rate_limit_episode (id, data) VALUES (1, ?)").run(JSON.stringify(episode));
+    return readEpisodeRow(db!)?.since === episode.since;
+  } catch (error) { failRateLimit(root, "open", error, chatId); }
+  finally { db!.close(); }
 }
 
 /** Close the episode on the first successful model call.
- *  Returns true when an episode was open and is now closed. */
+ *  Returns true when an episode was open and is now closed.
+ *  A failed close ledgers one rate-limit-failed line and
+ *  rethrows exactly; agent-turn's catch keeps its
+ *  never-break-a-turn fallback, now countable. */
 export function closeRateLimitEpisode(root: string): boolean {
   if (!existsSync(episodeDbFile(root))) return false;
-  const db = openEpisodeStore(root);
+  let db: Database.Database;
   try {
-    const info = db.prepare("DELETE FROM rate_limit_episode WHERE id = 1").run();
+    db = openEpisodeStore(root);
+  } catch (error) { failRateLimit(root, "close", error); }
+  try {
+    const info = db!.prepare("DELETE FROM rate_limit_episode WHERE id = 1").run();
     return info.changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failRateLimit(root, "close", error); }
+  finally { db!.close(); }
 }

@@ -284,7 +284,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // the owner's token state is not a customer's business.
       if(!visitor&&route==="chat"&&isRateLimitError(error)){
         let opened=false;
-        try{opened=openRateLimitEpisode(root,chatId);}catch{opened=true;/* the store never breaks a turn: speak once-ish rather than raw */}
+        try{opened=openRateLimitEpisode(root,chatId);}catch{opened=true;/* the store never breaks a turn: speak once-ish rather than raw - the failed open already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
         if(opened){
           recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode opened, grace message sent (the raw provider error never reaches the owner)");
           reply=RATE_LIMIT_GRACE_MESSAGE;
@@ -310,7 +310,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // The grace reply itself is not a model success and never
   // closes the episode it just opened.
   if(!graceSpoke){
-    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn */}
+    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
   }
   const finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
   const saved=new ChatStore(root);

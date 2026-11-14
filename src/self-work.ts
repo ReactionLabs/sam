@@ -363,6 +363,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Routing still never breaks a message: a failed resolve returns the channel's default profile exactly as before, and a read already ledgered by the reader is never recorded twice",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the registry as empty, exactly as its readers expect",
      "The full suite is green, including the binding failure-ledger tests"]);
+  if (key.startsWith("rate-limit-failed:")) return base(
+    ["rate-limit.ts", "agent-turn.ts", "status.ts"],
+    "Rate-limit episode touches stop failing: '" + label + "' has ledgered " + n + " failures, and the one account-wide episode record (.sam/rate-limit.db) must open, read, and close instead of dying at that seam - while it is dead every capped turn speaks the grace message (the once-only contract inverted), or a failed close silences the next cap forever, or the status payload dies raw on the same touch.",
+    ["The next capped turns speak once, stay silent while the episode is open, and speak again after a success closes it, instead of rate-limit-failed lines, and status reads the episode back",
+     "Exactly one rate-limit-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The episode store still never breaks a turn: a failed open keeps the speak once-ish fallback, a failed close never breaks a successful turn, and a read already ledgered by the store is never recorded twice",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the episode as closed, exactly as its readers expect",
+     "The full suite is green, including the rate-limit failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -568,6 +576,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Binding ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "binding-failed:" + phase, label: "binding failures (" + phase + " step)" };
+    }
+    case "rate-limit-failed": {
+      const m = summary.match(/^Rate limit ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "rate-limit-failed:" + phase, label: "rate-limit episode failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
