@@ -109,23 +109,43 @@ copy boots before it is trusted.
 
 ## Quick start
 
-Dependencies are not in the repository. A fresh clone has no
-`node_modules`. That path is gitignored, whether it is a directory
-or a symlink, and it is created by `npm install`. Do not commit it.
+You need Node 22 or newer and a model API key (MiniMax is the
+provider guided setup wires). One command does the mechanical part:
 
 ```bash
 git clone https://github.com/ReactionLabs/sam.git
 cd sam
-npm install
-npm run build
-npm test
-node dist/cli.js --workspace /path/to/home dashboard
-node dist/cli.js --workspace /path/to/home overview
+./scripts/install.sh
 ```
 
-Model configuration comes from env (`SAM_MODEL`, an OpenAI-compatible
-endpoint and key, optional `SAM_MODEL_CHEAP` / `SAM_MODEL_DEEP` tier pins);
-see `.env.example`.
+The script checks the toolchain, installs dependencies, builds, and
+hands off to `sam setup`. Setup asks for your API key with hidden
+input, verifies it with one real model call, and only then stores it
+in your workspace's `sam.env` (mode 0600, never committed): when
+verification fails, nothing is saved. The default workspace is
+`~/sam-home`; pass `--workspace <dir>` to `install.sh` to choose
+another. Every `sam` command loads that workspace's `sam.env`
+automatically, and a value in your real environment always wins over
+the file. (Dependencies are not in the repository: a fresh clone has
+no `node_modules`, and `npm ci` creates it. Do not commit it.)
+
+First chat, in the terminal (`chats new` prints the chat id):
+
+```bash
+node dist/cli.js --workspace ~/sam-home chats new "First chat"
+node dist/cli.js --workspace ~/sam-home chats send <chat-id> "Say hello and tell me what you can do"
+```
+
+Or start the dashboard and chat there (it prints a local URL with
+its access token):
+
+```bash
+node dist/cli.js --workspace ~/sam-home dashboard
+```
+
+To reconfigure later (a new key, a different workspace), run
+`node dist/cli.js setup` again. `npm test` runs the full suite when
+you want it; it is not part of installing.
 
 ## Verify
 

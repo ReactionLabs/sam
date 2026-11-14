@@ -80,6 +80,7 @@ import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, pr
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
+import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authStatus, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, removeProvider } from "./providers.js";
 import { addFallbackRoute, clearFallbackRoutes, fallbackRoutes } from "./failover.js";
@@ -87,6 +88,7 @@ import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
 import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
+import { homedir } from "node:os";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -999,5 +1001,25 @@ program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
   try{output({missions:db.list().length,memories:mem.list().length,operatives:reg.list().length,daemon:"use sam daemon status"});}
   finally{db.close();mem.close();reg.close();}
+});
+// Cold-install wiring (Program B): every command loads the
+// workspace's sam.env first (names not already in the real
+// environment; the environment wins), so a configured install works
+// in a fresh shell with nothing exported. `sam setup` writes that
+// file after verifying the key.
+program.hook("preAction",()=>{ loadWorkspaceEnv(resolve(program.opts().workspace)); });
+program.command("setup").description("Guided first-run setup: take the model provider key (hidden input, or --key-env <NAME> to read it from an environment variable), verify it with one real model call, and only then store it in the workspace's sam.env (0600), which every sam command loads automatically")
+.option("--key-env <name>","Take the API key from this environment variable (never as an argument value, never printed)")
+.option("--provider <id>","Model provider (guided setup wires minimax)","minimax")
+.option("--model <id>","Model to configure")
+.option("--force","Reconfigure even when a sam.env already exists")
+.action(async(o:{keyEnv?:string;provider:string;model?:string;force?:boolean})=>{
+  const explicitWorkspace=program.getOptionValueSource("workspace")==="cli";
+  const root=explicitWorkspace?resolve(program.opts().workspace):resolve(homedir(),"sam-home");
+  const io=terminalSetupIo();
+  try{
+    const result=await runSetup(root,io,{keyEnv:o.keyEnv,provider:o.provider,model:o.model,force:!!o.force});
+    if(result.status==="verify-failed"||result.status==="unsupported-provider")process.exitCode=1;
+  } finally { io.close(); }
 });
 program.parseAsync().catch((err:unknown)=>{console.error("SAM error:",err instanceof Error?err.message:String(err));process.exitCode=1;});

@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "node --test dist/*.test.js",
-    "sam": "node dist/cli.js"
+    "sam": "node dist/cli.js",
+    "bootstrap": "sh scripts/install.sh"
   },
   "bin": {
     "sam": "./dist/cli.js"
