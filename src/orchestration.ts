@@ -90,7 +90,7 @@ export interface OrchestrationJob {
 export const ORCH_LANE_BUDGETS: Record<LaneKind, { rounds: number; maxCalls: number }> = {
   research: { rounds: 2, maxCalls: 5 },
   build: { rounds: 2, maxCalls: 6 },
-  verify: { rounds: 1, maxCalls: 3 },
+  verify: { rounds: 2, maxCalls: 3 },
   coordinate: { rounds: 2, maxCalls: 4 },
   general: { rounds: 2, maxCalls: 4 },
 };
@@ -309,6 +309,9 @@ export function laneWorkerPrompt(lane: Lane, depResults: Array<{ name: string; r
   if (lane.facts.length) parts.push("Facts for this lane:\n" + lane.facts.map(f => "- " + f).join("\n"));
   for (const dep of depResults) parts.push("Result from the " + dep.name + " lane you depend on:\n" + dep.result.slice(0, 1200));
   parts.push("Return your result for the coordinator. Ground every fact in something you actually read or ran in this lane, and name the source (file, page, or command) next to the claim.");
+  if (lane.kind === "verify") parts.push("VERDICT FORMAT (required): begin your reply with exactly one line, either 'VERDICT: approve' if the work matches its source exactly, or 'VERDICT: request-changes' if anything is off, then give the reasons. The coordinator cannot use a verdict it cannot parse.");
+  if (lane.kind === "research" || lane.kind === "general") parts.push("End your result with a 'Sources:' line naming the exact files or pages you read in this lane. A result that names no source is returned unverified and does not land.");
+  if (lane.kind === "build") parts.push("Your lane is done only when the artifact actually exists where it lands. Do the write, then end your result by confirming the exact artifact path you wrote; a narrative about what you intend to write does not land.");
   let prompt = parts.join("\n\n");
   if (prompt.length > 2000) prompt = prompt.slice(0, 1990) + "\n[brief trimmed]";
   return prompt;
@@ -345,7 +348,17 @@ export function verifyLaneOutput(root: string, lane: Lane, resultText: string): 
       ? { verdict: "verified", reasons: "Verify lane returned an approve verdict." }
       : { verdict: "rejected", reasons: "Verify lane did not approve: " + review.reasons.slice(0, 300) };
   }
-  const artifact = lane.verify?.artifact ?? (/\.(md|txt|html|json|csv)$/i.test(lane.landsAt.trim()) ? lane.landsAt.trim() : undefined);
+  // The artifact is the explicit verify spec, or the first file named in
+  // landsAt (planners phrase landsAt as sentences: "one-pager.md in the
+  // code root" must still yield its artifact). A build lane with no
+  // checkable artifact is a claim the coordinator cannot verify, so it
+  // comes back unverified, never verified on narrative alone (proof run
+  // 2026-11-14: a build worker's mid-work narrative verified while no
+  // file existed).
+  const artifact = lane.verify?.artifact ?? lane.landsAt.match(/[\w./-]+\.(md|txt|html|json|csv)\b/i)?.[0];
+  if (lane.kind === "build" && !artifact) {
+    return { verdict: "unverified", reasons: "Build lane names no checkable artifact (no verify.artifact and no file in landsAt), so the coordinator cannot verify the build landed." };
+  }
   if (artifact) {
     const path = confinedArtifact(root, artifact);
     if (!path) return { verdict: "rejected", reasons: "Artifact path escapes the workspace: " + artifact };
@@ -525,8 +538,22 @@ export async function runJob(root: string, jobId: string): Promise<{ job: Orches
   return { job, lanes: fresh };
 }
 
-/** Plan and run in one call: the door the chat tool and the CLI share. */
+/**
+ * Plan and run in one call: the door the chat tool and the CLI share.
+ * Submission is idempotent by ask inside a 15-minute window: a repeat
+ * call for the same ask returns the existing job instead of planning a
+ * second team (proof run 2026-11-14: a coordinator that re-called the
+ * tool after a job closed spiralled into pool refusals and died on the
+ * loader-loop guard; the job had already run).
+ */
 export async function orchestrate(root: string, input: PlanInput): Promise<{ job: OrchestrationJob; lanes: Lane[] }> {
+  const profile = input.profile?.trim() || "sam";
+  const ask = input.ask?.trim() ?? "";
+  if (ask) {
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    const existing = listJobs(root, profile).find(j => j.ask === ask && new Date(j.createdAt).getTime() >= cutoff);
+    if (existing) return { job: existing, lanes: readLanes(root, existing.id) };
+  }
   const { job } = planJob(root, input);
   return runJob(root, job.id);
 }

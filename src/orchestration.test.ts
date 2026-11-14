@@ -144,6 +144,49 @@ test("a build artifact in the designated code root verifies (the E seam)", async
   } finally { setOrchestrationRunnerForTests(null); }
 });
 
+test("build lane: a sentence-form landsAt still yields its artifact, and a narrative without the file is rejected", async () => {
+  const root = freshRoot();
+  setOrchestrationRunnerForTests(async (r, l) => {
+    if (l.attempts === 1) return "I will create the one-pager from those exact values, then run the checks.";
+    writeFileSync(join(r, "one-pager.md"), "Launch code ZF-2601 inside.\n");
+    return "Wrote one-pager.md.";
+  });
+  try {
+    const { lanes } = await orchestrate(root, {
+      ask: "build it",
+      lanes: [lane({ name: "write", kind: "build", landsAt: "one-pager.md in the code root" })],
+    });
+    assert.equal(lanes[0].status, "done"); assert.equal(lanes[0].attempts, 2); assert.equal(lanes[0].verdict, "verified");
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
+test("build lane with no checkable artifact is unverified, never verified on narrative", async () => {
+  const root = freshRoot();
+  setOrchestrationRunnerForTests(async () => "Built the thing, trust me, it is great.");
+  try {
+    const { job, lanes } = await orchestrate(root, {
+      ask: "build something vague",
+      lanes: [lane({ name: "write", kind: "build", landsAt: "the job report" })],
+    });
+    assert.equal(lanes[0].verdict, "unverified");
+    assert.equal(job.status, "blocked");
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
+test("verify workers are told the verdict format; job submission is idempotent by ask", async () => {
+  const root = freshRoot();
+  const { lanes } = planJob(root, { ask: "check it", lanes: [lane({ name: "check", kind: "verify" })] });
+  assert.match(laneWorkerPrompt(lanes[0], []), /VERDICT: approve/);
+  let runs = 0;
+  setOrchestrationRunnerForTests(async () => { runs++; return "Facts, per brief.md."; });
+  try {
+    const first = await orchestrate(root, { ask: "same ask", lanes: [lane({ name: "dig" })] });
+    const second = await orchestrate(root, { ask: "same ask", lanes: [lane({ name: "dig" })] });
+    assert.equal(second.job.id, first.job.id);
+    assert.equal(runs, 1);
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
 test("unverified claims do not land: a sourceless research result is named, not delivered", async () => {
   const root = freshRoot();
   setOrchestrationRunnerForTests(async () => "I recall the code is probably 99-ZZZ, from memory.");
