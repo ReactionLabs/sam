@@ -1,4 +1,59 @@
-# SAM build scoreboard
+# S.A.M. Scoreboard: what "better" means
+
+Adopted 2026-11-14 (Dip's ruling: "Define what better is and just make it happen. I want to see Sam and it just feel like AGI."). This is the standing definition of better for S.A.M. (Secret Agent Man), measured against OpenClaw on the same tasks. Every consolidated landing report names the scoreboard deltas it moved. A dimension that has not been measured says so; estimates are never dressed up as measurements.
+
+## The five dimensions
+
+### 1. Knows you cold
+Memory and standing law: zero re-explaining, corrections become law through the gate, zero cross-profile leaks.
+Measured by: the growing recall eval battery; leak tests at zero.
+
+### 2. Proves what it says
+Perplexity-style citations with runtime honesty enforcement: fabricated citation rate zero, unsourced claims admitted plainly.
+Measured by: the task battery's citation checks.
+
+### 3. Does the work
+Real multi-step owner tasks finished end to end without rescue, gated only where the owner's law requires a gate.
+Measured by: completion rate and cost per task, Sam vs OpenClaw, same battery.
+
+### 4. Is already there
+Heartbeats and proactivity: Sam briefs the owner before being asked, and it is the same Sam with the same memory on every surface (dashboard, Telegram, next doors).
+Measured by: cross-surface thread pickup; heartbeat signal quality.
+
+### 5. Anyone can run it
+Cold install by a stranger: clone to first useful answer in under 10 minutes with zero help.
+Measured by: an actual cold walk in a clean environment, timed, not by reading the README.
+
+## The experience bar ("feel like AGI")
+
+When the owner opens Sam, Sam opens with his world: what changed, what needs him, what it already handled, every claim cited. He throws it a messy, spoken-style, multi-step ask and watches it execute across his systems in view. Next session, it remembers all of it. If a demo moment makes him explain something Sam should already know, that is a defect, logged like one.
+
+## Current standings (2026-11-14, honest)
+
+| # | Dimension | Standing |
+|---|-----------|----------|
+| 1 | Knows you cold | Partially measured. Recall battery growing (eval battery 24 tasks, incl. the governed consolidation case landed 2026-11-14). Cross-profile fences tested in the citation and memory suites; a dedicated leak battery is still owed. |
+| 2 | Proves what it says | Chat-history citations live with fabricated-source rejection (#92, 2026-11-14). General source citations (files, commands, web) in build 2026-11-14. Fabricated-rate measurement on the task battery still owed. |
+| 3 | Does the work | Not yet measured against OpenClaw. Internal signals only: suite 997/997, eval battery 24/24; self-work has landed 0 fixes in 3 cycles (each block honestly ledgered). Task battery is Program C. |
+| 4 | Is already there | Heartbeat live on the box (15 min). Same-instance dashboard + Telegram behavior proven on a scratch instance 13/13 (#93 part B). The opening brief (Sam opening with the owner's world) is NOT built yet; it is the Program D reveal's core. |
+| 5 | Anyone can run it | Not yet walked. Program B is running the first timed cold walk; target under 10 minutes, clone to first answered chat. |
+
+## Release discipline (Program A)
+
+_To be completed by the release landing: the main-branch cadence and versioning rule live here once main carries the real Sam._
+
+## Program status
+
+- A. Release discipline (main stops lagging the engine branch): RUNNING 2026-11-14.
+- B. Cold install (one-command path, timed cold walk): RUNNING 2026-11-14.
+- C. Task battery (10-15 real owner tasks, Sam vs OpenClaw): queued behind A and B.
+- D. The reveal (live dashboard session: Sam's opening brief on the owner's actual operation, cited, then live asks): staged when A to C are far enough that it will land.
+
+---
+
+# Historical build log (pre-2026-11-14, kept for the record)
+
+## SAM build scoreboard (historical, pre-adoption)
 
 Updated: 2026-11-08 UTC. This scoreboard describes the unmerged `feat/sam-model-output-hygiene-20261108` branch, not `main`.
 
