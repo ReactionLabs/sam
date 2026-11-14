@@ -341,6 +341,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Prompt assembly still never breaks a turn on a broken file: the failed file is skipped, its healthy siblings still assemble, and a read already ledgered by the reader is never recorded twice",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the file as absent, exactly as its readers expect",
      "The full suite is green, including the standing-file failure-ledger tests"]);
+  if (key.startsWith("recall-failed:")) return base(
+    ["recall.ts", "agent-turn.ts"],
+    "Recall assembly stops failing: '" + label + "' has ledgered " + n + " failures, and the memory a profile already holds (episodes, decisions, open loops, message-relevant records) must assemble into the turn's context instead of dying at that seam - while it is dead SAM answers with no memory at all (or silently without the relevant records), a state indistinguishable from SAM simply knowing nothing, which is the S1 defect class (asking again, or burning tool calls hunting).",
+    ["The next turns open with what SAM already knows again instead of recall-failed lines, and the relevant records ride in the recall block",
+     "Exactly one recall-failed ledger line still lands per genuinely failed seam per call, naming the phase and the verbatim reason, so the class stays countable",
+     "Recall still never breaks a turn: a failed seam drops only its own section, the surviving sections still assemble, and a total failure reads as an empty memory exactly as before",
+     "The full suite is green, including the recall failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -519,6 +526,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Standing file ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "standing-file-failed:" + phase, label: "standing file failures (" + phase + " step)" };
+    }
+    case "recall-failed": {
+      const m = summary.match(/^Recall ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "recall-failed:" + phase, label: "recall failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };

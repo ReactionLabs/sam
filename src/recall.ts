@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 import { visibleScopes } from "./links.js";
 import { listLoops } from "./loops.js";
+import { recordActivity } from "./activity.js";
 
 /**
  * Recall that lands (Smarter-and-Smoother pass S1, Dip mandate
@@ -102,6 +103,47 @@ export function fitRecallBlock(header: string, sections: RecallSection[], cap = 
   return render(null);
 }
 
+// Recall failure visibility (hourly run 2026-11-14): every seam
+// in this assembly used to be silent - agent-turn wraps the
+// whole block in a catch-all ("recall never breaks a turn") and
+// the FTS search folded its failure to [] in a bare catch. A
+// dead scope read, memory store, loop read, list read, or
+// search therefore made SAM answer with no memory at all (or
+// silently without the relevant records), indistinguishable
+// from SAM simply knowing nothing - the exact S1 defect class,
+// and uncountable: no recall-failed line existed. Now each
+// seam ledgers ONE recall-failed line per failed seam per call
+// (the actor named, the verbatim reason collapsed + capped;
+// never the owner's message text and never any record
+// content), and the assembly degrades the way the surface
+// already promises: recall never breaks a turn, a failed seam
+// drops only its own section, and a total failure returns ""
+// exactly as an empty memory does.
+export type RecallPhase = "assemble" | "list" | "loops" | "search";
+
+export function recallFailureSummary(actor: string, phase: RecallPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Recall " + phase + " failed for " + actor + ": " + clean).slice(0, 200);
+}
+
+export function recordRecallFailure(root: string, actor: string, phase: RecallPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, actor, "recall-failed", recallFailureSummary(actor, phase, reason));
+}
+
+/** The message-relevant search, guarded: a dead FTS search
+ *  ledgers one recall-failed:search line and reads as no hits,
+ *  so the episode and standing sections still assemble. */
+export function searchRecallHits(root: string, actor: string, store: Pick<MemoryStore, "search">, query: string, scopes: string[], onFailure?: (error: unknown) => void): MemoryRecord[] {
+  try {
+    return store.search(query, 5, scopes).filter(r => !r.source.startsWith("episode:"));
+  } catch (error) {
+    if (onFailure) onFailure(error);
+    else recordRecallFailure(root, actor, "search", error);
+    return [];
+  }
+}
+
 function line(record: MemoryRecord, clip: number): string {
   const date = (record.created_at ?? "").slice(0, 10);
   const text = record.content.replace(/\s+/g, " ").trim().slice(0, clip);
@@ -109,9 +151,22 @@ function line(record: MemoryRecord, clip: number): string {
 }
 
 export function buildRecallBlock(root: string, opts: { actor: string; message: string; sessionStart?: boolean }): string {
-  const scopes = visibleScopes(root, opts.actor);
+  // One ledger line per failed seam per call, however many
+  // touches that seam makes (the decisions and episodes reads
+  // share the list seam).
+  const ledgered = new Set<RecallPhase>();
+  const fail = (phase: RecallPhase, error: unknown): void => {
+    if (ledgered.has(phase)) return;
+    ledgered.add(phase);
+    recordRecallFailure(root, opts.actor, phase, error);
+  };
+  let scopes: string[];
+  try { scopes = visibleScopes(root, opts.actor); }
+  catch (error) { fail("assemble", error); return ""; }
   if (!scopes.length) return "";
-  const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
+  let store: MemoryStore;
+  try { store = new MemoryStore(join(resolve(root), ".sam", "missions.db")); }
+  catch (error) { fail("assemble", error); return ""; }
   try {
     const sections: RecallSection[] = [];
     // Continuity across sessions (S2): at a session's first turn,
@@ -120,25 +175,33 @@ export function buildRecallBlock(root: string, opts: { actor: string; message: s
     // on known ground instead of a cold start.
     if (opts.sessionStart) {
       const standing: string[] = [];
-      const loops = listLoops(root, { profile: opts.actor, status: "open" })
-        .sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 3);
+      let loops: ReturnType<typeof listLoops> = [];
+      try {
+        loops = listLoops(root, { profile: opts.actor, status: "open" })
+          .sort((a, b) => a.dueAt.localeCompare(b.dueAt)).slice(0, 3);
+      } catch (error) { fail("loops", error); }
       for (const l of loops) standing.push("- Open loop (look again " + l.dueAt.slice(0, 10) + "): " + l.question.replace(/\s+/g, " ").slice(0, 180) + " - watching for: " + l.watchFor.replace(/\s+/g, " ").slice(0, 140));
-      const decisions = store.list(undefined, scopes)
-        .filter(r => r.kind === "decision")
-        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-        .slice(0, 3);
+      let decisions: MemoryRecord[] = [];
+      try {
+        decisions = store.list(undefined, scopes)
+          .filter(r => r.kind === "decision")
+          .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+          .slice(0, 3);
+      } catch (error) { fail("list", error); }
       for (const d of decisions) standing.push(line(d, 240).replace("- [", "- Decision ["));
       if (standing.length) sections.push({ heading: "Where things stand:", lines: standing, priority: 1 });
     }
-    const episodes = store.list(undefined, scopes)
-      .filter(r => r.source.startsWith("episode:"))
-      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-      .slice(0, 2);
+    let episodes: MemoryRecord[] = [];
+    try {
+      episodes = store.list(undefined, scopes)
+        .filter(r => r.source.startsWith("episode:"))
+        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+        .slice(0, 2);
+    } catch (error) { fail("list", error); }
     if (episodes.length) sections.push({ heading: "Recent episodes:", lines: episodes.map(r => line(r, 380)), priority: 2 });
     const terms = recallTerms(opts.message);
     if (terms.length) {
-      let hits: MemoryRecord[] = [];
-      try { hits = store.search(terms.join(" OR "), 5, scopes).filter(r => !r.source.startsWith("episode:")); } catch { hits = []; }
+      const hits = searchRecallHits(root, opts.actor, store, terms.join(" OR "), scopes, error => fail("search", error));
       if (hits.length) sections.push({ heading: "Records relevant to this message:", lines: hits.map(r => line(r, 300)), priority: 3 });
     }
     if (!sections.length) return "";
