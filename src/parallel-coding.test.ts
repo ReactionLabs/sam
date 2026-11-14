@@ -169,7 +169,11 @@ test("the named bar: 20 files in one fan-out", async () => {
 test("parallel beats serial on the same job shape", async () => {
   const f = fixture();
   try {
-    const mk = () => [1, 2, 3, 4, 5, 6].map(n => ({ name: "w" + n, task: "SLEEP 200\nWRITE w" + n + ".txt :: x" }));
+    // The sleep is the parallelizable component; it must dominate
+    // the fixed per-slice costs (worktree add, npm spawns) or the
+    // ratio measures box load, not parallelism (a 200ms sleep
+    // flaked at 0.78x on a loaded shared VM while still faster).
+    const mk = () => [1, 2, 3, 4, 5, 6].map(n => ({ name: "w" + n, task: "SLEEP 600\nWRITE w" + n + ".txt :: x" }));
     const serial = queueSpec(f, mk(), { concurrency: 1 });
     const t0 = Date.now();
     await drainParallelJobs(f.sam, { runEngine: directiveEngine(), env: f.env });
@@ -181,6 +185,39 @@ test("parallel beats serial on the same job shape", async () => {
     assert.equal(getParallelJob(f.sam, serial.id)?.status, "done");
     assert.equal(getParallelJob(f.sam, parallel.id)?.status, "done");
     assert.ok(parallelMs < serialMs * 0.7, "parallel " + parallelMs + "ms should be well under serial " + serialMs + "ms");
+  } finally { f.cleanup(); }
+});
+
+test("slice progress persists mid-run: a concurrent read sees the running slice, and final records keep every slice", async () => {
+  const f = fixture();
+  try {
+    const job = queueSpec(f, [1, 2, 3, 4].map(n => ({ name: "w" + n, task: "SLEEP 500\nWRITE w" + n + ".txt :: w" + n, files: ["w" + n + ".txt"] })), { concurrency: 2 });
+    const draining = drainParallelJobs(f.sam, { runEngine: directiveEngine(), reviewDiff: async () => PASS_REVIEW, env: f.env });
+    // While the engines sleep, a fresh read of the store must show
+    // the slices that have started as running (persisted at slice
+    // start), never a stale all-queued record.
+    let sawRunning = false;
+    for (let i = 0; i < 120 && !sawRunning; i++) {
+      const mid = getParallelJob(f.sam, job.id);
+      if (mid && mid.slices.some(s => s.status === "running" && s.attempts >= 1)) sawRunning = true;
+      else await new Promise(r => setTimeout(r, 25));
+    }
+    assert.equal(sawRunning, true, "a mid-run read shows a running slice with its attempt count");
+    const result = await draining;
+    assert.deepEqual(result.ran, [job.id]);
+    const done = getParallelJob(f.sam, job.id);
+    assert.ok(done);
+    assert.equal(done.status, "done");
+    // Every slice's final record survived: done, one attempt each,
+    // its changes listed - concurrent completion loses nothing.
+    assert.equal(done.slices.length, 4);
+    for (const s of done.slices) {
+      assert.equal(s.status, "done", s.name + " done");
+      assert.equal(s.attempts, 1, s.name + " one attempt");
+      assert.deepEqual(s.changes, ["w" + s.name.slice(1) + ".txt"], s.name + " changes recorded");
+    }
+    assert.equal(done.merges.length, 4);
+    assert.ok(done.merges.every(m => m.ok));
   } finally { f.cleanup(); }
 });
 

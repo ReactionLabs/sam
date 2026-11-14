@@ -436,12 +436,19 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
     slice.durationMs = Date.now() - started;
     return;
   }
+  // Persist at slice START, not only at completion: a real engine
+  // run takes minutes, and a record that reads "queued" while the
+  // engine is visibly working lies to every reader (caught live in
+  // the 2026-11-14 proof run, where the correct response - kill a
+  // healthy drain - was only avoided by checking the process list).
+  saveParallelJob(root, job);
   const runner = deps.runEngine ?? defaultEngineRunner;
   const verifyRunner = deps.codeRunner ?? defaultCodeRunner;
   const provider = job.provider ?? "claude-code";
   let lastFailure: string | null = null;
   for (let attempt = 1; attempt <= 2; attempt++) {
     slice.attempts = attempt;
+    saveParallelJob(root, job);
     const prompt = slicePrompt(job, slice, survey, lastFailure);
     const fakeTask = { spec: prompt, provider } as unknown as EngineTask;
     let outcome: { exitCode: number | null; output: string; timedOut?: boolean };
