@@ -16,6 +16,7 @@ import type { Preference } from "./preferences.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
+import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } from "./chat-citations.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -155,7 +156,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1])});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
     }
     if(match && req.method==="POST" && match[2]){
       const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
@@ -166,8 +167,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const turnStart=new Date().toISOString();
         const reply=await runChatTurn(workspace,id,body.content,{source});
         const result={message:{role:"assistant" as const,content:reply}};
-        let userReaction:string|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"){userReaction=msgs[i].reaction;break;}}}finally{db2.close();}}catch{/* the badge is garnish */}
-        json(200,{reply:result.message,userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
+        let userReaction:string|null=null;let replyId:string|null=null;let replyCitation:ResolvedCitation|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;}}}finally{db2.close();}if(replyId)replyCitation=citationViewForMessage(workspace,replyId);}catch{/* the badge is garnish */}
+        json(200,{reply:{...result.message,id:replyId,citation:replyCitation},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
       }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}finally{pending.delete(id);}return;
     }
     const doorMatch=/^\/mini\/([0-9a-f]{32,64})(\/(message|history))?(\?.*)?$/.exec(req.url??"");

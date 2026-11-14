@@ -20,6 +20,8 @@ import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } fro
 import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
+import { attachCitation, processReplyCitations } from "./chat-citations.js";
+import type { ChatSearchHit } from "./chat-manage.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -312,12 +314,31 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   if(!graceSpoke){
     try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
   }
-  const finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
-  const saved=new ChatStore(root);
+  let finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
+  // Chat-history citations (issue #92): the citation pass runs
+  // BEFORE the save, so a cite marker never reaches the stored
+  // text. The model's selection is validated against the hits this
+  // run's own chat searches returned (recorded at the dispatch
+  // seam in own-tools.ts); a source outside them attaches nothing
+  // and the rejection is ledgered by the pass itself. A reply that
+  // ran a search but names no source gets no citation. Citation
+  // plumbing never breaks a turn.
+  let citationHit:ChatSearchHit|null=null;
   try{
-    if(partialId){if(!saved.finishPartial(chatId,partialId,finalText))saved.add(chatId,"assistant",finalText);}
-    else saved.add(chatId,"assistant",finalText);
+    const processed=processReplyCitations(root,{chatId,userMessageId,actor:profileName,text:finalText});
+    finalText=processed.text;
+    citationHit=processed.hit;
+  }catch{/* the citation pass never breaks a turn */}
+  const saved=new ChatStore(root);
+  let savedId:string|null=null;
+  try{
+    if(partialId){if(saved.finishPartial(chatId,partialId,finalText))savedId=partialId;else savedId=saved.add(chatId,"assistant",finalText).id;}
+    else savedId=saved.add(chatId,"assistant",finalText).id;
   }finally{saved.close();}
+  if(citationHit&&savedId){
+    if(attachCitation(root,{messageId:savedId,chatId,actor:profileName,hit:citationHit}))
+      recordActivity(root,profileName,"chat-citation","Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citationHit.chatId.slice(0,8)+", message "+citationHit.messageId.slice(0,8));
+  }
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is
   // SAM's/the owner's choice and is never overwritten by the

@@ -582,6 +582,13 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const phase = m ? m[1] : "unknown";
       return { key: "rate-limit-failed:" + phase, label: "rate-limit episode failures (" + phase + " step)" };
     }
+    case "chat-citation-failed": {
+      const m = summary.match(/^Chat citation ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "chat-citation-failed:" + phase, label: "chat citation failures (" + phase + " step)" };
+    }
+    case "citation-rejected":
+      return { key: "citation-rejected", label: "citation markers naming sources outside the run's search results" };
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":

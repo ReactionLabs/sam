@@ -92,7 +92,7 @@ test("dashboard, telegram, api, and the ts cli stamp their own source", async ()
   assert.match(dashboardHtml, /source:'dashboard'/);
   assert.match(dashboardHtml, /\.bubble \.src\{/);
   assert.match(dashboardHtml, /tag\.className='src'/);
-  assert.match(dashboardHtml, /bubble\(m\.role,m\.content,m\.id,m\.source\)/);
+  assert.match(dashboardHtml, /bubble\(m\.role,m\.content,m\.id,m\.source,\(data\.citations\|\|\{\}\)\[m\.id\]\)/);
   assert.match(dashboardHtml, /bubble\('user',content,null,'dashboard'\)/);
   const seen: string[] = [];
   const fetchFn: typeof fetch = async (_url, init) => {

@@ -83,7 +83,7 @@ export function unarchiveManagedChat(root: string, actor: string, chatId: string
   return withStore(root, store => { requireManaged(root, actor, store, chatId); store.archive(chatId, false); return store.get(chatId) as ChatRecord; });
 }
 
-export interface ChatSearchHit { chatId: string; title: string; role: string; snippet: string; created_at: string; rank: number }
+export interface ChatSearchHit { chatId: string; messageId: string; title: string; role: string; snippet: string; created_at: string; rank: number }
 
 export function searchManagedChats(root: string, actor: string, query: string, limit = 20): ChatSearchHit[] {
   return withStore(root, store => {
@@ -94,7 +94,7 @@ export function searchManagedChats(root: string, actor: string, query: string, l
     // the match. The fence is unchanged - only the actor's own
     // non-visitor, non-archived chats are ever in the id list.
     return store.searchMessagesFts(query, mine.map(c => c.id), limit).map(h => ({
-      chatId: h.chat_id, title: titles.get(h.chat_id) ?? "", role: h.role,
+      chatId: h.chat_id, messageId: h.message_id, title: titles.get(h.chat_id) ?? "", role: h.role,
       snippet: h.snippet || h.content.slice(0, 200), created_at: h.created_at, rank: h.rank,
     }));
   });

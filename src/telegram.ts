@@ -219,8 +219,19 @@ export class DashboardSamClient implements SamClient {
   return created.id;
  }
  async postMessage(chatId:string,content:string):Promise<string>{
-  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string}};
-  return result.reply?.content??"No response.";
+  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string;citation?:{available?:boolean;sourceTitle?:string;sourceChatId?:string;sourceMessageId?:string}|null}};
+  const text=result.reply?.content??"No response.";
+  // Issue #92: a cited reply carries its "Found in chat history"
+  // line onto Telegram too - the chat title always, and a deep
+  // link to the dashboard when a public base URL is configured
+  // (the stable door), so the owner can land on the exact message.
+  const citation=result.reply?.citation;
+  if(citation?.available&&citation.sourceChatId&&citation.sourceMessageId){
+   const base=(process.env.SAM_PUBLIC_URL??"").replace(/\/+$/,"");
+   const link=base?base+"#chat="+citation.sourceChatId+"&msg="+citation.sourceMessageId:"";
+   return text+"\n\nFound in chat history: "+(citation.sourceTitle||"an earlier chat")+(link?"\n"+link:"");
+  }
+  return text;
  }
 }
 export function dashboardTokenFromLog(logPath:string):string{
