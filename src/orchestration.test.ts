@@ -187,6 +187,31 @@ test("verify workers are told the verdict format; job submission is idempotent b
   } finally { setOrchestrationRunnerForTests(null); }
 });
 
+test("a failed worker is retired by id so its budget carve returns for the replacement (live proof run 3 regression)", async () => {
+  const root = freshRoot();
+  const { setSubagentRunnerForTests, listSubagents } = await import("./subagents.js");
+  let calls = 0;
+  setSubagentRunnerForTests({
+    complete: async () => {
+      calls++;
+      if (calls === 1) throw new Error("Unsafe model output");
+      return { content: "The five facts, per brief.md.", calls: [] };
+    },
+  });
+  try {
+    const { job, lanes } = await orchestrate(root, { ask: "dig once", lanes: [lane({ name: "dig", kind: "research" })] });
+    assert.equal(job.status, "done");
+    assert.equal(lanes[0].attempts, 2);
+    const workers = listSubagents(root, "sam");
+    assert.equal(workers.length, 2);
+    assert.equal(workers.filter(w => w.status === "cancelled").length, 1);
+    assert.equal(workers.filter(w => w.status === "done").length, 1);
+    const left = remainingPool(root, "sam");
+    assert.equal(left.rounds, 4); // only the surviving worker's {2,5} stays carved
+    assert.equal(left.maxCalls, 11);
+  } finally { setSubagentRunnerForTests(null); }
+});
+
 test("unverified claims do not land: a sourceless research result is named, not delivered", async () => {
   const root = freshRoot();
   setOrchestrationRunnerForTests(async () => "I recall the code is probably 99-ZZZ, from memory.");

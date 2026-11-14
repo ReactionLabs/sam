@@ -34,7 +34,7 @@ import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import {
   PARENT_POOL, ROLE_TOOLS, listSubagents, ownerFold, profileToolNames,
-  spawnSubagent, updateSubagent, type Subagent,
+  startBackgroundSubagent, updateSubagent, whenSubagentSettled, type Subagent,
 } from "./subagents.js";
 import { parseReview } from "./team-runtime.js";
 import { codeRoot } from "./code.js";
@@ -406,7 +406,14 @@ async function defaultLaneRunner(root: string, job: OrchestrationJob, lane: Lane
     maxCalls: Math.max(2, Math.min(lane.budget.maxCalls, left.maxCalls)),
   };
   if (left.rounds < 1 || left.maxCalls < 2) throw new Error("The worker pool is exhausted (" + left.rounds + " rounds, " + left.maxCalls + " calls left)");
-  const child = await spawnSubagent(root, {
+  // The worker id is recorded BEFORE the run settles: spawnSubagent throws
+  // on a failed worker, so recording afterwards leaked the failed worker's
+  // budget carve (the coordinator could not retire what it could not name,
+  // and the replacement plus every later lane starved). Live proof run 3,
+  // 2026-11-14: build attempt 1 failed uncancelled at {2,6}, the verify
+  // lane then found 0 rounds and 0 calls left. The background door hands
+  // back the id up front and settles with the finished record.
+  const started = startBackgroundSubagent(root, {
     profile: job.profile,
     prompt: laneWorkerPrompt(lane, depResults),
     role: ROLE_FOR_KIND[lane.kind],
@@ -415,8 +422,9 @@ async function defaultLaneRunner(root: string, job: OrchestrationJob, lane: Lane
     maxCalls: budget.maxCalls,
     quiet: true,
   });
-  const after = updateLane(root, lane.id, { workerId: child.id });
+  const after = updateLane(root, lane.id, { workerId: started.id });
   if (after) lane.workerId = after.workerId;
+  const child = await whenSubagentSettled(started.id);
   if (child.status !== "done") throw new Error("Worker " + child.id.slice(0, 8) + " ended " + child.status + ": " + (child.result ?? "no result").slice(0, 200));
   return child.result ?? "";
 }
