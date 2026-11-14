@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 // Approvals engine (Plan Phase D item 1 - lands BEFORE coder hands;
 // the Hermes borrow recorded in the roadmap: named modes plus a
@@ -109,6 +110,73 @@ function rowToPolicy(data: string): ApprovalPolicy {
   try { return parsePolicy(JSON.parse(data)) ?? defaultApprovalPolicy(); } catch { return defaultApprovalPolicy(); }
 }
 
+// Failure visibility (gap found 2026-11-14, hourly run
+// 18:04 EST): the approval policy is the ONE gate's own
+// posture - the mode and smart auto list that decide HOW
+// every proposal is decided - and every touch opened its
+// store raw. loadApprovalPolicy is the one read door
+// (settleAutoApprovals in every process that consults the
+// gate, dashboard /api/status, the self-audit, and the CLI
+// mode view all ride it); saveApprovalPolicy is the
+// operator CLI's write door. A dead approval-policy.db
+// threw into whichever catch happened to wrap the call with
+// the seam unnamed, and no approval-policy failure kind
+// existed, so the class was uncountable - and the only
+// alternative a caller could invent, folding a dead store
+// to the manual default, would silently revert the owner's
+// chosen posture, the exact torn-write defect the SQLite
+// migration above was built to kill. Now the store's
+// touches own their failure (the dashboard-config
+// precedent, this store's closest sibling - a one-row
+// singleton whose torn row payload parses forgiving to the
+// default): a failed touch ledgers ONE approval-policy-
+// failed line (phase read for loadApprovalPolicy, write
+// for saveApprovalPolicy's UPSERT; actor sam; the verbatim
+// reason collapsed and capped; never any policy content -
+// the mode and auto list are the owner's gate posture, not
+// failure data), tags the error, and rethrows exactly, so
+// every caller's handling is unchanged and reads still
+// fail closed (never folded as manual, which would hide a
+// smart/off posture the owner set). saveApprovalPolicy's
+// internal current-policy read rides the read door, so a
+// dead store ledgers its one read line there and gains no
+// second write line for the same touch. Validation errors
+// (invalid mode, the smart-mode consequential-kind
+// refusal) are not store failures and ledger nothing. An
+// absent store still reads as the manual default with no
+// line and creates nothing, a malformed legacy file still
+// imports nothing silently, and a torn row payload still
+// parses forgiving to manual - only the store touch is
+// guarded.
+export type ApprovalPolicyPhase = "read" | "write";
+
+export function approvalPolicyFailureSummary(phase: ApprovalPolicyPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Approval policy " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordApprovalPolicyFailure(root: string, phase: ApprovalPolicyPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "approval-policy-failed", approvalPolicyFailureSummary(phase, reason));
+}
+
+function tagApprovalPolicyLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { approvalPolicyLedgered?: boolean }).approvalPolicyLedgered = true;
+  }
+}
+
+export function isApprovalPolicyLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { approvalPolicyLedgered?: boolean }).approvalPolicyLedgered === true;
+}
+
+function failApprovalPolicy(root: string, phase: ApprovalPolicyPhase, error: unknown): never {
+  if (!isApprovalPolicyLedgered(error)) recordApprovalPolicyFailure(root, phase, error);
+  tagApprovalPolicyLedgered(error);
+  throw error;
+}
+
 // The store's read door: the full approval policy through the
 // store's own shape, or the fail-closed default when none has
 // ever been persisted - and a read on an install with no store
@@ -119,11 +187,13 @@ export function readApprovalPolicyStore(root: string): ApprovalPolicy {
 
 export function loadApprovalPolicy(root: string): ApprovalPolicy {
   if (!policyStoreExists(root)) return defaultApprovalPolicy();
-  const db = openPolicyStore(root);
+  let db: Database.Database;
+  try { db = openPolicyStore(root); } catch (error) { failApprovalPolicy(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM approval_policy WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM approval_policy WHERE id = 1").get() as { data: string } | undefined;
     return row ? rowToPolicy(row.data) : defaultApprovalPolicy();
-  } finally { db.close(); }
+  } catch (error) { failApprovalPolicy(root, "read", error); }
+  finally { db!.close(); }
 }
 
 export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; autoKinds?: string[] }): ApprovalPolicy {
@@ -142,10 +212,12 @@ export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; a
     const bad = next.autoKinds.filter(k => classifyProposal(k, null).risk !== "internal");
     if (bad.length) throw new Error("Smart mode cannot auto-approve consequential kind(s): " + bad.join(", ") + " - they always need the owner's decision. Remove them from the auto list, or use off mode if the owner truly means it.");
   }
-  const db = openPolicyStore(root);
+  let db: Database.Database;
+  try { db = openPolicyStore(root); } catch (error) { failApprovalPolicy(root, "write", error); }
   try {
-    db.prepare("INSERT INTO approval_policy (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(next));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO approval_policy (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(next));
+  } catch (error) { failApprovalPolicy(root, "write", error); }
+  finally { db!.close(); }
   return next;
 }
 

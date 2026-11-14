@@ -457,6 +457,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The gate still fails closed exactly as before: a failed read rethrows instead of folding the store as no proposals (which would hide pending cards the owner still must decide), a touch already ledgered by the store is never recorded twice, an executor failure keeps its own kind 'failed' line with an action-store line only when the decision's update touch itself dies, and a failure line never carries a proposal record (titles and details are the owner's gated words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no proposals with no line",
      "The full suite is green, including the action store failure-ledger tests"]);
+  if (key.startsWith("approval-policy-failed:")) return base(
+    ["approval-policy.ts", "actions.ts", "status.ts", "cli.ts"],
+    "Approval policy store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the approval policy store (.sam/approval-policy.db) must open, read, and write instead of dying at that seam - this store is the ONE gate's own posture (the mode and smart auto list that decide how every proposal is decided), so while it is dead the status payload dies raw, a settle dies mid-propose with the seam unnamed, and an owner's mode write can fail uncounted. NOTE: this class's likely files touch SAM's own policy machinery, so this spec is owner-only by the hard boundary - it is recorded for the owner, never queued for SAM's hands.",
+    ["The next status reads, settles, self-audits, and mode writes resolve their policy again instead of approval-policy-failed lines",
+     "Exactly one approval-policy-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The gate still fails closed exactly as before: a failed read rethrows instead of folding the store as the manual default (which would silently revert a smart/off posture the owner set), a touch already ledgered by the store is never recorded twice (a save whose internal read died keeps its one read line), and a failure line never carries any policy content (the mode and auto list are the owner's gate posture, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as the manual default with no line, a malformed legacy file still imports nothing silently, and a torn row payload still parses forgiving to manual",
+     "The full suite is green, including the approval policy failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -721,6 +729,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Action store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "action-store-failed:" + phase, label: "action store failures (" + phase + " step)" };
+    }
+    case "approval-policy-failed": {
+      const m = summary.match(/^Approval policy ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "approval-policy-failed:" + phase, label: "approval policy store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
