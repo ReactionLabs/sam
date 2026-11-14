@@ -120,13 +120,73 @@ function readStore(db: Database.Database): PairingStore {
   for (const row of guardRows) { const guard = rowToGuard(row.data); if (guard) guards[row.channelId] = guard; }
   return { codes, guards };
 }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 14:04 EST): the pairing store holds the codes and the
+// lockout guards that decide who may join a channel's owner
+// list, and every touch opened it raw. readPairingStore is
+// the read door other stores cite as their precedent, and
+// pairingStatus rides it into the dashboard /api/status
+// payload; the Telegram bridge redeems through
+// redeemPairingCode on every stranger's code-shaped message,
+// and the CLI issues through issuePairingCode. A dead
+// pairing.db threw raw into whichever catch happened to wrap
+// the call (the status payload dying raw, a redemption
+// dying mid-flow with the pairing seam unnamed), and no
+// pairing-failed kind existed, so the class was
+// uncountable - here the losses are security-shaped, because
+// the guards in this store ARE the 5-failure lockout record.
+// Now the store's touches own their failure (the channels /
+// links precedent): a failed touch ledgers ONE pairing-failed
+// line (phase read for readPairingStore, redeem for
+// redeemPairingCode's store work, issue for
+// issuePairingCode's; actor sam; the verbatim reason
+// collapsed and capped; never any pairing record - code
+// hashes and guard counts are security data, not failure
+// data), tags the error, and rethrows exactly, so every
+// caller's handling is unchanged and pairing still fails
+// closed (never folded as no codes / no guards, which would
+// silently erase a live code and reset a lockout). An absent
+// store still reads the empty snapshot with no line and
+// creates nothing, and torn row payloads still parse
+// forgiving - only the store touch is guarded.
+export type PairingPhase = "read" | "redeem" | "issue";
+
+export function pairingFailureSummary(phase: PairingPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Pairing " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordPairingFailure(root: string, phase: PairingPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "pairing-failed", pairingFailureSummary(phase, reason));
+}
+
+function tagPairingLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { pairingLedgered?: boolean }).pairingLedgered = true;
+  }
+}
+
+export function isPairingLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { pairingLedgered?: boolean }).pairingLedgered === true;
+}
+
+function failPairing(root: string, phase: PairingPhase, error: unknown): never {
+  if (!isPairingLedgered(error)) recordPairingFailure(root, phase, error);
+  tagPairingLedgered(error);
+  throw error;
+}
+
 // The store's read door (the heartbeatState / episodeEvidence
 // precedent): the full pairing snapshot read through the store's own
 // shape. A pure read on an install with neither file creates nothing.
 export function readPairingStore(root: string): PairingStore {
   if (!storeExists(root)) return { codes: [], guards: {} };
-  const db = openPairingStore(root);
-  try { return readStore(db); } finally { db.close(); }
+  let db: Database.Database;
+  try { db = openPairingStore(root); } catch (error) { failPairing(root, "read", error); }
+  try { return readStore(db!); } catch (error) { failPairing(root, "read", error); }
+  finally { db!.close(); }
 }
 function hashCode(normalized: string): string { return createHash("sha256").update("sam-pairing:" + normalized).digest("hex"); }
 function hashEquals(a: string, b: string): boolean {
@@ -173,9 +233,10 @@ export function issuePairingCode(root: string, idOrName: string, now = Date.now(
     id: randomUUID(), channelId: channel.id, codeHash: hashCode(normalized),
     createdAt: new Date(now).toISOString(), expiresAt: new Date(now + PAIRING_TTL_MS).toISOString(),
   };
-  const db = openPairingStore(root);
+  let db: Database.Database;
+  try { db = openPairingStore(root); } catch (error) { failPairing(root, "issue", error); }
   try {
-    const issue = db.transaction(() => {
+    const issue = db!.transaction(() => {
       // Retire this channel's previous live codes, one row update each.
       const all = db.prepare("SELECT id, data FROM pairing_codes ORDER BY rowid").all() as Array<{ id: string; data: string }>;
       for (const row of all) {
@@ -193,7 +254,8 @@ export function issuePairingCode(root: string, idOrName: string, now = Date.now(
       }
     });
     issue();
-  } finally { db.close(); }
+  } catch (error) { failPairing(root, "issue", error); }
+  finally { db!.close(); }
   recordActivity(root, channel.profile, "pairing-issued", "Pairing code issued for channel " + channel.name + " (expires " + rec.expiresAt + ")");
   return { channel: channel.name, profile: channel.profile, code: formatPairingCode(normalized), expiresAt: rec.expiresAt };
 }
@@ -210,9 +272,10 @@ export function redeemPairingCode(root: string, channelId: string, rawCode: stri
   const channel = channels(root).find(c => c.id === channelId);
   if (!channel) throw Error("Channel not found: " + channelId);
   if (!Number.isSafeInteger(userId) || userId <= 0) throw Error("Invalid owner id");
-  const db = openPairingStore(root);
+  let db: Database.Database;
+  try { db = openPairingStore(root); } catch (error) { failPairing(root, "redeem", error); }
   try {
-    const guardRow = db.prepare("SELECT data FROM pairing_guards WHERE channelId = ?").get(channelId) as { data: string } | undefined;
+    const guardRow = db!.prepare("SELECT data FROM pairing_guards WHERE channelId = ?").get(channelId) as { data: string } | undefined;
     const guard: PairingGuard = (guardRow ? rowToGuard(guardRow.data) : null) ?? { failures: [], lockedUntil: null };
     if (guard.lockedUntil && now < Date.parse(guard.lockedUntil)) return { ok: false, reason: "locked" };
     if (guard.lockedUntil) { guard.lockedUntil = null; guard.failures = []; }
@@ -255,7 +318,8 @@ export function redeemPairingCode(root: string, channelId: string, rawCode: stri
       saveGuard(guard);
     });
     consume();
-  } finally { db.close(); }
+  } catch (error) { failPairing(root, "redeem", error); }
+  finally { db!.close(); }
   const updated = setChannelOwners(root, channelId, [...channel.ownerIds, userId]);
   recordActivity(root, channel.profile, "pairing-redeemed", "Paired telegram user " + userId + " as an owner of channel " + channel.name);
   return { ok: true, channel: updated };

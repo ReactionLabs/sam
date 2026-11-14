@@ -425,6 +425,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Routing still fails closed exactly as before: a failed read rethrows instead of folding the registry as no channels (which would silently lock every owner out, dressed as an empty allowlist), a read already ledgered by the store is never recorded twice, and a failure line never carries a channel record (names, profiles, and owner lists are routing data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no channels / no such channel with no line",
      "The full suite is green, including the channel failure-ledger tests"]);
+  if (key.startsWith("pairing-failed:")) return base(
+    ["pairing.ts", "telegram.ts", "status.ts", "channels.ts"],
+    "Pairing store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the pairing store (.sam/pairing.db) must open, read, and write instead of dying at that seam - this store holds the pairing codes and the per-channel lockout guards, so while it is dead the status payload dies raw, a stranger's redemption dies mid-flow in the bridge with the seam unnamed, and the failure of the anti-brute-force record itself goes uncounted.",
+    ["The next status reads, pairing issues, and redemptions resolve their codes and guards again instead of pairing-failed lines",
+     "Exactly one pairing-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Pairing still fails closed exactly as before: a failed touch rethrows instead of folding the store as no codes / no guards (which would silently erase a live code and reset a lockout), a touch already ledgered by the store is never recorded twice, and a failure line never carries a pairing record (code hashes and guard counts are security data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as the empty snapshot with no line",
+     "The full suite is green, including the pairing failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -669,6 +677,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Channel ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "channel-failed:" + phase, label: "channel store failures (" + phase + " step)" };
+    }
+    case "pairing-failed": {
+      const m = summary.match(/^Pairing ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "pairing-failed:" + phase, label: "pairing store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
