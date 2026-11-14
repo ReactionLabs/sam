@@ -42,6 +42,8 @@ When the owner opens Sam, Sam opens with his world: what changed, what needs him
 
 First release under this cadence: **v0.2.0**, PR #94, main `945b834`, suite 997/997 measured on main itself (fresh clone, npm ci, build, full test) on 2026-11-14.
 
+Second release: **v0.3.0**, PR #97, main `1fa43fe`, suite 1135/1135 measured on main itself (fresh clone, npm ci, build, full test) on 2026-11-14. Carried engine tip `1c77d83` plus the release commit (head `3800458`, pristine-verified 1135/1135 at the exact head before merge; first recorded tip `0de8c8a` measured 1131/1131 and was rebased twice as lanes kept landing) into main: Lane F owner-turn budgets, Program E parallel coding and the engine-runner stdin fix, Program G orchestration, Program B cold install (official walk 100s, dimension 5), Program H self-knowledge (capture guard, hot-memory budget, fence integrity, context meter), dashboard centering and the three maturity landings (item zero and opens-at-newest, run inspector with panel tabs and collapsible rails, chat organize pass), artifacts, turn behavior with message bursts and the issue #96 hiring-pool fix, and the hourly loop's store failure-visibility commits (channel, link, pairing). Box parity: /opt/sam/app/dist md5 sample byte-identical to the tip build on every service-path file; setup.js alone differs, by exactly c92b7be (the box CLI setup file is one commit behind the tip).
+
 The cadence, standing from 2026-11-14:
 
 - The engine branch (`dip/mita/sam-engine`) lands to main by pull request after each verified landing batch, and at least daily on active build days. Main never drifts a program behind again; a lag measured in weeks is a defect, reported like one.
