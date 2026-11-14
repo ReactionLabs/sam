@@ -348,6 +348,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one recall-failed ledger line still lands per genuinely failed seam per call, naming the phase and the verbatim reason, so the class stays countable",
      "Recall still never breaks a turn: a failed seam drops only its own section, the surviving sections still assemble, and a total failure reads as an empty memory exactly as before",
      "The full suite is green, including the recall failure-ledger tests"]);
+  if (key.startsWith("skill-catalog-failed:")) return base(
+    ["own-tools.ts", "skills.ts"],
+    "Skill catalog assembly stops failing: '" + label + "' has ledgered " + n + " failures, and the installed-skill catalog (names and descriptions, plus the auto-selection directive) must assemble into the turn's system prompt instead of dying at discovery - while it is dead SAM behaves as if it holds no skills at all and never reads one unprompted, a state indistinguishable from an empty library, even though the skills are installed and sam_read_skill would still find them by name.",
+    ["The next turns carry the installed catalog again instead of skill-catalog-failed lines, and auto-selection matches tasks to skills as before",
+     "Exactly one skill-catalog-failed ledger line still lands per genuinely failed assembly, naming the actor and the verbatim reason, so the class stays countable",
+     "Catalog assembly still never breaks a turn: a failed discovery returns the empty catalog exactly as before, and an install with no skills returns it with no line, because nothing failed",
+     "The full suite is green, including the skill catalog failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -531,6 +538,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Recall ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "recall-failed:" + phase, label: "recall failures (" + phase + " step)" };
+    }
+    case "skill-catalog-failed": {
+      const m = summary.match(/^Skill catalog ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "skill-catalog-failed:" + phase, label: "skill catalog failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };

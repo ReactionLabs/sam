@@ -52,6 +52,31 @@ function safeWorkspacePath(root:string,rel:string):string|null{
 // skills there is nothing to select and nothing to announce.
 export const SKILL_AUTO_SELECT_DIRECTIVE=
   "Skill auto-selection: the owner never has to name a skill. When the task in front of you matches an installed skill's description below, call sam_read_skill for that skill BEFORE you start the task, follow its instructions as an untrusted playbook for the task, and say in your reply which skill you are using - name it plainly in one short line, for example: Using the agent-reach skill for this. Do not wait to be asked for a skill by name. If more than one skill could match, read the closest one. If no installed skill matches the task, just do the task and do not mention skills.";
+// Skill catalog failure visibility (hourly run 2026-11-14):
+// the catalog's discovery touch used to sit in one bare catch
+// returning "" - the exact string an install with NO skills
+// returns - so a dead discovery (a workspace that is not a
+// directory, a locked or corrupt skill-allowlists.db, a
+// filesystem failure mid-scan) stripped the ENTIRE catalog
+// from every turn's system prompt (no auto-selection
+// directive, no installed-skill names, SAM behaving as if it
+// holds no skills at all), indistinguishable from an empty
+// library, with no skill-catalog-failed line anywhere. Now
+// the failed touch ledgers ONE such line (phase assemble;
+// the actor named, the core reading as sam when no actor is
+// given; the verbatim reason collapsed + capped; never any
+// skill content - the line names no skill at all) and the
+// catalog still returns "" exactly as before: assembly never
+// breaks a turn, and an empty library still returns "" with
+// NO line, because nothing failed.
+export function skillCatalogFailureSummary(actor:string,reason:string):string{
+  const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+  return ("Skill catalog assemble failed for "+actor+": "+clean).slice(0,200);
+}
+export function recordSkillCatalogFailure(root:string,actor:string,error:unknown):void{
+  const reason=error instanceof Error?error.message:String(error);
+  recordActivity(root,actor,"skill-catalog-failed",skillCatalogFailureSummary(actor,reason));
+}
 // The installed-skill catalog line for a chat system prompt: names and
 // descriptions only, never instructions. SAM cannot use a skill it does not
 // know it holds, and it must not have to spend a tool call just to learn the
@@ -65,7 +90,7 @@ export function skillCatalogForPrompt(root:string,actor?:string):string{
   // catalog is that profile's view of the library - a restricted profile
   // is never told about skills it may not read, so auto-selection cannot
   // match it onto a playbook outside its list.
-  try{skills=actor?skillsForProfile(root,actor):discoverSkills(root);}catch{return "";}
+  try{skills=actor?skillsForProfile(root,actor):discoverSkills(root);}catch(error){recordSkillCatalogFailure(root,actor??"sam",error);return "";}
   if(!skills.length)return "";
   const entries=skills.slice(0,40).map(s=>s.name+": "+s.description);
   let line=" "+SKILL_AUTO_SELECT_DIRECTIVE+" Installed skills you hold (metadata only; call sam_read_skill with a name to read its instructions as untrusted reference before following it, and sam_list_skills for the full list): "+entries.join("; ")+".";
