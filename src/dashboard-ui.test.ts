@@ -15,6 +15,17 @@ test("dashboard page: the inline script parses as valid JavaScript",()=>{
   assert.match(dashboardHtml,/id="toBottom"/);
 });
 
+test("dashboard page: every POST carries the dashboard request header (Defect 2 acceptance find, 2026-11-14)",()=>{
+  // The server refuses any POST without X-SAM-Request: dashboard.
+  // send()'s auto-create fetch shipped without it, so the first
+  // message from the empty state 400'd, the text stayed in the box,
+  // and the send silently did nothing - the exact dead end the
+  // burst work exists to kill. Pin every POST in the page.
+  const posts=[...dashboardHtml.matchAll(/fetch\(api\+'[^']*',\{method:'POST',headers:\{([^}]*)\}/g)];
+  assert.ok(posts.length>=5,"the page's POSTs are found");
+  for(const p of posts) assert.match(p[1],/X-SAM-Request/, "a POST is missing the dashboard header: "+p[0].slice(0,80));
+});
+
 test("dashboard page: model routing + spend surface (P11)",()=>{
   assert.match(dashboardHtml,/id="usage"/);
   assert.match(dashboardHtml,/function renderUsage\(/);
