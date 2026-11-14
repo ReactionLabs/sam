@@ -37,6 +37,7 @@ import {
   spawnSubagent, updateSubagent, type Subagent,
 } from "./subagents.js";
 import { parseReview } from "./team-runtime.js";
+import { codeRoot } from "./code.js";
 
 export const ORCH_MAX_DEPTH = 2;
 export const ORCH_MAX_LANE_ATTEMPTS = 2;
@@ -314,11 +315,25 @@ export function laneWorkerPrompt(lane: Lane, depResults: Array<{ name: string; r
 }
 
 export interface LaneVerdictResult { verdict: LaneVerdict; reasons: string }
-function confinedArtifact(root: string, artifact: string): string | null {
-  const base = resolve(root);
-  const path = resolve(base, artifact);
-  if (path !== base && !path.startsWith(base + sep)) return null;
-  return path;
+/**
+ * An artifact may live in the workspace or in the designated code root:
+ * those are the two trees SAM's hands may write (Program E's slice
+ * worktrees live in the code root's world). Absolute spellings and
+ * spellings relative to either root resolve; anything else is an escape.
+ */
+export function confinedArtifact(root: string, artifact: string): string | null {
+  const bases = [resolve(root)];
+  const code = codeRoot(root);
+  if (code) bases.push(resolve(code));
+  for (const base of bases) {
+    const path = resolve(base, artifact);
+    if (path !== base && path.startsWith(base + sep) && existsSync(path)) return path;
+  }
+  for (const base of bases) {
+    const path = resolve(base, artifact);
+    if (path !== base && path.startsWith(base + sep)) return path;
+  }
+  return null;
 }
 /** The coordinator's deterministic checks. A worker's output is a claim until these pass. */
 export function verifyLaneOutput(root: string, lane: Lane, resultText: string): LaneVerdictResult {

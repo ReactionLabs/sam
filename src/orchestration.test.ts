@@ -125,6 +125,25 @@ test("verification gates delivery: a rejected build is replaced once, then lands
   } finally { setOrchestrationRunnerForTests(null); }
 });
 
+test("a build artifact in the designated code root verifies (the E seam)", async () => {
+  const root = freshRoot();
+  const repo = mkdtempSync(join(tmpdir(), "orch-repo-"));
+  const { setCodeRoot } = await import("./code.js");
+  setCodeRoot(root, repo);
+  setOrchestrationRunnerForTests(async () => {
+    writeFileSync(join(repo, "one-pager.md"), "Launch code 47-ALPHA, price $129.\n");
+    return "Wrote one-pager.md in the code root.";
+  });
+  try {
+    const { job, lanes } = await orchestrate(root, {
+      ask: "write the one-pager",
+      lanes: [lane({ name: "write", kind: "build", landsAt: "one-pager.md", verify: { artifact: "one-pager.md", mustMention: ["47-ALPHA", "$129"] } })],
+    });
+    assert.equal(lanes[0].verdict, "verified");
+    assert.equal(job.status, "done");
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
 test("unverified claims do not land: a sourceless research result is named, not delivered", async () => {
   const root = freshRoot();
   setOrchestrationRunnerForTests(async () => "I recall the code is probably 99-ZZZ, from memory.");
