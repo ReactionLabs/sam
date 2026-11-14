@@ -257,10 +257,11 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The full suite is green, including the accounting failure-ledger tests"]);
   if (key === "skill-use-failed") return base(
     ["skill-use.ts", "own-tools.ts"],
-    "Skill-use visibility stops failing: " + n + " ledgered skill-use record failures, and a model's skill read must land in .sam/skill-use.jsonl instead of dying at the append - the dashboard rail, chat header, and status keep folding the frozen ledger as truth while it is dead, so an unrecorded use is also an invisible one.",
-    ["The next skill reads record their skill-use lines again instead of skill-use-failed lines",
-     "Exactly one skill-use-failed ledger line still lands per genuinely failed write, naming the skill and the verbatim reason, so the class stays countable",
-     "Visibility still never breaks the read: recordSkillUse never throws, the sam_read_skill result returns exactly as before, and no success skill-use activity line rides a record that did not land",
+    "Skill-use visibility stops failing: " + n + " ledgered skill-use record failures, and a model's skill read must land in .sam/skill-use.jsonl instead of dying at the append or the read - the dashboard rail, chat header, and status keep folding the frozen ledger as truth while it is dead, so an unrecorded use is also an invisible one, and a dead read kills the whole status payload raw instead of surfacing as a countable line.",
+    ["The next skill reads record their skill-use lines again instead of skill-use-failed lines, and skill-use reads return the recorded entries again",
+     "Exactly one skill-use-failed ledger line still lands per genuinely failed touch, naming the skill on a write and the verbatim reason, so the class stays countable",
+     "Visibility still never breaks the skill read it records: recordSkillUse never throws, the sam_read_skill result returns exactly as before, and no success skill-use activity line rides a record that did not land",
+     "A failed skill-use read still fails closed (one ledger line, then the rethrow) instead of folding to a false empty history or dying raw, exactly as its readers expect",
      "The full suite is green, including the skill-use failure-ledger tests"]);
   if (key.startsWith("worthiness-failed:")) return base(
     ["worthiness.ts", "heartbeat.ts", "loop-revisit.ts"],

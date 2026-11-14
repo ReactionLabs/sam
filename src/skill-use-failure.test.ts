@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
-import { recordSkillUse, skillUseEntries, skillUseFailureSummary } from "./skill-use.js";
+import { lastSkillByChat, recentSkillUse, recordSkillUse, skillUseEntries, skillUseFailureSummary, skillUseReadFailureSummary } from "./skill-use.js";
 import { classifyDefect, rankDefects } from "./self-work.js";
 import { executeOwnTool } from "./own-tools.js";
 
@@ -96,6 +96,40 @@ test("skill-use failure summaries collapse and cap the verbatim reason", () => {
   assert.ok(capped.length <= 200, "the summary is capped at 200");
   const noChat = skillUseFailureSummary("agent-reach", null, "boom");
   assert.equal(noChat, "Skill use record failed for skill agent-reach: boom");
+});
+
+test("skill-use-failed: a dead read ledgers one line and rethrows, never folds to a false empty", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "skill-use.jsonl");
+    assert.throws(() => skillUseEntries(root), /EISDIR/, "the read rethrows exactly instead of folding to []");
+    const lines = readActivity(root, 100, { kind: "skill-use-failed" });
+    assert.equal(lines.length, 1, "exactly one read line for the dead read");
+    assert.equal(lines[0].actor, "sam", "the reader is the system");
+    assert.ok(lines[0].summary.startsWith("Skill use read failed: "), lines[0].summary);
+    assert.throws(() => recentSkillUse(root), /EISDIR/);
+    assert.throws(() => lastSkillByChat(root), /EISDIR/);
+    assert.equal(readActivity(root, 100, { kind: "skill-use-failed" }).length, 3,
+      "each reader surface ledgers its own one line - no surface dies raw");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("skill-use-failed: an absent ledger still reads empty and ledgers nothing", () => {
+  const root = scratch();
+  try {
+    assert.deepEqual(skillUseEntries(root), []);
+    assert.deepEqual(recentSkillUse(root), []);
+    assert.equal(lastSkillByChat(root).size, 0);
+    assert.equal(readActivity(root, 100, { kind: "skill-use-failed" }).length, 0, "a fresh install genuinely used no skills");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("skill-use read failure summaries collapse and cap the verbatim reason", () => {
+  const s = skillUseReadFailureSummary("EISDIR: illegal operation\n  on a directory");
+  assert.ok(!s.includes("\n"), "the reason is one line");
+  assert.equal(s, "Skill use read failed: EISDIR: illegal operation on a directory");
+  const capped = skillUseReadFailureSummary("x".repeat(500));
+  assert.ok(capped.length <= 200, "the summary is capped at 200");
 });
 
 test("skill-use-failed kind classifies to its own defect class and ranks", () => {
