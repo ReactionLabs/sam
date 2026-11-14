@@ -9,6 +9,7 @@ import { loadApprovalPolicy } from "./approval-policy.js";
 import { codeSummary } from "./code.js";
 import { codingSummary } from "./coding.js";
 import { engineStatus } from "./engine.js";
+import { parallelSummary } from "./parallel-coding.js";
 import { engineConnectStatus } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { briefStatus } from "./brief.js";
@@ -154,6 +155,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     approvals: loadApprovalPolicy(root),
     code: codeSummary(root),
     coding: codingSummary(root),
+    parallel: parallelSummary(root),
     engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, provider: c.provider, connected: c.connected, stale: c.stale, record: c.connection, providers: c.providers } }; })(),
     senses: sensesStatus(),
     brief: briefStatus(root),
