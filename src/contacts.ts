@@ -74,18 +74,77 @@ function rowToContact(data: string): Contact | null {
 function storeExists(root: string): boolean {
   return existsSync(contactsDbFile(root)) || existsSync(contactsPath(root));
 }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 15:04 EST): the contact store holds the per-person
+// permission notes, including the one hard rule a note can
+// carry (noDraft), and every touch opened it raw.
+// listContacts rides the dashboard status build and the CLI
+// contacts views; getContact / draftBlockedFor ride every
+// draft creation; upsertContact / updateContact /
+// removeContact are the CLI's owner writes. A dead
+// contacts.db threw into whichever catch happened to wrap
+// the call with the seam unnamed, and no contact-failed
+// kind existed, so the class was uncountable - and any
+// reader folding a dead store as "no contacts" would
+// silently drop a noDraft mark and let a draft be created
+// to exactly the person the owner marked never. Now the
+// store's touches own their failure (the pairing /
+// channels precedent): a failed touch ledgers ONE
+// contact-failed line (phase read for listContacts /
+// getContact and draftBlockedFor riding it, write for
+// upsertContact / updateContact / removeContact; actor
+// sam; the verbatim reason collapsed and capped; never any
+// contact record - a note is the owner's words about a
+// person, not failure data), tags the error, and rethrows
+// exactly, so every caller's handling is unchanged and the
+// permission check still fails closed (a draft whose block
+// check could not run is not created). Validation errors
+// (bad name / note) are not store failures and ledger
+// nothing. An absent store still reads as no contacts with
+// no line and creates nothing, and torn row payloads still
+// parse forgiving - only the store touch is guarded.
+export type ContactPhase = "read" | "write";
+
+export function contactFailureSummary(phase: ContactPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Contact " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordContactFailure(root: string, phase: ContactPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "contact-failed", contactFailureSummary(phase, reason));
+}
+
+function tagContactLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { contactLedgered?: boolean }).contactLedgered = true;
+  }
+}
+
+export function isContactLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { contactLedgered?: boolean }).contactLedgered === true;
+}
+
+function failContact(root: string, phase: ContactPhase, error: unknown): never {
+  if (!isContactLedgered(error)) recordContactFailure(root, phase, error);
+  tagContactLedgered(error);
+  throw error;
+}
 export function contactSlug(name: string): string {
   return (name ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
 }
 export function listContacts(root: string): Contact[] {
   if (!storeExists(root)) return [];
-  const db = openContactsStore(root);
+  let db: Database.Database;
+  try { db = openContactsStore(root); } catch (error) { failContact(root, "read", error); }
   try {
-    const rows = db.prepare("SELECT data FROM contacts ORDER BY rowid").all() as Array<{ data: string }>;
+    const rows = db!.prepare("SELECT data FROM contacts ORDER BY rowid").all() as Array<{ data: string }>;
     const items: Contact[] = [];
     for (const row of rows) { const contact = rowToContact(row.data); if (contact) items.push(contact); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failContact(root, "read", error); }
+  finally { db!.close(); }
 }
 function findContactRow(root: string, slug: string): Contact | null {
   if (!storeExists(root)) return null;
@@ -112,16 +171,19 @@ function updateContactRow(root: string, item: Contact): void {
 export function updateContact(root: string, name: string, patch: Partial<Contact>): Contact | null {
   const slug = contactSlug(name);
   if (!slug || !storeExists(root)) return null;
-  const current = findContactRow(root, slug);
-  if (!current) return null;
-  const next: Contact = { ...current, ...patch, name: current.name };
-  updateContactRow(root, next);
-  return next;
+  try {
+    const current = findContactRow(root, slug);
+    if (!current) return null;
+    const next: Contact = { ...current, ...patch, name: current.name };
+    updateContactRow(root, next);
+    return next;
+  } catch (error) { failContact(root, "write", error); }
 }
 export function getContact(root: string, name: string): Contact | null {
   const slug = contactSlug(name);
   if (!slug) return null;
-  return findContactRow(root, slug);
+  try { return findContactRow(root, slug); }
+  catch (error) { failContact(root, "read", error); }
 }
 export function upsertContact(root: string, input: { name: string; note?: string; noDraft?: boolean }): Contact {
   const display = (input.name ?? "").trim();
@@ -130,28 +192,32 @@ export function upsertContact(root: string, input: { name: string; note?: string
   const note = (input.note ?? "").trim();
   if (note.length > 2000) throw new Error("Invalid contact note");
   const now = new Date().toISOString();
-  const found = findContactRow(root, slug);
-  if (found) {
-    if (input.note !== undefined) found.note = note;
-    if (input.noDraft !== undefined) found.noDraft = !!input.noDraft;
-    found.display = display; found.updatedAt = now;
-    updateContactRow(root, found);
-    recordActivity(root, "owner", "contact", "Updated contact " + slug + (found.noDraft ? " (no drafts)" : ""));
-    return found;
-  }
-  const contact: Contact = { name: slug, display, note, noDraft: !!input.noDraft, createdAt: now, updatedAt: now };
-  insertContactRow(root, contact);
-  recordActivity(root, "owner", "contact", "Added contact " + slug + (contact.noDraft ? " (no drafts)" : ""));
-  return contact;
+  try {
+    const found = findContactRow(root, slug);
+    if (found) {
+      if (input.note !== undefined) found.note = note;
+      if (input.noDraft !== undefined) found.noDraft = !!input.noDraft;
+      found.display = display; found.updatedAt = now;
+      updateContactRow(root, found);
+      recordActivity(root, "owner", "contact", "Updated contact " + slug + (found.noDraft ? " (no drafts)" : ""));
+      return found;
+    }
+    const contact: Contact = { name: slug, display, note, noDraft: !!input.noDraft, createdAt: now, updatedAt: now };
+    insertContactRow(root, contact);
+    recordActivity(root, "owner", "contact", "Added contact " + slug + (contact.noDraft ? " (no drafts)" : ""));
+    return contact;
+  } catch (error) { failContact(root, "write", error); }
 }
 export function removeContact(root: string, name: string): boolean {
   const slug = contactSlug(name);
   if (!slug || !storeExists(root)) return false;
-  const db = openContactsStore(root);
+  let db: Database.Database;
+  try { db = openContactsStore(root); } catch (error) { failContact(root, "write", error); }
   try {
-    const result = db.prepare("DELETE FROM contacts WHERE name = ?").run(slug);
+    const result = db!.prepare("DELETE FROM contacts WHERE name = ?").run(slug);
     if (result.changes === 0) return false;
-  } finally { db.close(); }
+  } catch (error) { failContact(root, "write", error); }
+  finally { db!.close(); }
   recordActivity(root, "owner", "contact", "Removed contact " + slug);
   return true;
 }
