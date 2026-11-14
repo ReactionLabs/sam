@@ -39,3 +39,5 @@ In Mission Control, click **Connectors**, enter the name `Second Shift`, endpoin
 5. Follow-up: proper connector settings page, credential vault, per-box/agent grants, live chat tool dispatch, and better response display.
 
 **Verification:** The mocked handshake test is automated. A real Second Shift MCP connection has not yet been verified by the PR author.
+
+**Status update (2026-11-14):** a real MCP connection is verified live on the reference install (a read-only connector pinned to one profile, its tools enumerated and called in chat). The Second Shift connector specifically still waits on the owner's key deposit; the vault and per-agent grant items in the follow-up list remain open.

@@ -40,11 +40,18 @@ When the owner opens Sam, Sam opens with his world: what changed, what needs him
 
 ## Release discipline (Program A)
 
-_To be completed by the release landing: the main-branch cadence and versioning rule live here once main carries the real Sam._
+First release under this cadence: **v0.2.0**, PR #94, main `945b834`, suite 997/997 measured on main itself (fresh clone, npm ci, build, full test) on 2026-11-14.
+
+The cadence, standing from 2026-11-14:
+
+- The engine branch (`dip/mita/sam-engine`) lands to main by pull request after each verified landing batch, and at least daily on active build days. Main never drifts a program behind again; a lag measured in weeks is a defect, reported like one.
+- Every main landing is pristine-clone verified at the exact head SHA before merge (fresh clone, npm ci, build, full suite green), and the suite is re-measured on main itself after the merge.
+- Versioning: patch bump per landing batch, minor bump per program milestone; each minor release is tagged on its main merge SHA.
+- The README suite count is refreshed at every release landing from the on-main measurement, so public claims track the measured tree.
 
 ## Program status
 
-- A. Release discipline (main stops lagging the engine branch): RUNNING 2026-11-14.
+- A. Release discipline (main stops lagging the engine branch): LANDED 2026-11-14 (PR #94; cadence above).
 - B. Cold install (one-command path, timed cold walk): RUNNING 2026-11-14.
 - C. Task battery (10-15 real owner tasks, Sam vs OpenClaw): queued behind A and B.
 - D. The reveal (live dashboard session: Sam's opening brief on the owner's actual operation, cited, then live asks): staged when A to C are far enough that it will land.

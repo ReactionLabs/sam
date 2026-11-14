@@ -51,6 +51,14 @@ task) runs the same turn, `runChatTurn`. What it can do today:
   when nothing changed, delivery plus an activity entry when it did.
 - **Background work.** A chat can hand off a long task; it runs async on
   the deep tier and posts its result back into the same chat.
+- **Coding hands.** A provider-selectable engine (Codex or Claude Code,
+  chosen per task and ledgered) runs gated coding tasks in a designated
+  code root. Daily self-work turns SAM's own ledger-ranked defects into
+  at most one fix proposal a day, landed only through the git-push gate.
+- **Chat citations.** When an answer rests on an earlier conversation, a
+  "Found in chat history" link under the reply opens the source chat at
+  the exact message. Citations validate against that turn's actual
+  search results; a fabricated source is rejected and ledgered.
 - **Long chats.** Past a size trigger, older turns flush to memory first,
   then fold into a stored summary; the chat never dies at a message cap.
 - **Doors.** A hosted chat page per mini with its own expiring key
@@ -74,14 +82,17 @@ task) runs the same turn, `runChatTurn`. What it can do today:
   first (`sam chats`, `sam actions`, `sam agents`, `sam minis`,
   `sam channels`, `sam background`, `sam backup`, `sam usage`, and more);
   surfaces ride on the CLI, never the other way round.
-- **Channels**: a Telegram bridge in pairing mode (go-live waits on the
-  owner's bot token), a webhook trigger, and Discord posting.
+- **Channels**: a Telegram bridge in pairing mode (live on the
+  reference install; pairing gates who can talk to it), a webhook
+  trigger, and Discord posting.
 
 ## State and reliability
 
 All state lives under the install's `.sam/` directory: SQLite stores for
-chats, preferences, and memory/missions, JSON stores and append-only
-ledgers (activity, heartbeats, usage, verification, reviews) for the rest.
+chats, preferences, memory, missions, and the rest of the converged
+store set (one openDatabase path for every store), with append-only
+JSONL ledgers (activity, team messages) where the audit trail is the
+point.
 A nightly backup snapshots the whole state (SQLite via `VACUUM INTO`, so
 a copy is transactionally consistent) and a scripted drill proves the
 copy boots before it is trusted.
@@ -123,7 +134,7 @@ npm run build
 npm test
 ```
 
-The suite (240+ tests) covers the turn, tools, gates, doors, heartbeats,
+The suite (997 tests, measured on main at the v0.2.0 landing) covers the turn, tools, gates, doors, heartbeats,
 compaction, backups, and a guard that compiles the dashboard page's inline
 script, so a dead page cannot pass.
 
