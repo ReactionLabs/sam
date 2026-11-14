@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 // Channels are how the outside world talks to SAM: a messaging surface (Telegram
 // first) bound to one profile. Like connectors, a channel stores only an env
@@ -76,23 +77,88 @@ function rowToChannel(data: string): Channel | null {
 function storeExists(root: string): boolean {
   return existsSync(channelsDbFile(root)) || existsSync(channelsFile(root));
 }
-export function channels(root: string): Channel[] {
+// Failure visibility (gap found 2026-11-14, hourly run
+// 13:04 EST): channels() is the one read door for the channel
+// registry - the registry every outside surface rides. The
+// Telegram bridge resolves its channel through it on every
+// poll, pairing issue/redeem and bindings validation read it,
+// heartbeat delivery finds its target channel through it, and
+// the status payload, CLI, config detection, brief, and
+// action validation all read it. Every touch was unguarded:
+// a dead channels.db threw raw into whichever catch happened
+// to wrap the call (the bridge's poll failure ledger with
+// the channel seam unnamed, a raw dashboard/status death, a
+// pairing redemption dying mid-flow), and no channel-failed
+// kind existed, so the class was uncountable. Now the read
+// doors own their touch (the links / dashboard-config
+// precedent): a failed open/read ledgers ONE channel-failed
+// line (phase read for channels(), phase lookup for
+// getChannel(); actor sam; the verbatim reason collapsed and
+// capped; never any channel record - names, profiles, and
+// owner lists are routing data, not failure data), tags the
+// error, and rethrows exactly, so every caller's handling is
+// unchanged. An absent store still reads [] / null with no
+// line and creates nothing, and torn row payloads still
+// parse forgiving - only the store touch is guarded. The
+// writers ride the same doors (addChannel reads through
+// channels(), setChannelOwners and updateChannel through
+// getChannel()), so a dead store fails a write at its read
+// with the seam named instead of writing blind.
+export type ChannelPhase = "read" | "lookup";
+
+export function channelFailureSummary(phase: ChannelPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  if (phase === "lookup") return ("Channel lookup failed: " + clean).slice(0, 200);
+  return ("Channel read failed: " + clean).slice(0, 200);
+}
+
+export function recordChannelFailure(root: string, phase: ChannelPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "channel-failed", channelFailureSummary(phase, reason));
+}
+
+function tagChannelLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { channelLedgered?: boolean }).channelLedgered = true;
+  }
+}
+
+export function isChannelLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { channelLedgered?: boolean }).channelLedgered === true;
+}
+
+function failChannel(root: string, phase: ChannelPhase, error: unknown): never {
+  if (!isChannelLedgered(error)) recordChannelFailure(root, phase, error);
+  tagChannelLedgered(error);
+  throw error;
+}
+
+function readChannels(root: string, phase: ChannelPhase): Channel[] {
   if (!storeExists(root)) return [];
-  const db = openChannelsStore(root);
+  let db: Database.Database;
+  try { db = openChannelsStore(root); } catch (error) { failChannel(root, phase, error); }
   try {
-    const rows = db.prepare("SELECT data FROM channels ORDER BY rowid").all() as Array<{ data: string }>;
+    const rows = db!.prepare("SELECT data FROM channels ORDER BY rowid").all() as Array<{ data: string }>;
     const items: Channel[] = [];
     for (const row of rows) { const channel = rowToChannel(row.data); if (channel) items.push(channel); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failChannel(root, phase, error); }
+  finally { db!.close(); }
+}
+
+export function channels(root: string): Channel[] {
+  return readChannels(root, "read");
 }
 export function getChannel(root: string, id: string): Channel | null {
   if (!storeExists(root)) return null;
-  const db = openChannelsStore(root);
+  let db: Database.Database;
+  try { db = openChannelsStore(root); } catch (error) { failChannel(root, "lookup", error); }
   try {
-    const row = db.prepare("SELECT data FROM channels WHERE id = ?").get(id) as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM channels WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToChannel(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failChannel(root, "lookup", error); }
+  finally { db!.close(); }
 }
 function insertChannelRow(root: string, item: Channel): void {
   const db = openChannelsStore(root);

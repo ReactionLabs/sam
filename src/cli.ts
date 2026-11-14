@@ -15,7 +15,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { verificationGate, verificationStatus } from "./verification.js";
-import { defaultCodingReviewer, goldfishStatus, runGoldfishReview, sessionGate } from "./goldfish.js";
+import { defaultCodingReviewer, defaultDiffReviewer, goldfishStatus, runGoldfishReview, sessionGate, type GoldfishChangeInput } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
@@ -25,6 +25,7 @@ import { deliverySummary, readDeliveries } from "./delivery-outbox.js";
 import { listBackgroundTasks, queueBackgroundTask, drainBackgroundTasks } from "./background.js";
 import { listCodingTasks, queueCodingTask, drainCodingTasks } from "./coding.js";
 import { drainEngineTasks, engineStatus, listEngineTasks, queueEngineTask } from "./engine.js";
+import { drainParallelJobs, listParallelJobs, getParallelJob, parallelSummaryText, queueParallelJob, type ParallelSliceSpec } from "./parallel-coding.js";
 import { connectEngine, disconnectEngine, engineConnectStatus, engineProvider, isEngineProvider, probeEngineAuthFor, runEngineLogin, setEngineProvider, ENGINE_PROVIDERS } from "./engine-connect.js";
 import { runSense, sensesStatus } from "./senses.js";
 import { briefStatus, buildBrief, installBrief } from "./brief.js";
@@ -73,11 +74,13 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
-import { cancelSubagent, getSubagent, listSubagents, spawnSubagent } from "./subagents.js";
+import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, withSpawnPool } from "./subagents.js";
+import { getJob, listJobs, listLanes, orchestrate, planJob, remainingPool } from "./orchestration.js";
 import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
+import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authStatus, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, removeProvider } from "./providers.js";
 import { addFallbackRoute, clearFallbackRoutes, fallbackRoutes } from "./failover.js";
@@ -85,6 +88,7 @@ import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
 import { samBanner } from "./banner.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
+import { homedir } from "node:os";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
@@ -92,12 +96,14 @@ import { listActions, proposeAction, decideAction, settleAutoApprovals, ACTION_K
 import { loadApprovalPolicy, saveApprovalPolicy, scanNeverList, neverListSummary, classifyProposal, APPROVAL_MODES } from "./approval-policy.js";
 import { listContacts, getContact, upsertContact, removeContact } from "./contacts.js";
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
+import { createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, updateArtifact } from "./artifacts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
 import { observabilityReport } from "./observability.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
+import { organizeChats } from "./chat-organize.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, patchNote, saveNote } from "./notes.js";
@@ -110,6 +116,8 @@ import { modelRoutingTable } from "./model-routing.js";
 import { connectors } from "./connectors.js";
 import { recordActivity } from "./activity.js";
 import { usageSummary, readUsage } from "./usage.js";
+import { contextSummary, contextToday } from "./context-meter.js";
+import { CaptureGuardStore, addSuppression } from "./capture-guard.js";
 
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
@@ -140,6 +148,7 @@ function output(data:unknown):void { console.log(program.opts().json?JSON.string
 // task then closes blocked naming the missing reviewer, never
 // done-unreviewed.
 function codingReviewer(root:string){ const reviewer=defaultCodingReviewer(root); if(reviewer) return (task:{spec:string})=>reviewer(task.spec); return async()=>{ throw new Error("Self-review is not configured on this install (no model endpoint/key for the goldfish reviewer)"); }; }
+function parallelReviewer(root:string){ const reviewer=defaultDiffReviewer(root); if(reviewer) return (spec:string,changes:GoldfishChangeInput[])=>reviewer(spec,changes); return async()=>{ throw new Error("Self-review is not configured on this install (no model endpoint/key for the goldfish reviewer)"); }; }
 // The one channel-delivery closure: heartbeat job deliveries and
 // second-answer channel updates ride the same door (Telegram via
 // the channel's token env, Discord via its webhook poster).
@@ -237,6 +246,12 @@ goldfishCmd.command("review").description("Run one fresh-context goldfish review
     const provider=new OpenAICompatibleProvider(endpoint,key,seconds*1000);
     output(await runGoldfishReview(program.opts().workspace,options.spec,model,provider));
   });
+const orch=program.command("orchestrate").description("Program G orchestration: Sam runs a job as named lanes with hired workers, verifies each lane, and delivers ONE consolidated result; lane detail is here on ask, invisible otherwise");
+orch.command("run").requiredOption("--spec <file>","Job spec JSON: {ask, profile?, lanes:[{name, kind, goal, doneLooksLike, notDoneLooksLike, landsAt, tools?, facts?, lawLines?, dependsOn?, verify?, workers?}]}").description("Plan and run a job end to end; prints the one consolidated result").action(async(o:{spec:string})=>{const spec=JSON.parse(readFileSync(o.spec,"utf8"));const {job,lanes}=await orchestrate(program.opts().workspace,spec);output({jobId:job.id,status:job.status,consolidated:job.consolidated,lanes:lanes.map(l=>({name:l.name,kind:l.kind,status:l.status,verdict:l.verdict,attempts:l.attempts}))});});
+orch.command("plan").requiredOption("--spec <file>","Job spec JSON (same shape as run)").description("Validate and persist a plan without running it: done-shapes, scopes, depth, and the live pool check").action((o:{spec:string})=>{const spec=JSON.parse(readFileSync(o.spec,"utf8"));const {job,lanes}=planJob(program.opts().workspace,spec);output({jobId:job.id,status:job.status,lanes:lanes.map(l=>({name:l.name,kind:l.kind,depth:l.depth,tools:l.tools,budget:l.budget}))});});
+orch.command("jobs").description("List orchestrated jobs (the owner's surface: status and the consolidated result)").action(()=>output(listJobs(program.opts().workspace).map(j=>({id:j.id,ask:j.ask,status:j.status,createdAt:j.createdAt,finishedAt:j.finishedAt}))));
+orch.command("show").argument("<jobId>").description("One job on ask: its consolidated result plus every lane's detail (workers, attempts, verdicts)").action((jobId:string)=>{const root=program.opts().workspace;const job=getJob(root,jobId);if(!job)throw new Error("Unknown job: "+jobId);output({job,lanes:listLanes(root,jobId)});});
+orch.command("pool").description("The worker pool left for this profile, read live from the sub-agent registry").action(()=>output(remainingPool(program.opts().workspace,"sam")));
 program.command("dashboard").description("Start read-only dashboard on localhost").option("--port <number>","Loopback port","4317").action(async(o:{port:string})=>serveDashboard(program.opts().workspace,Number(o.port)));
 program.command("tui").description("SAM in the terminal: the S.A.M. splash, a live chat on the shared turn, images rendered in the transcript").option("--profile <name>","Profile to talk to (default sam)").option("--banner","Print the startup splash and exit").action(async(o:{profile?:string;banner?:boolean})=>{await runTui(program.opts().workspace,{profile:o.profile,bannerOnly:!!o.banner});});
 program.command("image").argument("<file>").description("Render an image in this terminal (Kitty/iTerm2 graphics where the terminal supports them, ANSI half-blocks elsewhere)").action((file:string)=>{process.stdout.write(renderImageFile(file,{cols:Math.max(20,(process.stdout.columns??80)-2),rows:24}));});
@@ -326,7 +341,7 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
    }finally{db.close();}
   };
   const deliver=makeChannelDeliver(root);
-  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver,reviewCoding:codingReviewer(root),reviewEngine:codingReviewer(root)}));
+  output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver,reviewCoding:codingReviewer(root),reviewEngine:codingReviewer(root),reviewParallel:parallelReviewer(root)}));
  });
 const bgCmd=program.command("background").description("Background work (legs): tasks a chat handed off to run async and post back into the chat");
 bgCmd.command("list").option("--chat <id>","Only this chat").action((o:{chat?:string})=>output(listBackgroundTasks(program.opts().workspace).filter(t=>!o.chat||t.chatId===o.chat)));
@@ -349,6 +364,12 @@ engineCmd.command("queue").requiredOption("--chat <id>","Chat the run reports ba
 engineCmd.command("propose").requiredOption("--chat <id>","Chat the run reports back into").requiredOption("--spec <text>","The self-contained coding task for the engine").option("--actor <name>","Acting profile","sam").description("Propose an engine run on the ONE gate (kind engine, consequential): nothing runs until the owner approves; approval queues the run").action((o:{chat:string;spec:string;actor:string})=>{const root=program.opts().workspace as string;const a=proposeAction(root,{actor:o.actor,kind:"engine",title:"Engine run: "+o.spec.slice(0,80),detail:JSON.stringify({task:o.spec}),chatId:o.chat});output({status:"pending_owner_approval",id:a.id,kind:a.kind,note:"Nothing runs until the owner approves this proposal."});});
 engineCmd.command("drain").description("Run one queued engine run now; verified work is goldfish-reviewed (C5) before it can close done").action(async()=>{const root=program.opts().workspace as string;output(await drainEngineTasks(root,{review:codingReviewer(root)}));});
 engineCmd.command("push").argument("<task-id>").description("Propose pushing a finished engine run's sam/<task> branch to origin (C4): creates a git-push proposal on the ONE gate - nothing pushes until the owner approves it").action((taskId:string)=>{const root=program.opts().workspace as string;const task=listEngineTasks(root).find(t=>t.id===taskId);if(!task)throw new Error("Unknown engine task: "+taskId);if(task.git?.mode!=="branch"||!task.git.branch)throw new Error("Engine task "+taskId+" has no task branch to push (git mode: "+(task.git?.mode??"none recorded")+")");if(task.git.pending.length)throw new Error("Engine task "+taskId+" still has uncommitted changes ("+task.git.pending.join(", ")+") - a push proposal names a finished branch only");const a=proposeAction(root,{actor:task.actor,kind:"git-push",title:"Push "+task.git.branch+" ("+task.title.slice(0,80)+")",detail:JSON.stringify({branch:task.git.branch}),chatId:task.chatId});output({status:"pending_owner_approval",id:a.id,kind:a.kind,branch:task.git.branch,commits:task.git.commits.map(c=>c.sha),note:"Nothing pushes until the owner approves this proposal."});});
+const parallelCmd=program.command("parallel").description("Parallel coding (Program E): a job surveyed once, then fanned out into slices that run the managed engine CONCURRENTLY, each in its own git worktree on its own sam/par-* branch; a coordinator merges the slices in order, runs the merged battery (bounded fix iterations), and the merged diff is goldfish-reviewed before the job can close done; the job branch is never pushed by the drain - pushing it is the owner's approval via a git-push proposal");
+parallelCmd.command("queue").requiredOption("--chat <id>","Chat the job reports back into").option("--spec <text>","The job spec (or use --plan)").option("--plan <file>","JSON plan file: {spec, slices:[{name,task,files}], concurrency, maxVerifyIterations, sliceTimeoutMs}").option("--slice <name=task>","One slice, repeatable: name=the slice's self-contained task",(v:string,prev:string[])=>[...prev,v],[] as string[]).option("--concurrency <n>","Slice concurrency cap (1-8, default 4)").option("--actor <name>","Acting profile","sam").description("Queue a parallel coding job: refuses until a git code root is designated and the selected engine is installed").action((o:{chat:string;spec?:string;plan?:string;slice:string[];concurrency?:string;actor:string})=>{const root=program.opts().workspace as string;let spec=o.spec??"";let slices:ParallelSliceSpec[]=[];let concurrency=o.concurrency?parseInt(o.concurrency,10):undefined;let maxVerifyIterations:number|undefined;let sliceTimeoutMs:number|undefined;if(o.plan){const plan=JSON.parse(readFileSync(o.plan,"utf8")) as {spec?:string;slices?:ParallelSliceSpec[];concurrency?:number;maxVerifyIterations?:number;sliceTimeoutMs?:number};spec=plan.spec??spec;slices=plan.slices??[];concurrency=plan.concurrency??concurrency;maxVerifyIterations=plan.maxVerifyIterations; sliceTimeoutMs=plan.sliceTimeoutMs;}for(const raw of o.slice){const eq=raw.indexOf("=");if(eq<1)throw new Error("--slice needs name=task, got: "+raw);slices.push({name:raw.slice(0,eq),task:raw.slice(eq+1)});}output(queueParallelJob(root,{actor:o.actor,chatId:o.chat,spec,slices,concurrency,maxVerifyIterations,sliceTimeoutMs}));});
+parallelCmd.command("list").option("--chat <id>","Only this chat").description("List parallel jobs, newest last").action((o:{chat?:string})=>output(listParallelJobs(program.opts().workspace).filter(j=>!o.chat||j.chatId===o.chat)));
+parallelCmd.command("show").argument("<job-id>").description("One parallel job in full, with its consolidated summary text").action((jobId:string)=>{const root=program.opts().workspace as string;const job=getParallelJob(root,jobId);if(!job)throw new Error("Unknown parallel job: "+jobId);output({job,summary:parallelSummaryText(job)});});
+parallelCmd.command("drain").description("Run one queued parallel job now: survey, concurrent slice fan-out in isolated worktrees, coordinator merge + battery, goldfish review of the merged diff").action(async()=>{const root=program.opts().workspace as string;output(await drainParallelJobs(root,{reviewDiff:parallelReviewer(root)}));});
+parallelCmd.command("push").argument("<job-id>").description("Propose pushing a finished parallel job's sam/par-* branch to origin: creates a git-push proposal on the ONE gate - nothing pushes until the owner approves it").action((jobId:string)=>{const root=program.opts().workspace as string;const job=getParallelJob(root,jobId);if(!job)throw new Error("Unknown parallel job: "+jobId);if(job.status!=="done"||!job.branch)throw new Error("Parallel job "+jobId+" is not a finished job with a branch to push (status: "+job.status+")");const a=proposeAction(root,{actor:job.actor,kind:"git-push",title:"Push "+job.branch+" ("+job.title.slice(0,80)+")",detail:JSON.stringify({branch:job.branch}),chatId:job.chatId});output({status:"pending_owner_approval",id:a.id,kind:a.kind,branch:job.branch,note:"Nothing pushes until the owner approves this proposal."});});
 const senseCmd=program.command("senses").description("Senses (Phase E item 2): the core profile's read-only Gmail and Calendar door, riding the gog reader (SAM_GOG_BIN, else gog on PATH) with a fixed argv - installing and authorizing the reader is the operator's act");
 senseCmd.command("status").description("Whether the senses reader is installed, and which senses exist (core profile only)").action(()=>output(sensesStatus()));
 senseCmd.command("mail").option("--query <text>","Gmail search string (default: the last 7 days of the inbox)").option("--max <n>","Max results, 1-25").description("Search the owner's Gmail, read-only (core profile's sense)").action(async(o:{query?:string;max?:string})=>output(await runSense(program.opts().workspace,"sam","mail",{query:o.query,max:o.max?Number(o.max):undefined})));
@@ -368,7 +389,7 @@ contextAuditCmd.command("show").description("The last recorded context audit, or
 const loopAuditCmd=program.command("loop-audit").description("The loop audit (HARNESS INTELLIGENCE item 3): SAM's turn loop scored in code - no model call - with functional checks over the real loop machinery (the verification gate over a synthetic ledger, the chat-turn verification note, the repeated-failure repair guard's signature and stub, route-tiered budgets, the open-loop store coming due on schedule, and the honest budget / loader / retry endings) plus the live loop state (verification state, open and due loops); a run records in .sam/loop-audit.db so loop changes are measured before/after");
 loopAuditCmd.command("run").description("Run the audit now over the live loop machinery and stores, record it, and print the scorecard as plain text (this is the sam-loop-audit script job's stdout)").action(()=>output(loopAuditText(runLoopAudit(program.opts().workspace))));
 loopAuditCmd.command("show").description("The last recorded loop audit, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readLoopAudit(program.opts().workspace)));
-const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 23 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
+const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 25 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
 evalBatteryCmd.command("run").description("Run the battery now against the real machinery, record it with its verdict against the previous run, and print the scorecard as plain text (this is the sam-eval-battery script job's stdout)").action(async()=>output(evalBatteryText(await runEvalBattery(program.opts().workspace))));
 evalBatteryCmd.command("show").description("The last recorded eval battery, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readEvalBattery(program.opts().workspace)));
 const vaultCmd=program.command("vault").description("The SAM vault (Dip ruling 2026-11-12): an owner-only store for the few keys SAM's hands may need, kept outside the SAM home and outside .sam (the backup never carries it, the workspace readers never reach it; directory 0700, store 0600). A credential is referenced by NAME only: the executor injects its value into a child process at run time - the consumers are git-clone and the owner-approved git-push, which gain the credential for their declared hosts over HTTPS via askpass, and a vault-bound MCP connector (sam pair), whose executor resolves the value at call time into its Authorization header alone - and every deposit, removal, and use is ledgered with name, purpose, and outcome, never the value. Deposit is operator-only: the value arrives from an env var, a file, or stdin, never from argv and never from a chat; no command here ever prints a value");
@@ -431,6 +452,12 @@ draftCmd.command("create").requiredOption("--to <name>","Who the draft is for").
 draftCmd.command("list").action(()=>output(listDrafts(program.opts().workspace)));
 draftCmd.command("show").argument("<id>").action((id:string)=>output(getDraft(program.opts().workspace,id)));
 draftCmd.command("remove").argument("<id>").description("Discard a draft (the only way a draft ends, besides the owner copying it out and sending it themselves)").action((id:string)=>output({removed:removeDraft(program.opts().workspace,id)}));
+const artifactCmd=program.command("artifacts").description("Artifacts: durable deliverables SAM makes for the owner (an html page or a markdown document), versioned in place at a stable /artifact/<id> path, visible only to the owning profile");
+artifactCmd.command("list").option("--profile <name>","Owning profile","sam").description("List one profile's artifacts: title, kind, current version, updated time, path").action((o:{profile:string})=>output(listArtifacts(program.opts().workspace,o.profile)));
+artifactCmd.command("show").argument("<id>").option("--profile <name>","Owning profile","sam").option("--version <n>","Read this historical version instead of the current one").description("Show one artifact with its content").action((id:string,o:{profile:string;version?:string})=>{const root=program.opts().workspace as string;const found=o.version?getArtifactVersion(root,id,Number(o.version),o.profile):getArtifact(root,id,o.profile);if(!found)throw new Error("Artifact not found for profile "+o.profile+": "+id);output(found);});
+artifactCmd.command("versions").argument("<id>").option("--profile <name>","Owning profile","sam").description("List an artifact's version history").action((id:string,o:{profile:string})=>output(listArtifactVersions(program.opts().workspace,id,o.profile)));
+artifactCmd.command("create").requiredOption("--title <title>","The deliverable's title").requiredOption("--kind <kind>","html or markdown").option("--file <path>","Read the content from this file").option("--content <text>","The content inline (or use --file)").option("--profile <name>","Owning profile","sam").description("Create an artifact at version 1").action((o:{title:string;kind:string;file?:string;content?:string;profile:string})=>output(createArtifact(program.opts().workspace,{profile:o.profile,title:o.title,kind:o.kind,content:o.file?readFileSync(o.file,"utf8"):(o.content??"")})));
+artifactCmd.command("update").argument("<id>").option("--title <title>","Rename the artifact with this version").option("--file <path>","Read the new content from this file").option("--content <text>","The new content inline (or use --file)").option("--profile <name>","Owning profile","sam").description("Revise an artifact: a new version of the SAME artifact at the SAME path").action((id:string,o:{title?:string;file?:string;content?:string;profile:string})=>output(updateArtifact(program.opts().workspace,id,{profile:o.profile,content:o.file?readFileSync(o.file,"utf8"):(o.content??""),title:o.title})));
 const corrCmd=program.command("corrections").description("Corrections (P6): owner corrections in a message, proposed as standing law through the approval gate - never instant law");
 corrCmd.command("detect").argument("<text>").description("Detection only: show the rule statement a message would propose; proposes nothing").action((text:string)=>output({correction:detectCorrection(text)}));
 corrCmd.command("check").argument("<profile>").argument("<text>").option("--chat <id>","Stamp the chat the correction came from").description("Detect a correction in a message and route it into the approval gate as a pending law proposal (deduped)").action((profile:string,text:string,o:{chat?:string})=>{const correction=detectCorrection(text);if(!correction){output({correction:null,proposal:null});return;}const routed=proposeCorrection(program.opts().workspace,{actor:profile,chatId:o.chat??null,text});output({correction,proposal:routed?.proposal??null,created:routed?.created??false});});
@@ -509,6 +536,7 @@ filesCmd.command("clear").argument("<name>").argument("<file>").description("Rem
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
+usageCmd.command("context").option("--actor <name>","Only this profile").description("Injected-context size per turn (Program H): chars and words measured at assembly in .sam/context.jsonl, with the memory-derived tiers (law, recall, standing, summary, history) broken out - the size metric that rides beside token spend").action((o:{actor?:string})=>output({today:contextToday(program.opts().workspace),allTime:contextSummary(program.opts().workspace,o.actor?{actor:o.actor}:{})}));
 program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
   const root=program.opts().workspace as string;
   let targets;
@@ -566,6 +594,7 @@ chats.command("unpin").argument("<id>").option("--profile <name>","Acting profil
 chats.command("branch").argument("<id>").argument("<title>").option("--profile <name>","Acting profile (default sam)").action((id:string,title:string,o:{profile?:string})=>output(branchManagedChat(program.opts().workspace,o.profile??"sam",id,title)));
 chats.command("archive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(archiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
 chats.command("unarchive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(unarchiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
+chats.command("organize").option("--profile <name>","Acting profile (default sam)").description("One organize pass over the acting profile's own chats (the engine behind sam_manage_chats action organize): names chats still carrying a placeholder title from their content, archives stale scratch/test/proof chats idle 7+ days. Reversible; never deletes, never pins. Prints the same summary the chat tool returns.").action(async(o:{profile?:string})=>output(await organizeChats(program.opts().workspace,o.profile??"sam")));
 chats.command("activity").description("Every chat with its last-message time and message count, newest activity first").action(()=>{const db=new ChatStore(program.opts().workspace);try{const act=new Map(db.lastActivity().map(a=>[a.chat_id,a] as const));output(db.list({includeArchived:true}).map(c=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0})).sort((x,y)=>String(y.lastMessageAt??"").localeCompare(String(x.lastMessageAt??""))));}finally{db.close();}});
 chats.command("search").argument("<query>").option("--profile <name>","Acting profile (default sam)").option("--limit <n>","Max hits (default 20)").description("Full-text search (FTS5, relevance-ranked, multi-term prefix) across the acting profile's own chats - the engine behind the sam_search_chats chat tool").action((query:string,o:{profile?:string;limit?:string})=>output(searchManagedChats(program.opts().workspace,o.profile??"sam",query,o.limit?Number(o.limit):20)));
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});
@@ -837,11 +866,22 @@ memory.command("search").argument("<query>").action((query:string)=>{
 memory.command("archive").argument("<id>").action((id:string)=>{
   const mem=new MemoryStore(dbPath()); try{output({archived:mem.archive(id)});}finally{mem.close();}
 });
+memory.command("suppress").argument("<phrase...>").option("--profile <name>","Profile the suppression binds","sam").description("Record a standing do-not-store instruction (Program H): the phrase is refused by every automatic memory capture path and by MemoryStore.add itself, from now on, until unsuppressed").action((phrase:string[],o:{profile:string})=>{
+  output(addSuppression(program.opts().workspace,{profile:o.profile,needle:phrase.join(" "),source:"cli"}));
+});
+memory.command("suppressions").option("--profile <name>","Only this profile").option("--all","Include revoked").description("List capture suppressions (standing do-not-store instructions), active first-class; the needle is shown because this is the operator's own door").action((o:{profile?:string;all?:boolean})=>{
+  const guard=new CaptureGuardStore(program.opts().workspace); try{output(guard.list(o.profile,!!o.all));}finally{guard.close();}
+});
+memory.command("unsuppress").argument("<id>").description("Revoke a capture suppression by id (a status flip, never a delete - the instruction's record survives like revoked law)").action((id:string)=>{
+  const guard=new CaptureGuardStore(program.opts().workspace); try{output({revoked:guard.revoke(id)});}finally{guard.close();}
+});
 
 const subagentCmd=program.command("subagent").description("Debug invisible helpers a chat turn started on its own. list, status, and cancel inspect them. The owner-facing path is the sam_spawn_subagent tool: the chat shows Working on it, then the folded answer, never the helper's own text. A child with no pinned connector runs on the plain chat path");
 subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
   const tools=o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):undefined;
-  output(await spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)}));
+  // A one-shot CLI spawn hires from its own invocation scope (Defect 3):
+  // the small pool, fresh for this command - never a lifetime ledger.
+  output(await withSpawnPool(smallSpawnPool("cli:spawn"),()=>spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)})));
 });
 subagentCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listSubagents(program.opts().workspace,o.profile)));
 subagentCmd.command("status").argument("<id>").action((id:string)=>{const found=getSubagent(program.opts().workspace,id);if(!found)throw new Error("Unknown sub-agent: "+id);output(found);});
@@ -984,5 +1024,25 @@ program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
   try{output({missions:db.list().length,memories:mem.list().length,operatives:reg.list().length,daemon:"use sam daemon status"});}
   finally{db.close();mem.close();reg.close();}
+});
+// Cold-install wiring (Program B): every command loads the
+// workspace's sam.env first (names not already in the real
+// environment; the environment wins), so a configured install works
+// in a fresh shell with nothing exported. `sam setup` writes that
+// file after verifying the key.
+program.hook("preAction",()=>{ loadWorkspaceEnv(resolve(program.opts().workspace)); });
+program.command("setup").description("Guided first-run setup: take the model provider key (hidden input, or --key-env <NAME> to read it from an environment variable), verify it with one real model call, and only then store it in the workspace's sam.env (0600), which every sam command loads automatically")
+.option("--key-env <name>","Take the API key from this environment variable (never as an argument value, never printed)")
+.option("--provider <id>","Model provider (guided setup wires minimax)","minimax")
+.option("--model <id>","Model to configure")
+.option("--force","Reconfigure even when a sam.env already exists")
+.action(async(o:{keyEnv?:string;provider:string;model?:string;force?:boolean})=>{
+  const explicitWorkspace=program.getOptionValueSource("workspace")==="cli";
+  const root=explicitWorkspace?resolve(program.opts().workspace):resolve(homedir(),"sam-home");
+  const io=terminalSetupIo();
+  try{
+    const result=await runSetup(root,io,{keyEnv:o.keyEnv,provider:o.provider,model:o.model,force:!!o.force});
+    if(result.status==="verify-failed"||result.status==="unsupported-provider")process.exitCode=1;
+  } finally { io.close(); }
 });
 program.parseAsync().catch((err:unknown)=>{console.error("SAM error:",err instanceof Error?err.message:String(err));process.exitCode=1;});

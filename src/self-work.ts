@@ -248,6 +248,28 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Accounting still never breaks a turn: a failed usage write returns null and the turn completes exactly as before",
      "A failed usage read still fails closed (one ledger line, then the rethrow) instead of folding to a false zero, exactly as its readers expect",
      "The full suite is green, including the accounting failure-ledger tests"]);
+  if (key.startsWith("context-failed:")) return base(
+    ["context-meter.ts", "agent-turn.ts"],
+    "Context metering stops failing: " + n + " ledgered context-meter failures, and a turn's injected-context size must land in .sam/context.jsonl instead of dying at the touch - while the meter is dead, per-turn context growth (the bloat class requirement 5 exists to catch) is invisible again, and a dead read folded into summaries would report zero context as truth.",
+    ["The next turns record their context lines in context.jsonl again instead of context-failed lines, and `sam usage context` returns the recorded turns",
+     "Exactly one context-failed ledger line still lands per genuinely failed touch, naming write or read and the verbatim reason, so the class stays countable",
+     "Metering still never breaks a turn: a failed context write returns null and the turn completes exactly as before",
+     "A failed context read still fails closed (one ledger line, then the rethrow) instead of folding to a false zero, exactly as its readers expect",
+     "The full suite is green, including the context-meter failure tests"]);
+  if (key === "fence-integrity-failed") return base(
+    ["fence-integrity.ts", "compaction.ts", "preferences.ts"],
+    "Fence integrity checks stop failing: " + n + " ledgered fence-integrity failures mean a compaction fold verified the profile's standing law against its before snapshot and found it MOVED - a changed law record or a lost identifier. Standing law is never the summarizer's to alter; a real movement means something outside compaction rewrote law mid-fold or the store is corrupt, and until the cause is found every fold on that profile refuses its compacted context.",
+    ["The next folds on the profile complete with the law snapshot byte-identical across the fold (same ids, same statements, every identifier present) instead of fence-integrity-failed lines",
+     "Exactly one fence-integrity-failed ledger line still lands per genuinely moved fence, naming the changed records and lost identifiers, so the class stays countable",
+     "The tamper control still fails the check: a deliberately altered after-read is refused by name in the tests, so the instrument is proven able to say no",
+     "The full suite is green, including the fence-integrity and compaction tests"]);
+  if (key.startsWith("episodes-failed:")) return base(
+    ["episodes.ts"],
+    "Episode evidence reads stop failing: " + n + " ledgered episodes-evidence failures mean a stored evidence row was not valid JSON when a consolidation write met it, and the row had to be rebuilt from the day's new messages alone - the day's earlier evidence was lost silently before this class existed, and a recurring cause (a writer producing torn rows) must be found rather than rebuilt around forever.",
+    ["The next consolidations read their stored evidence rows cleanly and merge the full day instead of episodes-failed lines",
+     "Exactly one episodes-failed ledger line still lands per genuinely corrupt row, naming the profile:date key and the verbatim reason, so the class stays countable",
+     "A corrupt row still never breaks the tick: the row rebuilds from the day's new messages and the episode for the day still lands",
+     "The full suite is green, including the episodes failure tests"]);
   if (key === "session-caps-failed") return base(
     ["session-caps.ts"],
     "The session-cap ledger stops failing: " + n + " ledgered session-caps failures, and a completed turn's spend record (or a cap trip) must land in .sam/session-caps.jsonl instead of dying at the append - while the write threw, a finished turn could be reported failed and a real model error masked by the accounting error in its place.",
@@ -387,6 +409,30 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Resolution still never breaks routing: coreActor still falls back to the core profile on a failed resolve exactly as before, a read already ledgered by the store is never recorded twice, and a failure line never carries any config content",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the config as the defaults, exactly as its readers expect, and an absent store still reads as the defaults with no line",
      "The full suite is green, including the dashboard config failure-ledger tests"]);
+  if (key.startsWith("link-failed:")) return base(
+    ["links.ts", "memory-recall.ts", "recall.ts", "own-tools.ts", "collab.ts"],
+    "Link store reads stop failing: '" + label + "' has ledgered " + n + " failures, and the link registry (.sam/links.db) must load instead of dying at the read - links are the only bridge between profiles and visibleScopes rides this read to decide which memory scopes an actor may see, so while it is dead every memory read either dies raw with the seam unnamed, is counted under the wrong seam, or is dressed as an ordinary tool error, and which failure a surface gets depends on which catch happens to wrap the call.",
+    ["The next memory reads, link lookups, and links list resolve their scopes again instead of link-failed lines",
+     "Exactly one link-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Scoping still fails closed exactly as before: a failed resolve rethrows instead of widening or narrowing an actor's scopes on a guess, a read already ledgered by the store is never recorded twice, and a failure line never carries a link record (group names and member lists are scoping data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the registry as no links, exactly as its readers expect, and an absent store still reads as no links / own-scope only with no line",
+     "The full suite is green, including the link failure-ledger tests"]);
+  if (key.startsWith("channel-failed:")) return base(
+    ["channels.ts", "telegram.ts", "pairing.ts", "bindings.ts", "heartbeat.ts", "status.ts"],
+    "Channel store reads stop failing: '" + label + "' has ledgered " + n + " failures, and the channel registry (.sam/channels.db) must load instead of dying at the read - channels are how the outside world talks to SAM and ownerIds is the fail-closed allowlist every Telegram message is checked against, so while the store is dead the bridge, pairing redemption, heartbeat delivery, and the status payload each die at the same touch with the seam unnamed or counted under the wrong seam, and which failure a surface gets depends on which catch happens to wrap the call.",
+    ["The next bridge polls, pairing reads, deliveries, and status reads resolve their channels again instead of channel-failed lines",
+     "Exactly one channel-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Routing still fails closed exactly as before: a failed read rethrows instead of folding the registry as no channels (which would silently lock every owner out, dressed as an empty allowlist), a read already ledgered by the store is never recorded twice, and a failure line never carries a channel record (names, profiles, and owner lists are routing data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no channels / no such channel with no line",
+     "The full suite is green, including the channel failure-ledger tests"]);
+  if (key.startsWith("pairing-failed:")) return base(
+    ["pairing.ts", "telegram.ts", "status.ts", "channels.ts"],
+    "Pairing store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the pairing store (.sam/pairing.db) must open, read, and write instead of dying at that seam - this store holds the pairing codes and the per-channel lockout guards, so while it is dead the status payload dies raw, a stranger's redemption dies mid-flow in the bridge with the seam unnamed, and the failure of the anti-brute-force record itself goes uncounted.",
+    ["The next status reads, pairing issues, and redemptions resolve their codes and guards again instead of pairing-failed lines",
+     "Exactly one pairing-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Pairing still fails closed exactly as before: a failed touch rethrows instead of folding the store as no codes / no guards (which would silently erase a live code and reset a lockout), a touch already ledgered by the store is never recorded twice, and a failure line never carries a pairing record (code hashes and guard counts are security data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as the empty snapshot with no line",
+     "The full suite is green, including the pairing failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -478,6 +524,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
   switch (line.kind) {
     case "tool-budget":
       return { key: "tool-budget", label: "tool-budget endings (exhaustion and step-limit)" };
+    case "budget-guardrail":
+      return { key: "budget-guardrail", label: "owner-turn budget guardrail trips (hard ceiling hit; turn closed with a synthesis from gathered material)" };
     case "loader-loop":
       return { key: "loader-loop", label: "loader loops (turns that only loaded tools)" };
     case "turn-failed": {
@@ -578,6 +626,18 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const phase = m ? m[1] : "unknown";
       return { key: "recall-failed:" + phase, label: "recall failures (" + phase + " step)" };
     }
+    case "context-failed": {
+      const m = summary.match(/^Context meter ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "context-failed:" + phase, label: "context meter failures (" + phase + " step)" };
+    }
+    case "fence-integrity-failed":
+      return { key: "fence-integrity-failed", label: "fence integrity failures (standing law moved across a compaction fold)" };
+    case "episodes-failed": {
+      const m = summary.match(/^Episodes evidence ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "episodes-failed:" + phase, label: "episode evidence failures (" + phase + " step)" };
+    }
     case "skill-catalog-failed": {
       const m = summary.match(/^Skill catalog ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
@@ -608,6 +668,21 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const phase = m ? m[1] : "unknown";
       return { key: "dashboard-config-failed:" + phase, label: "dashboard config store failures (" + phase + " step)" };
     }
+    case "link-failed": {
+      const m = summary.match(/^Link ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "link-failed:" + phase, label: "link store failures (" + phase + " step)" };
+    }
+    case "channel-failed": {
+      const m = summary.match(/^Channel ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "channel-failed:" + phase, label: "channel store failures (" + phase + " step)" };
+    }
+    case "pairing-failed": {
+      const m = summary.match(/^Pairing ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "pairing-failed:" + phase, label: "pairing store failures (" + phase + " step)" };
+    }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
@@ -622,6 +697,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     }
     case "source-citation-rejected":
       return { key: "source-citation-rejected", label: "source citations naming numbers outside the run's registered sources" };
+    case "artifact-failed": {
+      const m = summary.match(/^Artifact ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "artifact-failed:" + phase, label: "artifact store failures (" + phase + " step)" };
+    }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":

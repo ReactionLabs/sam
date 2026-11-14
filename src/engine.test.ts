@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { codeWrites, setCodeRoot } from "./code.js";
 import { verificationStatus } from "./verification.js";
-import { drainEngineTasks, engineArgv, engineBinary, engineStatus, listEngineTasks, queueEngineTask, validateEngineDetail, type EngineTask } from "./engine.js";
+import { defaultEngineRunner, drainEngineTasks, engineArgv, engineBinary, engineStatus, listEngineTasks, queueEngineTask, validateEngineDetail, type EngineTask } from "./engine.js";
 import { installFakeEngine } from "./fake-engine.js";
 import { decideAction, listActions, proposeAction } from "./actions.js";
 import { classifyProposal, saveApprovalPolicy } from "./approval-policy.js";
@@ -64,6 +64,19 @@ function fixture(opts: { gitInit?: boolean; testScript?: string } = {}) {
 function engineScript(f: { base: string }, body: string) {
   writeFileSync(join(f.base, "engine-work.mjs"), body);
 }
+
+test("the default runner closes the child's stdin: a stdin-reading engine gets EOF at spawn, not a timeout", async () => {
+  // Regression for the 2026-11-14 live defect: execFile leaves the
+  // child's stdin pipe open, and `codex exec` reads stdin to EOF
+  // before starting on its argv prompt, so every real Codex run
+  // hung to its timeout. The runner now ends stdin at spawn; a
+  // child that reads stdin to end must complete immediately.
+  const script = "let n=0; process.stdin.on('data', c => { n += c.length; }); process.stdin.on('end', () => { console.log('eof-after-' + n); });";
+  const outcome = await defaultEngineRunner(process.execPath, ["-e", script], process.cwd(), 10_000);
+  assert.equal(outcome.timedOut, false);
+  assert.equal(outcome.exitCode, 0);
+  assert.match(outcome.output, /eof-after-0/);
+});
 
 test("binary resolution: SAM_ENGINE_BIN wins, a missing binary reads not-installed cleanly", () => {
   const f = fixture();

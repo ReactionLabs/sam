@@ -1,5 +1,7 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { MemoryStore, MEMORY_RECORD_MAX_WORDS } from "./memory.js";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
@@ -80,6 +82,7 @@ const DIMENSIONS: Array<{ id: string; label: string; checks: CheckSpec[] }> = [
     { id: "recall-capped", label: "the recall block never exceeds its character cap", missing: "a character cap the fitted recall block actually respects", run: () => fitRecallBlock("header", oversizeSections()).length <= RECALL_MAX_CHARS },
     { id: "recall-relevant-protected", label: "the message-relevant section survives fitting", missing: "priority fitting that protects the message-relevant recall section from being shed first", run: () => fitRecallBlock("header", oversizeSections()).includes("Records relevant to this message:") },
     { id: "recall-omissions-marked", label: "shed recall lines are named by an omission marker, whole lines only", missing: "an omission marker naming shed recall lines (no silent mid-line slice)", run: () => /omitted, lowest priority first/.test(fitRecallBlock("header", oversizeSections())) },
+    { id: "hot-memory-budget", label: "a single memory record larger than the hot-memory budget is refused at write time (memory stays an index, not an archive)", missing: "a per-write word budget on memory records, enforced in MemoryStore.add (the 100k-char ceiling alone lets one record carry ~25k words)", run: () => { const dir = mkdtempSync(join(tmpdir(), "sam-context-audit-")); try { const store = new MemoryStore(join(dir, "missions.db")); try { store.add({ kind: "observation", content: "a small record", source: "context-audit", scope: "core" }); try { store.add({ kind: "observation", content: Array(MEMORY_RECORD_MAX_WORDS + 1).fill("word").join(" "), source: "context-audit", scope: "core" }); return false; } catch { return true; } } finally { store.close(); } } finally { rmSync(dir, { recursive: true, force: true }); } } },
   ] },
   { id: "law", label: "Standing law block", checks: [
     { id: "law-capped", label: "the law block never exceeds its character cap", missing: "a character cap on the law prompt block (the count cap alone allows ~10k chars)", run: () => lawPromptBlock(syntheticLaws(50, 200)).length <= LAW_PROMPT_MAX_CHARS },

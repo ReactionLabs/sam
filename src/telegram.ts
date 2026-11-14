@@ -218,8 +218,22 @@ export class DashboardSamClient implements SamClient {
   const created=await this.api("/chats",{method:"POST",body:JSON.stringify({title,agent:profile==="sam"?undefined:profile})}) as {id:string};
   return created.id;
  }
+ private lastReplyByChat=new Map<string,string>();
  async postMessage(chatId:string,content:string):Promise<string>{
-  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string;citation?:{available?:boolean;sourceTitle?:string;sourceChatId?:string;sourceMessageId?:string}|null}};
+  // Queue parity (Defect 2): the dashboard accepts the message into
+  // the chat's queue at any time (the old synchronous door 409'd a
+  // message sent while a turn ran, and the bridge lost it). wait:true
+  // holds this call until the queue drains and returns the reply in
+  // the old shape. Telegram cannot steer a running turn, so this is
+  // the floor the brief sets: queue-and-auto-run. A message that
+  // folded into a turn whose reply an earlier waiter already claimed
+  // returns silence - the answer already went out once.
+  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source,wait:true})}) as {reply?:{content?:string;id?:string|null;citation?:{available?:boolean;sourceTitle?:string;sourceChatId?:string;sourceMessageId?:string}|null}};
+  const replyId=result.reply?.id??null;
+  if(replyId){
+   if(this.lastReplyByChat.get(chatId)===replyId)return "";
+   this.lastReplyByChat.set(chatId,replyId);
+  }
   const text=result.reply?.content??"No response.";
   // Issue #92: a cited reply carries its "Found in chat history"
   // line onto Telegram too - the chat title always, and a deep

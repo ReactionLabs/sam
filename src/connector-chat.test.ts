@@ -130,7 +130,11 @@ test("connector chat budget exhaustion answers from partial results instead of d
           synthesisMessages = body.messages as Array<Record<string, unknown>>;
           return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: "Partial answer from the first two checks." } }] }), { headers: { "Content-Type": "application/json" } });
         }
-        const calls = [1, 2, 3].map(n => ({ id: "call-" + n, type: "function", function: { name: "mcp_whoami", arguments: "{}" } }));
+        // Distinct arguments on purpose: since duplicate suppression
+        // (2026-11-14) an IDENTICAL repeat returns the earlier result
+        // instead of executing, so a budget test must vary the calls
+        // to keep the call budget itself the binding constraint.
+        const calls = [1, 2, 3].map(n => ({ id: "call-" + n, type: "function", function: { name: "mcp_whoami", arguments: JSON.stringify({ query: "check-" + n }) } }));
         return new Response(JSON.stringify({ choices: [{ message: { role: "assistant", content: null, tool_calls: calls } }] }), { headers: { "Content-Type": "application/json" } });
       }
       if (body.method === "notifications/initialized") return new Response(null, { status: 202 });

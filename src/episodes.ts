@@ -3,6 +3,8 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
+import { activeSuppressions, needleMatches, recordSuppressionBlock, MemorySuppressedError, type CaptureSuppression } from "./capture-guard.js";
+import { recordActivity } from "./activity.js";
 
 // Episodic memory (program P4): a dated summary record per profile of what
 // happened in its chats that day, so SAM answers from a lived history, not
@@ -145,12 +147,49 @@ function mergeEvidenceChats(existing: EpisodeChat[], chats: EpisodeChat[]): Epis
   return [...byId.values()].slice(0, 50);
 }
 
+// One ledger line per corrupt evidence row met on the write
+// path (record-honesty gap, Program H audit): rowToChats folds a
+// parse failure to [] by design for the read door, but on the
+// WRITE path that fold was silent data loss - the merge rebuilt
+// the row from nothing and overwrote it, and the day's earlier
+// evidence vanished with no trace anywhere. The write now
+// detects the corrupt row itself and ledgers ONE episodes-failed
+// line (the key and the phase, never any content) before
+// rebuilding the row from the day's new messages.
+export function episodesFailureSummary(phase: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Episodes evidence " + phase + " failed: " + clean).slice(0, 200);
+}
+export function recordEpisodesFailure(root: string, actor: string, phase: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, actor, "episodes-failed", episodesFailureSummary(phase, reason));
+}
+
 export function writeEpisode(root: string, profile: string, date: string, chats: EpisodeChat[]): MemoryRecord | null {
   if (!validProfile(profile)) throw new Error("Invalid profile");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Invalid episode date");
   if (!chats.some(c => c.messages.length)) return null;
   const key = profile + ":" + date;
   let merged: EpisodeChat[] = [];
+  let evidenceCorrupt = false;
+  // The capture guard (Program H item A): a standing do-not-store
+  // instruction filters this profile's messages BEFORE anything
+  // is kept - the input filter keeps suppressed words out of the
+  // evidence row in the first place, and filtering the merged
+  // result scrubs excerpts an earlier, unguarded tick already
+  // stored, so the derived cache heals on the next consolidation
+  // after a suppression exists. The chat record itself is never
+  // touched: suppression governs memory capture, not history.
+  const suppressions = activeSuppressions(root, profile);
+  const droppedHits: CaptureSuppression[] = [];
+  const filterChats = (list: EpisodeChat[]): EpisodeChat[] => suppressions.length === 0 ? list : list.map(c => ({
+    ...c,
+    messages: c.messages.filter(m => {
+      const hit = suppressions.find(s => needleMatches(s.needle, m.content));
+      if (hit) { if (!droppedHits.includes(hit)) droppedHits.push(hit); return false; }
+      return true;
+    }),
+  }));
   const db = openEvidenceStore(root);
   try {
     const prefix = profile + ":";
@@ -160,7 +199,14 @@ export function writeEpisode(root: string, profile: string, date: string, chats:
     // other - the whole-file disease in miniature, closed the same way.
     const write = db.transaction(() => {
       const row = db.prepare("SELECT data FROM episode_evidence WHERE key = ?").get(key) as { data: string } | undefined;
-      merged = mergeEvidenceChats(row ? rowToChats(row.data) : [], chats);
+      let existing: EpisodeChat[] = [];
+      if (row) {
+        try {
+          const value: unknown = JSON.parse(row.data);
+          if (Array.isArray(value)) existing = value as EpisodeChat[]; else evidenceCorrupt = true;
+        } catch { evidenceCorrupt = true; }
+      }
+      merged = filterChats(mergeEvidenceChats(existing, filterChats(chats)));
       db.prepare("INSERT INTO episode_evidence (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data")
         .run(key, JSON.stringify(merged));
       // Keep only the newest 31 dates per profile.
@@ -171,11 +217,45 @@ export function writeEpisode(root: string, profile: string, date: string, chats:
     });
     write.immediate();
   } finally { db.close(); }
+  if (evidenceCorrupt) recordEpisodesFailure(root, profile, "read", new Error("stored evidence for " + key + " was not valid JSON; the row was rebuilt from the day's new messages"));
+  if (!merged.some(c => c.messages.length)) {
+    if (droppedHits.length) {
+      // The day's whole content is suppressed: no new record is
+      // written, and any live prior record for this date (from
+      // an earlier, unguarded tick) is archived - the episode
+      // lifecycle already archives-and-replaces derived records
+      // every tick, and a summary that can no longer be honestly
+      // regenerated must not keep surfacing in recall. The
+      // record itself is NOT deleted; it stays in the store,
+      // archived, under the owner's purge decision like
+      // everything else.
+      const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
+      try {
+        const scope = episodeScope(profile), source = episodeSource(profile, date);
+        for (const prior of store.list(undefined, [scope]).filter(r => r.source === source)) store.archive(prior.id);
+      } finally { store.close(); }
+      recordSuppressionBlock(root, profile, "episodes", droppedHits[0]);
+    }
+    return null;
+  }
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
     const scope = episodeScope(profile), source = episodeSource(profile, date);
     for (const prior of store.list(undefined, [scope]).filter(r => r.source === source)) store.archive(prior.id);
-    return store.add({ kind: "observation", content: summarizeEpisode(profile, date, merged), source, scope });
+    const record = store.add({ kind: "observation", content: summarizeEpisode(profile, date, merged), source, scope });
+    if (droppedHits.length) recordSuppressionBlock(root, profile, "episodes", droppedHits[0]);
+    return record;
+  } catch (error) {
+    // The store-level backstop: a summary line that still
+    // carries a needle (a chat title, a count line) is refused
+    // by MemoryStore.add itself. The flush degrades to no
+    // record this tick - the evidence row above is already
+    // filtered, so no later tick resurrects it either.
+    if (error instanceof MemorySuppressedError) {
+      recordSuppressionBlock(root, profile, "episodes", error.hit);
+      return null;
+    }
+    throw error;
   } finally { store.close(); }
 }
 

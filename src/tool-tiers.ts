@@ -61,7 +61,7 @@ export const LOADER_TOOL_DEF: Record<string, unknown> = {
   type: "function",
   function: {
     name: LOADER_TOOL_NAME,
-    description: "Load additional tools into this chat session by their exact names from the deferred tools list in your instructions. Loaded tools become callable from your next step onward and stay loaded for this chat. Load only what the task needs.",
+    description: "Load additional tools into this chat session by their exact names from the deferred tools list in your instructions. Loaded tools become callable from your next step onward and stay loaded for the whole chat - loading a tool that is already loaded is a no-op that changes nothing, so never load the same tool twice. Load only what the task needs, then use it.",
     parameters: { type: "object", properties: { names: { type: "array", items: { type: "string" } } }, required: ["names"], additionalProperties: false },
   },
 };
@@ -94,7 +94,18 @@ export function partitionTools(all: Array<Record<string, unknown>>, loadedNames:
     if (def && !picked.includes(def)) picked.push(def);
   };
   for (const name of CORE_OWN_TOOLS) pick(name);
-  for (const name of loadedNames) pick(name);
+  // Loaded tools take the remaining window slots NEWEST FIRST: the
+  // window carries UPFRONT_LIMIT defs and the core set alone fills
+  // 15, so an oldest-first slice silently cut every load after the
+  // first out of the window while the loader still acked it as
+  // loaded - the call then died on the not-loaded gate (live
+  // evidence 2026-11-14, acceptance B1: sam_orchestrate loaded,
+  // acked, and refused four times). A windowed-out load stays in
+  // the loaded set (the gate honors the set, not just the window)
+  // and re-loading it rotates it back into the window.
+  const loadedArr = [...loadedNames];
+  const room = Math.max(0, UPFRONT_LIMIT - picked.length);
+  for (const name of loadedArr.slice(Math.max(0, loadedArr.length - room))) pick(name);
   for (const def of all) { if (picked.length >= UPFRONT_LIMIT) break; if (!picked.includes(def)) picked.push(def); }
   const upfront = picked.slice(0, UPFRONT_LIMIT);
   const upfrontNames = new Set(upfront.map(toolNameOf));
@@ -109,7 +120,51 @@ export function partitionTools(all: Array<Record<string, unknown>>, loadedNames:
 export function deferredCatalogLine(deferred: Array<{ name: string; description: string }>): string {
   if (!deferred.length) return "";
   const entries = deferred.map(d => d.name + (d.description ? ": " + d.description : ""));
-  return (" More tools are available in this chat but not loaded yet: " + entries.join("; ") + ". Call " + LOADER_TOOL_NAME + " with the exact names to load them for this chat session before using them.").slice(0, 1600);
+  return (" More tools are available in this chat but not loaded yet: " + entries.join("; ") + ". Call " + LOADER_TOOL_NAME + " with the exact names to load them for this chat session before using them. Loads persist for the whole chat: a tool you loaded stays loaded, and loading it again is a no-op.").slice(0, 1600);
+}
+
+/** The model provider refuses a request carrying more than 50
+ *  messages (openai-compatible.ts request validation). A long
+ *  owner turn appends an assistant message plus one tool message
+ *  per call, every round, so a working turn crosses 50 messages
+ *  mid-flight and used to die with a raw "Invalid connector model
+ *  request" (acceptance evidence 2026-11-14: the recorded
+ *  tool-load-loop ask, re-run on the fixed build, worked for 17
+ *  rounds and then died on exactly this). The turn now folds its
+ *  OLDEST completed rounds out of the request history before each
+ *  call: whole assistant+tool blocks only, so the history stays
+ *  well-formed, the head (system + the owner's ask) and the newest
+ *  round always stay, and everything folded remains in the chat
+ *  transcript and the activity ledger - only the model's working
+ *  window shrinks. */
+export const REQUEST_MESSAGE_CAP = 44;
+
+export function trimRoundBlocks(messages: Array<Record<string, unknown>>, cap = REQUEST_MESSAGE_CAP): number {
+  if (messages.length <= cap) return 0;
+  let head = 0;
+  while (head < messages.length && messages[head].role !== "assistant") head++;
+  // Group the tail into blocks: an assistant message plus the tool
+  // messages that answer it (stray notes ride the following block).
+  const blocks: Array<[number, number]> = [];
+  let i = head;
+  while (i < messages.length) {
+    if (messages[i].role === "assistant") {
+      let j = i + 1;
+      while (j < messages.length && messages[j].role === "tool") j++;
+      blocks.push([i, j]);
+      i = j;
+    } else i++;
+  }
+  let dropped = 0;
+  // Drop oldest blocks (never the last one) until under the cap.
+  while (messages.length > cap && blocks.length > 1) {
+    const [start, end] = blocks.shift()!;
+    messages.splice(start, end - start);
+    dropped++;
+    const width = end - start;
+    for (const b of blocks) { b[0] -= width; b[1] -= width; }
+  }
+  return dropped;
 }
 
 /** Loader-loop guard (Turn honesty remainder, live evidence
@@ -136,7 +191,69 @@ export function loaderLoopLedgerSummary(executed: string[]): string {
 }
 
 export function loaderLoopFallbackAnswer(executed: string[]): string {
-  return "I stopped this turn because I kept loading tools without using them (" + executed.length + " calls made" + (executed.length ? ": " + executed.join(", ") : "") + ") - loading tools is not progress, so this answer is incomplete and no check was finished. Ask me to continue and I will start by using the tools already loaded for this chat.";
+  // A finished statement, per the Lane F ending doctrine (Defect 1,
+  // 2026-11-14): the turn stopped itself to avoid thrash, and what it
+  // says so is complete in itself - no "answer is incomplete", no
+  // "ask me to continue". The tools stay loaded for the chat, so the
+  // owner's next message starts from them without any ceremony.
+  return "I stopped this turn because I kept loading tools without using them (" + executed.length + " calls made" + (executed.length ? ": " + executed.join(", ") : "") + ") - loading tools is not progress, and repeating it would only burn the turn. The tools I loaded stay loaded for this chat, so your next message picks up with them ready; nothing needs re-loading.";
+}
+
+/** The acknowledgement a repeat load returns (Defect 1): a loader call
+ *  whose every valid name is already loaded for this chat is a no-op -
+ *  it spends no budget, executes nothing, and says plainly that the
+ *  tools are already there to be called. */
+export function alreadyLoadedAck(already: string[], unknown: string[]): Record<string, unknown> {
+  return {
+    status: "already-loaded",
+    alreadyAvailable: already,
+    unknown,
+    note: "These tools are already loaded for this chat and stay loaded - loading them again does nothing. Call the tool itself on your next step.",
+  };
+}
+
+/** Preparation-loop guard (Defect 1 generalization, 2026-11-14): the
+ *  recorded loop interleaved sam_orchestrate calls that created no
+ *  lanes between the loads, which kept resetting the loader-only
+ *  streak while the turn still made no progress. A round is
+ *  preparation-only when every call it executed was preparation: a
+ *  tool load, or a hire call (sam_orchestrate / sam_spawn_subagent)
+ *  whose result is marked noProgress because it created nothing. */
+export const PREPARATION_CALLS: ReadonlySet<string> = new Set([LOADER_TOOL_NAME, "sam_orchestrate", "sam_spawn_subagent"]);
+
+export function isPreparationOnlyRound(roundCalls: string[], roundProgress: boolean): boolean {
+  return roundCalls.length > 0 && !roundProgress && roundCalls.every(n => PREPARATION_CALLS.has(n));
+}
+
+export function prepLoopLedgerSummary(executed: string[], pureLoader: boolean): string {
+  if (pureLoader) return loaderLoopLedgerSummary(executed);
+  return "Preparation loop stopped: " + LOADER_LOOP_LIMIT + " consecutive preparation-only rounds, " + executed.length + " calls used (" + (executed.join(", ") || "none") + "); loads and hire calls that created nothing are preparation, not progress";
+}
+
+export function prepLoopSteer(): string {
+  return "Preparation-loop guard: you have spent two steps in a row on preparation - loading tools, or hire calls that created nothing - without using a single loaded tool. Preparation is not progress. The loader is now OFF for the rest of this turn. On your next step, call one of the tools already loaded for this chat and do the work, or answer from what you already have.";
+}
+
+export function loaderDisabledStubContent(): string {
+  return JSON.stringify({
+    error: "Tool loading is off for the rest of this turn (preparation-loop guard) - the call was not executed",
+    note: "The tools already loaded for this chat stay loaded. Call one of them, or answer from what you have.",
+  });
+}
+
+/** Mid-turn owner steering (Defect 2): the note the loop appends when
+ *  the owner's burst arrives at a tool-round boundary. The latest
+ *  message governs; the earlier text stays as context. */
+export function steerSystemNote(count: number): string {
+  return "The owner sent " + (count === 1 ? "a new message" : count + " new messages") + " while you were working (they follow as user messages). The LATEST instruction governs: apply any correction, drop anything the owner neverminded, keep everything else moving, and do not restart work that is still valid.";
+}
+
+export function stopSystemNote(): string {
+  return "The owner said stop. Do not start anything new. Close this turn now: say plainly what was done, what was not done, and what is still queued or running, in a few lines.";
+}
+
+export function stopFallbackAnswer(executed: string[]): string {
+  return "Stopped, as asked. Work done so far this turn: " + (executed.length ? executed.join(", ") : "nothing had run yet") + ". Nothing else was started.";
 }
 
 export function notLoadedStubContent(name: string): string {
@@ -222,6 +339,25 @@ export function loadedTools(root: string, chatId: string): string[] {
   try {
     const row = db.prepare("SELECT data FROM tool_loads WHERE chat_id = ?").get(chatId) as { data: string } | undefined;
     return row ? parseLoadedNames(row.data) : [];
+  } finally { db.close(); }
+}
+
+/** Rotate already-loaded names to the newest end of the stored
+ *  load order, so a re-load brings a windowed-out tool back into
+ *  the request window (see partitionTools). Order-only rewrite;
+ *  the set itself never changes here. */
+export function touchToolLoads(root: string, chatId: string, names: string[]): void {
+  if (!names.length || !toolLoadsStoreExists(root)) return;
+  const current = loadedTools(root, chatId);
+  if (!current.length) return;
+  const wanted = names.filter(n => current.includes(n));
+  if (!wanted.length) return;
+  const next = [...current.filter(n => !wanted.includes(n)), ...wanted];
+  if (next.every((n, i) => n === current[i])) return;
+  const db = openToolLoadsStore(root);
+  try {
+    db.prepare("INSERT INTO tool_loads (chat_id, data) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET data = excluded.data")
+      .run(chatId, JSON.stringify(next));
   } finally { db.close(); }
 }
 

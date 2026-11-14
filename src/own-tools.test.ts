@@ -203,7 +203,11 @@ test("own tools: budget exhaustion stubs extra calls, answers from partial resul
   const fake={
    async completeConnectorTurn(_model:string,messages:Array<Record<string,unknown>>,tools:unknown[]){
     step++;
-    if(step===1)return {content:null,calls:[{id:"c1",name:"sam_memory_list",args:{}},{id:"c2",name:"sam_memory_list",args:{}},{id:"c3",name:"sam_memory_list",args:{}}]};
+    // Distinct calls on purpose: since duplicate suppression
+    // (2026-11-14) an identical repeat returns the earlier result
+    // instead of executing, so a budget test varies the calls to
+    // keep the call budget itself the binding constraint.
+    if(step===1)return {content:null,calls:[{id:"c1",name:"sam_memory_list",args:{}},{id:"c2",name:"sam_memory_search",args:{query:"a"}},{id:"c3",name:"sam_memory_search",args:{query:"b"}}]};
     // Synthesis step (tool-free): the transcript must be valid - every
     // tool_call answered - and the stub must say the budget ran out.
     const calledIds=messages.flatMap(m=>Array.isArray(m.tool_calls)?(m.tool_calls as Array<{id:string}>).map(c=>c.id):[]);
@@ -220,7 +224,7 @@ test("own tools: budget exhaustion stubs extra calls, answers from partial resul
   assert.equal(logged.length,1);
   assert.match(logged[0].summary,/2\/2 calls used/);
   assert.match(logged[0].summary,/sam_memory_list/);
-  assert.match(logged[0].summary,/not executed: sam_memory_list/);
+  assert.match(logged[0].summary,/not executed: sam_memory_search/);
  }finally{rmSync(root,{recursive:true,force:true});}
 });
 

@@ -15,6 +15,17 @@ test("dashboard page: the inline script parses as valid JavaScript",()=>{
   assert.match(dashboardHtml,/id="toBottom"/);
 });
 
+test("dashboard page: every POST carries the dashboard request header (Defect 2 acceptance find, 2026-11-14)",()=>{
+  // The server refuses any POST without X-SAM-Request: dashboard.
+  // send()'s auto-create fetch shipped without it, so the first
+  // message from the empty state 400'd, the text stayed in the box,
+  // and the send silently did nothing - the exact dead end the
+  // burst work exists to kill. Pin every POST in the page.
+  const posts=[...dashboardHtml.matchAll(/fetch\(api\+'[^']*',\{method:'POST',headers:\{([^}]*)\}/g)];
+  assert.ok(posts.length>=5,"the page's POSTs are found");
+  for(const p of posts) assert.match(p[1],/X-SAM-Request/, "a POST is missing the dashboard header: "+p[0].slice(0,80));
+});
+
 test("dashboard page: model routing + spend surface (P11)",()=>{
   assert.match(dashboardHtml,/id="usage"/);
   assert.match(dashboardHtml,/function renderUsage\(/);
@@ -68,8 +79,13 @@ test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:0
   // send() must never overwrite a bubble with textContent again - that
   // destroyed the copy button on every live reply. It updates through
   // the bubble setter, and the setter keeps the copy closure current.
+  // Defect 2 (2026-11-14): send() no longer awaits a reply at all - it
+  // queues the message and the queue watch re-renders the thread from
+  // the chat payload, so replies arrive through the same bubble()
+  // construction (and its copy closure) as history does.
   assert.doesNotMatch(dashboardHtml,/lastElementChild\.textContent/);
-  assert.match(dashboardHtml,/pending\.setText\(d\.reply\.content\)/);
+  assert.match(dashboardHtml,/function renderThreadData\(data\)/);
+  assert.match(dashboardHtml,/startQueueWatch\(\)/);
   assert.match(dashboardHtml,/setText\(next\)\{holder\.text=next/);
   // Team (agent) messages carry the same affordance.
   assert.match(dashboardHtml,/copyButton\(\(\)=>event\.content\)/);
@@ -108,7 +124,12 @@ test("dashboard page: sidebar sections actually navigate (owner defect 2026-11-0
 });
 
 test("dashboard page: skill visibility + reaction badges surface (2026-11-10)", () => {
-  assert.match(dashboardHtml, /userReaction/);
+  // Defect 2 (2026-11-14): reactions no longer ride the send response
+  // (there is no synchronous reply anymore); they arrive on the
+  // message rows themselves and are applied on render and by the
+  // reaction sync - the badge surface is unchanged.
+  assert.match(dashboardHtml, /syncReactions/);
+  assert.match(dashboardHtml, /m\.reaction/);
   assert.match(dashboardHtml, /lastSkill/);
   assert.match(dashboardHtml, /setReaction/);
   assert.match(dashboardHtml, /\.reaction\{/);
@@ -128,9 +149,12 @@ test("dashboard page: calm presentation and working state (sprint 3 item 6)", ()
   assert.match(dashboardHtml, /const WORK_FRAMES=\['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'\]/);
   assert.match(dashboardHtml, /const WORK_VERBS=\['Thinking','Reading','Considering','Weighing','Drafting','Checking'\]/);
   assert.match(dashboardHtml, /Thought for /);
-  assert.match(dashboardHtml, /pending\.beginWork\(\)/);
+  // Defect 2 (2026-11-14): the working bubble is the queue watch's,
+  // shown while the chat's turn is active, and replies land through
+  // the thread re-render - same braille wait, same setters.
+  assert.match(dashboardHtml, /workBubble\.beginWork\(\)/);
   assert.match(dashboardHtml, /setText\(next\)\{holder\.text=next/);
-  assert.match(dashboardHtml, /pending\.setText\(d\.reply\.content\)/);
+  assert.match(dashboardHtml, /renderThreadData\(data\)/);
   // The controls the restyle must not rewire.
   assert.match(dashboardHtml, /el\('toBottom'\)\.onclick/);
   assert.match(dashboardHtml, /function actionCard\(/);

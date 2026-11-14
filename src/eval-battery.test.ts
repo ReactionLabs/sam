@@ -7,7 +7,7 @@ import { readActivity } from "./activity.js";
 import { buildEvalBattery, evalBatteryText, EVAL_TASK_TOTAL, readEvalBattery, runEvalBattery } from "./eval-battery.js";
 
 // HARNESS INTELLIGENCE item 4: the behavior eval battery. The
-// 24 tasks run the REAL machinery in scratch state (the stack
+// 25 tasks run the REAL machinery in scratch state (the stack
 // watch's counters, recall and note tiers, the ONE gate's
 // policy functions, the verification ledger, the code store,
 // the senses/engine probes, the door guard pack), a run
@@ -29,7 +29,7 @@ test("eval-battery: all 24 realistic tasks pass on the current harness", async (
     assert.equal(battery.verdict, "first-run");
     assert.equal(battery.previous, null);
     const perCategory = Object.fromEntries(battery.categories.map(c => [c.id, c.passed + "/" + c.total]));
-    assert.deepEqual(perCategory, { inquiries: "4/4", memory: "7/7", gate: "6/6", coding: "3/3", limits: "4/4" });
+    assert.deepEqual(perCategory, { inquiries: "4/4", memory: "8/8", gate: "6/6", coding: "3/3", limits: "4/4" });
     assert.match(evalBatteryText(battery), /Findings: none/);
     assert.match(evalBatteryText(battery), /verdict: first-run/);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -50,8 +50,8 @@ test("eval-battery: a run records to SQLite, the next run holds against it, and 
     assert.deepEqual(second.previous, { at: first.at, passed: first.overall.passed, total: first.overall.total });
     const lines = readActivity(root, 50).filter(l => l.kind === "eval-battery");
     assert.equal(lines.length, 2);
-    assert.match(lines[0].summary, /Eval battery recorded: 24\/24 tasks, verdict first-run/);
-    assert.match(lines[1].summary, /verdict held \(was 24\/24\)/);
+    assert.match(lines[0].summary, /Eval battery recorded: 25\/25 tasks, verdict first-run/);
+    assert.match(lines[1].summary, /verdict held \(was 25\/25\)/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

@@ -1,8 +1,9 @@
 import { createServer, type Server } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
-import { buildStatusPayload } from "./status.js";
+import { buildStatusPayload, dashboardBuildId } from "./status.js";
+import { runInspectorForChat, panelMemory, panelFiles } from "./run-inspector.js";
 import { runChatTurn } from "./agent-turn.js";
 import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore } from "./preferences.js";
@@ -17,7 +18,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
 import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } from "./chat-citations.js";
+import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
+import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
+import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resumeChatQueues } from "./chat-queue.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -76,11 +80,14 @@ async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'
 refresh();setInterval(refresh,10000);
 </script></body></html>`;
 function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}
+// The build id lives in status.ts (dashboardBuildId) so the status
+// payload is identical on every door; this server stamps it into the
+// served page, whose poll compares the two.
+
 export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
-  const pending=new Set<string>();
   const doorLimiter=new RateLimiter(30,3600000,2000);
   const doorGuard=new DoorAbuseGuard();
   const server:Server=createServer(async(req,res)=>{
@@ -95,6 +102,11 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     const post=async()=>{
       if(req.headers["x-sam-request"]!=="dashboard"||!String(req.headers["content-type"]??"").startsWith("application/json"))throw Error("Invalid dashboard request");
       let body="";for await(const chunk of req){body+=chunk.toString("utf8");if(body.length>16000)throw Error("Request too large");}
+      const value:unknown=JSON.parse(body);if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid JSON body");return value as Record<string,unknown>;
+    };
+    const postArtifact=async()=>{
+      if(req.headers["x-sam-request"]!=="dashboard"||!String(req.headers["content-type"]??"").startsWith("application/json"))throw Error("Invalid dashboard request");
+      let body="";for await(const chunk of req){body+=chunk.toString("utf8");if(body.length>ARTIFACT_CONTENT_MAX_BYTES+65536)throw Error("Request too large");}
       const value:unknown=JSON.parse(body);if(!value||typeof value!=="object"||Array.isArray(value))throw Error("Invalid JSON body");return value as Record<string,unknown>;
     };
     const route=`/api/${token}`;
@@ -142,6 +154,10 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         json(200,{identity,summary,leads});
       }catch(e){const m=e instanceof Error?e.message:"Connector request failed";json(400,{error:m.startsWith("MCP ")||m.startsWith("Connector ")||m.startsWith("Required ")||m.startsWith("Tool ") ?m:"Connector request failed"});}return;
     }
+    const autotitleMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/autotitle$"));
+    if(req.method==="POST"&&autotitleMatch){
+      try{const body=await post();const placeholder=typeof body.placeholder==="string"?body.placeholder:"";const title=await autotitleChat(workspace,autotitleMatch[1],placeholder);json(200,{title});}catch{json(400,{error:"Unable to name chat"});}return;
+    }
     const branchMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/branch$"));
     if(req.method==="POST"&&branchMatch){
       try{const body=await post();if(typeof body.title!=="string")throw Error("Invalid branch title");const db=new ChatStore(workspace);try{json(201,db.branch(branchMatch[1],body.title));}finally{db.close();}}catch{json(400,{error:"Unable to branch chat"});}return;
@@ -155,22 +171,84 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
       }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
     }
+    const runMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/run$"));
+    if(runMatch && req.method==="GET"){
+      try{json(200,runInspectorForChat(workspace,runMatch[1]));}catch{json(404,{error:"Chat not found"});}return;
+    }
+    const panelMatch=req.url?.match(new RegExp("^/api/"+token+"/panel/(memory|files)(\\?.*)?$"));
+    if(panelMatch && req.method==="GET"){
+      const q=new URLSearchParams((panelMatch[2]||"").slice(1));const profile=(q.get("profile")||"sam").slice(0,64);
+      try{
+        if(panelMatch[1]==="memory")json(200,panelMemory(workspace,profile,q.get("q")||"",q.get("id")||undefined));
+        else json(200,panelFiles(workspace,profile));
+      }catch{json(500,{error:"Panel unavailable"});}return;
+    }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,match[1]);}catch{/* sources are garnish the same way */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations,sources});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,match[1]);}catch{/* sources are garnish the same way */}let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,match[1]);}catch{/* artifacts are garnish the same way */}let queue:unknown[]=[];let turnActive=false;try{queue=listChatQueue(workspace,match[1]);turnActive=chatTurnActive(workspace,match[1]);}catch{/* the queue view is garnish the same way */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations,sources,artifacts,queue,turnActive});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
     }
     if(match && req.method==="POST" && match[2]){
-      const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
-      pending.add(id);
+      // Message bursts (Defect 2): a message is accepted at any time,
+      // busy or not - it joins the chat's queue (chat-queue.ts) and is
+      // never refused or silently dropped. The default answer is 202
+      // with the queue receipt; the surface watches the queue through
+      // GET. A client that needs the old synchronous shape (the
+      // Telegram bridge) passes wait:true and gets the reply once the
+      // queue has drained, in the same payload as before.
+      const id=match[1];
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
         const source=sourceFromApiBody(body.source);
         const turnStart=new Date().toISOString();
-        const reply=await runChatTurn(workspace,id,body.content,{source});
-        const result={message:{role:"assistant" as const,content:reply}};
-        let userReaction:string|null=null;let replyId:string|null=null;let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
-        json(200,{reply:{...result.message,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart)});
-      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}finally{pending.delete(id);}return;
+        const receipt=enqueueChatMessage(workspace,{chatId:id,content:body.content,source});
+        if(body.wait!==true){json(202,{status:receipt.status,id:receipt.id,...(receipt.effect?{effect:receipt.effect}:{})});return;}
+        let timedOut=false;
+        try{await awaitChatQueue(workspace,id,10*60*1000);}catch{timedOut=true;}
+        if(timedOut){json(202,{status:"queued",id:receipt.id});return;}
+        const settled=listChatQueue(workspace,id,20).find(q=>q.id===receipt.id);
+        if(settled?.status==="failed"){json(400,{error:"Message failed. Check model configuration and server logs."});return;}
+        if(receipt.status==="consumed"){json(200,{reply:{role:"assistant",content:"",id:null,citation:null,sources:null},userReaction:null,actions:[]});return;}
+        let userReaction:string|null=null;let replyId:string|null=null;let replyText="";let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;replyText=msgs[i].content;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
+        let turnArtifacts:ArtifactSummary[]=[];try{turnArtifacts=artifactsForChat(workspace,id).filter(a=>a.updatedAt>=turnStart);}catch{/* the artifact card is garnish: a dead artifact store never takes the reply down */}
+        json(200,{reply:{role:"assistant",content:replyText,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart),artifacts:turnArtifacts});
+      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}return;
+    }
+    // Artifacts API (owner door, under the dashboard token like every
+    // other /api route): list/get/create/update plus version history.
+    // Reads and writes are profile-scoped in the store; a cross-profile
+    // id reads as not found. Writes ride postArtifact (the standard
+    // post cap of 16000 chars cannot hold a deliverable; the store's
+    // own named byte cap is the real limit).
+    const artifactApiUrl=new URL(req.url??"","http://localhost");
+    const artifactApi=artifactApiUrl.pathname.match(new RegExp("^"+route+"/artifacts(?:/([0-9a-f-]{36}))?(?:/(versions))?$"));
+    if(artifactApi){
+      const profile=artifactApiUrl.searchParams.get("profile")||"sam";
+      try{
+        if(req.method==="GET"&&!artifactApi[1]){json(200,{artifacts:listArtifacts(workspace,profile)});return;}
+        if(req.method==="POST"&&!artifactApi[1]){
+          const body=await postArtifact();
+          const made=createArtifact(workspace,{profile:typeof body.profile==="string"?body.profile:profile,title:typeof body.title==="string"?body.title:"",kind:typeof body.kind==="string"?body.kind:"",content:typeof body.content==="string"?body.content:"",chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
+          json(201,made);return;
+        }
+        const artifactId=artifactApi[1];
+        if(!artifactId){res.writeHead(405);res.end();return;}
+        if(req.method==="GET"&&artifactApi[2]==="versions"){
+          if(!getArtifact(workspace,artifactId,profile)){json(404,{error:"Artifact not found"});return;}
+          json(200,{versions:listArtifactVersions(workspace,artifactId,profile)});return;
+        }
+        if(req.method==="GET"){
+          const versionParam=artifactApiUrl.searchParams.get("version");
+          const found=versionParam?getArtifactVersion(workspace,artifactId,Number(versionParam),profile):getArtifact(workspace,artifactId,profile);
+          if(!found){json(404,{error:"Artifact not found"});return;}
+          json(200,found);return;
+        }
+        if(req.method==="PUT"||req.method==="POST"){
+          const body=await postArtifact();
+          const updated=updateArtifact(workspace,artifactId,{profile:typeof body.profile==="string"?body.profile:profile,content:typeof body.content==="string"?body.content:"",title:typeof body.title==="string"?body.title:undefined,chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
+          json(200,updated);return;
+        }
+        res.writeHead(405);res.end();return;
+      }catch(e){json(400,{error:e instanceof Error?e.message:"Artifact request failed"});return;}
     }
     const doorMatch=/^\/mini\/([0-9a-f]{32,64})(\/(message|history))?(\?.*)?$/.exec(req.url??"");
     if(doorMatch){
@@ -206,11 +284,11 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const visitorDoor=doorModeForKey(workspace,doorMatch[1])==="visitor";
           const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName==="sam"?null:miniName,{visitor:visitorDoor}).id;}finally{store.close();}};
           const chatId=sessionChat(workspace,miniName,session,makeChat);
-          try{const reply=await runChatTurn(workspace,chatId,content.trim());json(200,{reply:{role:"assistant",content:reply}});}
+          try{const reply=await runChatTurn(workspace,chatId,content.trim(),{surface:"scoped"});json(200,{reply:{role:"assistant",content:reply}});}
           catch(error){
             if(error instanceof Error&&error.message==="Chat history limit reached"){
               const fresh=rotateSessionChat(workspace,miniName,session,makeChat);
-              const reply=await runChatTurn(workspace,fresh,content.trim());json(200,{reply:{role:"assistant",content:reply}});
+              const reply=await runChatTurn(workspace,fresh,content.trim(),{surface:"scoped"});json(200,{reply:{role:"assistant",content:reply}});
             }else throw error;
           }
         }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";console.error("[SAM door chat]",safe,"| cause:",message);json(400,{error:safe});}
@@ -222,7 +300,34 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     // Stable door: the dashboard token rotates on every start. Clients that
     // bookmark /sam (the Rust CLI, a reloaded page) get the current token URL.
     if(req.url==="/sam"||req.url==="/sam/"){res.writeHead(302,{Location:"/dashboard/"+token});res.end();return;}
-    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
+    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml.replaceAll("__SAM_BUILD_ID__",dashboardBuildId));return;}
+    // Artifact reading view at the stable, token-free path
+    // /artifact/<uuid>: the link survives dashboard token rotation the
+    // same way /sam does, and the unguessable id is the capability, as
+    // with the mini-door keys. The shell's CSP replaces the global one
+    // (it must frame the content path); raw html content is served at
+    // /content under ARTIFACT_CONTENT_CSP - no network, opaque-origin
+    // sandbox - so artifact scripts can never reach this API or its
+    // token. A ?version=<n> reads that historical version.
+    const artifactReadUrl=new URL(req.url??"","http://localhost");
+    const artifactContentMatch=/^\/artifact\/([0-9a-f-]{36})\/content$/.exec(artifactReadUrl.pathname);
+    const artifactPageMatch=/^\/artifact\/([0-9a-f-]{36})$/.exec(artifactReadUrl.pathname);
+    if(artifactContentMatch||artifactPageMatch){
+      const readId=(artifactContentMatch??artifactPageMatch)![1];
+      const versionParam=artifactReadUrl.searchParams.get("version");
+      let artifact=null;try{artifact=versionParam?getArtifactVersion(workspace,readId,Number(versionParam)):getArtifact(workspace,readId);}catch{artifact=null;}
+      if(!artifact){res.writeHead(404);res.end();return;}
+      res.setHeader("Content-Type","text/html; charset=utf-8");
+      if(artifactContentMatch){
+        res.setHeader("Content-Security-Policy",ARTIFACT_CONTENT_CSP+"; sandbox allow-scripts");
+        res.end(artifact.kind==="markdown"?"<!doctype html><meta charset=\"utf-8\">"+renderMarkdownArtifact(artifact.content):artifact.content);
+      }else{
+        res.setHeader("Content-Security-Policy","default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src 'self'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'");
+        let versions:ReturnType<typeof listArtifactVersions>=[];try{versions=listArtifactVersions(workspace,readId);}catch{/* history is garnish */}
+        res.end(artifactReadingHtml(artifact,versions));
+      }
+      return;
+    }
     const statusParts=(req.url??"").split("?");
     const bearer=typeof req.headers["authorization"]==="string"&&req.headers["authorization"].startsWith("Bearer ")?req.headers["authorization"].slice(7):"";
     const queryToken=new URLSearchParams(statusParts[1]??"").get("token")??"";
@@ -239,6 +344,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     res.writeHead(404);res.end();
   });
   await new Promise<void>((done,fail)=>{server.once("error",fail);server.listen(port,"127.0.0.1",()=>{server.off("error",fail);done();});});
+  // Bursts that outlived a restart resume draining on their own.
+  try{const resumed=resumeChatQueues(workspace);if(resumed.length)console.log("SAM dashboard: resumed message queues for "+resumed.length+" chat(s)");}catch{/* a dead queue store never blocks the dashboard */}
   console.log(`SAM dashboard: http://127.0.0.1:${port}/dashboard/${token}`);
   console.log("Read-only local dashboard. Press Ctrl+C to stop.");
   await new Promise<void>(done=>{const stop=()=>server.close(()=>done());process.once("SIGINT",stop);process.once("SIGTERM",stop);});

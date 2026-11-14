@@ -473,6 +473,7 @@ const GIT_COMMANDS: Record<string, { args: string[]; description: string }> = {
   "git-status": { args: ["status", "--short", "--branch", "--untracked-files=normal"], description: "Read-only git status of the code root" },
   "git-diff": { args: ["-c", "core.pager=cat", "diff", "--no-ext-diff", "--no-textconv", "--", "."], description: "Read-only git diff of the code root" },
   "git-log": { args: ["log", "--oneline", "-20"], description: "The last 20 commits of the code root (read-only)" },
+  "git-latest-files": { args: ["log", "-1", "--name-only", "--format=%H %s"], description: "The latest commit and the paths it changed (read-only)" },
 };
 const AGENT_REACH_COMMANDS: Record<string, { args: string[]; description: string }> = {
   "agent-reach-channels": { args: ["channels"], description: "agent-reach: list its channels and actions (read-only; the first allowlisted external command)" },

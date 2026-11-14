@@ -116,7 +116,12 @@ test("dashboard, telegram, api, and the ts cli stamp their own source", async ()
   assert.match(cli, /new DashboardSamClient\([\s\S]*?,"telegram"\)/);
   assert.match(cli, /new DashboardSamClient\([\s\S]*?,"api"\)/);
   assert.match(dash, /sourceFromApiBody\(body\.source\)/);
-  assert.match(dash, /runChatTurn\(workspace,id,body\.content,\{source\}\)/);
+  // Defect 2 (2026-11-14): the dashboard no longer runs the turn
+  // inline; it enqueues with the surface's source stamped, and the
+  // queue drain runs the turn with that same source.
+  assert.match(dash, /enqueueChatMessage\(workspace,\{chatId:id,content:body\.content,source\}\)/);
+  const queue = readFileSync(new URL("../src/chat-queue.ts", import.meta.url), "utf8");
+  assert.match(queue, /source: items\[0\]\.source/);
 });
 
 test("each client source is stored on the turn and the model sees it as metadata", async () => {

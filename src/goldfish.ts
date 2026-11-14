@@ -290,3 +290,62 @@ export function sessionGate(root: string): { closable: boolean; outcome: "done" 
   }
   return { closable: false, outcome: null, reasons: ["Goldfish review has not covered the current changes (" + goldfish.uncoveredChanges + " uncovered); same-context self-review does not count."] };
 }
+
+/** The diff-carrying sibling of runGoldfishReview (Program E,
+ *  2026-11-14): the parallel coding coordinator's merged result
+ *  never enters the workspace change ledger - its changes live on
+ *  git branches in isolated worktrees, by design, so the serial
+ *  paths' coverage accounting (goldfishStatus) is never disturbed
+ *  by fan-out work. This door reviews an EXPLICIT diff set the
+ *  caller supplies: same fresh-context contract (spec + diffs +
+ *  Pattern Catalog, nothing else), same catalog requirement, same
+ *  schema validation, same fail-closed malformed handling. The
+ *  record is returned to the caller and NOT appended to the
+ *  workspace goldfish records: those records count coverage over
+ *  the workspace ledger, and a parallel job's coverage is its own
+ *  job record's business. A diff past the per-change cap refuses
+ *  the run, exactly as a truncated diff refuses the ledger door. */
+export const GOLDFISH_DIFF_CAP = 24_000;
+export async function runGoldfishDiffReview(root: string, spec: string, changes: GoldfishChangeInput[], model: string, provider: EditModel, opts?: { appRoot?: string }): Promise<GoldfishRecord> {
+  if (!spec || !spec.trim() || spec.length > 2000) throw new Error("Goldfish diff review requires a task spec (max 2000 characters)");
+  if (!changes.length) throw new Error("No changes to review");
+  for (const change of changes) {
+    if (change.diff.length > GOLDFISH_DIFF_CAP) throw new Error("Diff truncated for " + change.path + "; review refused");
+  }
+  const catalog = loadPatternCatalog(root, opts);
+  if (!catalog) throw new Error("Pattern Catalog not found (SAM_PATTERN_CATALOG, <workspace>/pattern-catalog.md, or the app copy); the goldfish does not review without it");
+  const prompt = buildGoldfishPrompt(spec, changes, catalog);
+  const response = await provider.complete({ model, messages: [{ role: "user", content: prompt }] });
+  let review: GoldfishReview;
+  let malformed = false;
+  try {
+    review = validateReview(JSON.parse(response.message.content), catalog.ids);
+  } catch (error) {
+    malformed = true;
+    review = {
+      verdict: "BLOCK",
+      summary: "Goldfish verifier output was malformed (" + (error instanceof Error ? error.message : "unknown") + "); fail-closed block. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 300),
+      findings: [{ severity: "BLOCKER", detail: "Verifier output could not be validated; the change cannot be reported done on an unreadable review.", evidence: "validateReview refused the model response", patternId: null }],
+    };
+  }
+  return {
+    at: new Date().toISOString(), spec, model,
+    changeCount: changes.length, changeHashes: changes.map(c => c.replacementHash),
+    verdict: review.verdict, summary: review.summary, findings: review.findings, malformed,
+  };
+}
+
+/** The production reviewer for the parallel coordinator: the same
+ *  model-env wiring as defaultCodingReviewer, riding the diff door
+ *  above. Null when no model is configured - the caller then wires
+ *  a reviewer that refuses, so a parallel job on an unconfigured
+ *  install closes blocked, never done-unreviewed. */
+export function defaultDiffReviewer(root: string, env: NodeJS.ProcessEnv = process.env): ((spec: string, changes: GoldfishChangeInput[]) => Promise<GoldfishRecord>) | null {
+  const selected = env.SAM_MODEL_PROVIDER ?? "";
+  const endpoint = env.SAM_MODEL_ENDPOINT ?? (selected === "minimax" ? "https://api.minimax.io/v1/chat/completions" : undefined);
+  const model = env.SAM_GOLDFISH_MODEL ?? env.SAM_MODEL;
+  const key = env.SAM_MODEL_API_KEY ?? (selected === "minimax" ? env.MINIMAX_API_KEY : undefined);
+  if (!endpoint || !model || !key) return null;
+  const provider = new OpenAICompatibleProvider(endpoint, key, 90_000);
+  return (spec: string, changes: GoldfishChangeInput[]) => runGoldfishDiffReview(root, spec.slice(0, 2000), changes, model, provider);
+}

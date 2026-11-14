@@ -7,11 +7,14 @@ import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferenc
 import { detectCorrection, tryRouteCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
-import { toolBudget, type TurnRoute } from "./budgets.js";
+import { chatTurnBudget, type ChatSurface, type SteerProvider, type TurnRoute } from "./budgets.js";
 import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
 import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { recordUsage } from "./usage.js";
+import { recordContextMeter } from "./context-meter.js";
+import { countWords } from "./memory.js";
+import { captureSuppressionsFromText, filterUnsuppressed } from "./capture-guard.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
@@ -27,7 +30,7 @@ import type { ChatSearchHit } from "./chat-manage.js";
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
 // owner operates, not tools the model can call.
-const DASHBOARD_NOTE="This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities; explain how to use them accurately. You cannot operate dashboard controls or spawn agents, but you CAN manage your own profile's chats directly with the sam_manage_chats tool (list, create, rename, pin, branch, archive, search) - archive only, never delete. Do not invent folders or other unsupported UI features.";
+const DASHBOARD_NOTE="This dashboard supports creating chats, branching the selected chat using Branch chat, pinning/unpinning, renaming, and setting a chat profile using the three-dot menu, creating named agent profiles (a profile may pin its own model and one MCP connector), and selecting a default agent under Config. These are real UI capabilities; explain how to use them accurately. You cannot operate dashboard controls or spawn agents, but you CAN manage your own profile's chats directly with the sam_manage_chats tool (list, create, rename, pin, branch, archive, search, and organize: a tidy-up pass that names placeholder-titled chats from their content and archives stale scratch/test chats, reversible) - archive only, never delete. Do not invent folders or other unsupported UI features.";
 // Provenance is metadata, not part of what the owner typed. The line
 // is prepended only when a client stamp is known.
 const PROVENANCE_NOTE=" Owner messages may start with a provenance line [metadata source=<client>] that SAM recorded and the owner did not type. The client is dashboard, rust-cli, ts-cli, telegram, or api. When that line is absent, the client is unknown. The latest such line is the client they are using right now.";
@@ -81,7 +84,7 @@ export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,erro
   }catch{/* best effort: the line lands under the core actor */}
   recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
 }
-export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown}):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
   try{
     return await runChatTurnInner(root,chatId,content,opts);
   }catch(error){
@@ -89,12 +92,19 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     throw error;
   }
 }
-async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown}):Promise<string>{
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
   const route=opts?.route??"chat";
   const source=opts?.source;
-  const budget=toolBudget(route);
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
   try{const found=look.list().find(c=>c.id===chatId);chatAgent=found?.agent_name??null;visitor=found?.visitor===1;profiles=look.agents();}finally{look.close();}
+  // Owner-turn budgets (Dip ruling 2026-11-14): a chat-route turn
+  // on the owner's own surfaces rides the deep owner budget with
+  // its continuation ceiling; visitor chats and turns that arrive
+  // through a scoped door (surface "scoped", passed by the door
+  // handler) keep the legacy chat tier, and the machine routes
+  // keep theirs. Resolved here, where the visitor flag is known,
+  // and nowhere else.
+  const {budget,ceiling}=chatTurnBudget({route,surface:opts?.surface,visitor});
   const config=readDashboardConfig(root);
   const profileName=chatAgent??config.defaultAgent;
   const active=profiles.find(a=>a.name===profileName);
@@ -151,6 +161,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;}
     else userMessageId=db.add(chatId,"user",content,source).id;
     if(!resuming)history=db.messages(chatId);
+    // Message bursts (Defect 2): follow-ups that landed before this
+    // turn started are stored as their own user rows, in arrival
+    // order, right behind the primary message - the burst folds into
+    // this turn as consecutive owner messages, the latest governing,
+    // and every one of them is in the transcript.
+    if(opts?.burst?.length){for(const extra of opts.burst)db.add(chatId,"user",extra,source);history=db.messages(chatId);}
   }finally{db.close();}
   // Reactions (Dip, 2026-11-10): on a live owner chat turn the
   // owner's message gets an eyes stamp while SAM works and a heart
@@ -182,7 +198,18 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
         const routed=tryRouteCorrection(root,{actor:profileName,chatId,text:content});
         if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
       }
-      if(!resuming)for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
+      // The capture guard (Program H item A): a do-not-store
+      // instruction in the owner's own words is recorded FIRST,
+      // so it binds this message's own preference capture below
+      // and every later automatic write; suppressed finds never
+      // reach the preference store.
+      if(!resuming)captureSuppressionsFromText(root,profileName,content,chatId);
+      if(!resuming)for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(content),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
+      // Burst follow-ups are the owner's words too: their explicit
+      // preferences capture the same way, through the same
+      // suppression filter (correction routing stays one-per-turn
+      // on the primary message).
+      if(!resuming)for(const extra of opts?.burst??[])for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(extra),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
     }else{
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName));
@@ -232,6 +259,23 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
     ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming})];
+  // Context metering (Program H item D): the injected context
+  // of THIS turn, measured at assembly in chars and words with
+  // the memory-derived tiers broken out, lands in
+  // .sam/context.jsonl beside the token spend - growth in what
+  // a turn carries is a number before it is a feeling. The
+  // meter never breaks a turn (its recorder fails soft and
+  // ledgers; the arithmetic is guarded the same way).
+  try{
+    const systemCount=contextSummary?2:1;
+    const historyChars=messages.slice(systemCount).reduce((n,m)=>n+m.content.length,0);
+    recordContextMeter(root,{actor:profileName,route,
+      systemChars:systemContent.length,lawChars:lawBlock.length,recallChars:recallBlock.length,
+      standingChars:standing.stable.length+standing.context.length,
+      summaryChars:contextSummary?contextSummary.length:0,historyChars,
+      totalChars:systemContent.length+(contextSummary?contextSummary.length:0)+historyChars,
+      totalWords:messages.reduce((n,m)=>n+countWords(m.content),0)});
+  }catch{/* the meter never breaks a turn */}
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;
@@ -255,13 +299,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
-        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
+        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
       }else if(chatAgent){
-        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
       }else{
         const useConnectors=connectors(root).some(c=>c.enabled&&connectorCredentialPresent(root,c));
-        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
-        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
+        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
+        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
       }
       answered=true;
       break;

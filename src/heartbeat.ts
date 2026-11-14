@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore, extractPreferences } from "./preferences.js";
+import { captureSuppressionsFromText, filterUnsuppressed } from "./capture-guard.js";
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
@@ -14,8 +15,9 @@ import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { drainCodingTasks, type CodingTask } from "./coding.js";
 import { drainEngineTasks, type EngineTask } from "./engine.js";
+import { drainParallelJobs } from "./parallel-coding.js";
 import { revisitDueLoops, type LoopRevisitResult } from "./loop-revisit.js";
-import type { GoldfishRecord } from "./goldfish.js";
+import type { GoldfishChangeInput, GoldfishRecord } from "./goldfish.js";
 import { assessDelivery } from "./worthiness.js";
 import { runSkillCurator } from "./skill-author.js";
 import { compileSchedule, nextCronRun, ownerTimezone, scriptArgv, scriptCommandNames, validateTimezone } from "./schedule.js";
@@ -443,7 +445,12 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     // never lets a corrected rule slip in here as instant law.
     let correction=null as ReturnType<typeof detectCorrection>;
     try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch(e){/* the gate never breaks a tick - but its failure is counted and ledgered once per run below, never silent: this scan is the last capture path and the watermark advances past the message either way */correctionFailures++;if(correctionFailureError===null)correctionFailureError=e;}
-    for(const found of withoutCorrectedRules(extractPreferences(msg.content),correction)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
+    // The capture guard (Program H item A): this scan is the
+    // second capture path, so do-not-store instructions are
+    // recorded here too, before the preference extraction they
+    // bind - a suppressed statement never reaches the store.
+    captureSuppressionsFromText(root,profile,msg.content,chat.id);
+    for(const found of filterUnsuppressed(root,profile,withoutCorrectedRules(extractPreferences(msg.content),correction))){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
   }
@@ -474,7 +481,7 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator,correctionFailures,curatorFailed};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number;stderr?:string}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number;stderr?:string}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord>; reviewParallel?:(spec:string,changes:GoldfishChangeInput[])=>Promise<GoldfishRecord> }
 // Script-failure reason (gap found 2026-11-13): a script job that
 // exits non-zero used to record ONLY its exit code - the journal,
 // heartbeats.jsonl, and the activity ledger all said "script
@@ -594,7 +601,7 @@ async function guardTickStage<T>(root:string,stage:string,fallback:T,stageFailur
  try{return await run();}
  catch(e){tickStageFailure(root,stage,e);stageFailures.push(stage);return fallback;}
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];stageFailures:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];stageFailures:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};parallel:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
  const stageFailures:string[]=[];
  const consolidation=await guardTickStage(root,"consolidate",{scanned:0,noted:0,promoted:[],episodes:[],corrections:0,visitorSkipped:0,curator:[],correctionFailures:0,curatorFailed:false},stageFailures,()=>consolidatePreferences(root));
  const tickStart=new Date();
@@ -759,6 +766,12 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // its branch sandbox, with SAM verifying and reviewing its work.
  const engine=await guardTickStage(root,"engine",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainEngineTasks(root,{review:deps.reviewEngine}));
  if(engine.ran.length||engine.blocked.length||engine.failed.length||engine.recovered.length)appendLog(root,{type:"engine",ran:engine.ran.length,blocked:engine.blocked.length,failed:engine.failed.length,recovered:engine.recovered.length});
+ // Program E: the same tick drains the parallel coding queue,
+ // after the engine - one fan-out job per tick: slices run the
+ // engine concurrently in isolated worktrees, the coordinator
+ // merges and verifies, the merged diff is reviewed.
+ const parallel=await guardTickStage(root,"parallel",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainParallelJobs(root,{reviewDiff:deps.reviewParallel}));
+ if(parallel.ran.length||parallel.blocked.length||parallel.failed.length||parallel.recovered.length)appendLog(root,{type:"parallel",ran:parallel.ran.length,blocked:parallel.blocked.length,failed:parallel.failed.length,recovered:parallel.recovered.length});
  // SECOND ANSWERS: the same tick revisits due open loops, last -
  // a loop's re-check is a cheap-tier turn in its own check chat,
  // and only a proven change crosses into the owner's conversation
@@ -766,7 +779,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // the revisit engine itself).
  const loops=await guardTickStage(root,"loops",{checked:[],changed:[],resolved:[],failed:[],held:[]},stageFailures,()=>revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver}));
  if(loops.checked.length)appendLog(root,{type:"loops",checked:loops.checked.length,changed:loops.changed.length,resolved:loops.resolved.length,failed:loops.failed.length,held:loops.held.length});
- return {consolidation,ran,changed,unchanged,failed,stageFailures,deliveries:deliveryResult,background,coding,engine,loops};
+ return {consolidation,ran,changed,unchanged,failed,stageFailures,deliveries:deliveryResult,background,coding,engine,parallel,loops};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
 // channels post via webhook. Delivered must mean at least one real send was

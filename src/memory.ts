@@ -2,7 +2,8 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { findSuppressionHitInDb, suppressionProfilesForScope, MemorySuppressedError } from "./capture-guard.js";
 
 export type MemoryKind = "observation" | "decision" | "failure" | "procedure";
 export interface MemoryRecord {
@@ -17,9 +18,27 @@ export interface MemoryRecord {
 export function isMemoryScope(value:string):boolean{
   return value==="core"||/^profile:[a-z][a-z0-9._-]{0,63}$/.test(value)||/^link:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
+// The hot-memory budget (Program H, filed requirement 1): hot
+// memory is an INDEX, not an archive - what matters now, in
+// ~3,000 words, with the full text living in cold storage (files,
+// the chat record) behind a pointer. The budget binds at WRITE
+// time in add() below: a single record larger than the entire
+// hot budget can never be an index entry, whatever door wrote
+// it, so it is refused with a named error instead of quietly
+// becoming the thing every future recall has to carry. The
+// per-tier prompt caps (law, recall, summary) already bound
+// what one turn injects; this bounds what one write can add
+// to the store those tiers draw from.
+export const MEMORY_RECORD_MAX_WORDS=3000;
+export function countWords(text:string):number{
+  const trimmed=text.trim();
+  return trimmed?trimmed.split(/\s+/).length:0;
+}
 export class MemoryStore {
   private db:Database.Database;
+  private path:string;
   constructor(path:string) {
+    this.path=path;
     mkdirSync(dirname(path),{recursive:true});
     this.db=openDatabase(path);
     this.db.exec(`
@@ -51,8 +70,21 @@ export class MemoryStore {
     if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind. Choose observation, decision, failure, or procedure.");
     if(!input.content.trim() || !input.source.trim())throw new Error("Memory requires content and provenance");
     if(input.content.length>100_000)throw new Error("Memory exceeds size limit");
+    const words=countWords(input.content);
+    if(words>MEMORY_RECORD_MAX_WORDS)throw new Error("Memory record exceeds the hot-memory budget: "+words+" words against the "+MEMORY_RECORD_MAX_WORDS+"-word cap. Memory is an index, not an archive - store the full text as a file and note the pointer instead.");
     const scope=input.scope??"core";
     if(!isMemoryScope(scope))throw new Error("Invalid memory scope");
+    // The capture-guard backstop (Program H item A): a standing
+    // do-not-store instruction binds at the store itself, so
+    // every writer - episode flush, compaction flush, saved
+    // notes, approved actions, the operator CLI, and any future
+    // door - is held by it. preferences.db lives beside
+    // missions.db in .sam; the guard's own module owns the
+    // matching. Automatic paths catch MemorySuppressedError,
+    // ledger one memory-suppressed line, and degrade; explicit
+    // doors let it surface.
+    const suppressionHit=findSuppressionHitInDb(join(dirname(this.path),"preferences.db"),suppressionProfilesForScope(scope),input.content);
+    if(suppressionHit)throw new MemorySuppressedError(suppressionHit);
     const record:MemoryRecord={
       id:randomUUID(),mission_id:input.missionId??null,kind:input.kind,
       content:input.content,source:input.source,
