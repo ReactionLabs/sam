@@ -2,7 +2,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes, createHash } from "node:crypto";
 import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
-import { buildStatusPayload } from "./status.js";
+import { buildStatusPayload, dashboardBuildId } from "./status.js";
 import { runChatTurn } from "./agent-turn.js";
 import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore } from "./preferences.js";
@@ -77,12 +77,9 @@ async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'
 refresh();setInterval(refresh,10000);
 </script></body></html>`;
 function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}
-// Build id of the dashboard page this server ships. The status payload
-// carries it and the served page carries its own copy; when they differ the
-// open page is running an old build and refreshes itself once through the
-// stable door (Dip catch 2026-11-14: a fix shipped is not a fix received
-// until the owner's already-open tab picks it up).
-const buildId=createHash("sha256").update(dashboardHtml).digest("hex").slice(0,12);
+// The build id lives in status.ts (dashboardBuildId) so the status
+// payload is identical on every door; this server stamps it into the
+// served page, whose poll compares the two.
 
 export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
@@ -234,7 +231,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     // Stable door: the dashboard token rotates on every start. Clients that
     // bookmark /sam (the Rust CLI, a reloaded page) get the current token URL.
     if(req.url==="/sam"||req.url==="/sam/"){res.writeHead(302,{Location:"/dashboard/"+token});res.end();return;}
-    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml.replaceAll("__SAM_BUILD_ID__",buildId));return;}
+    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml.replaceAll("__SAM_BUILD_ID__",dashboardBuildId));return;}
     const statusParts=(req.url??"").split("?");
     const bearer=typeof req.headers["authorization"]==="string"&&req.headers["authorization"].startsWith("Bearer ")?req.headers["authorization"].slice(7):"";
     const queryToken=new URLSearchParams(statusParts[1]??"").get("token")??"";
@@ -244,7 +241,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       const activityFilter={actor:statusParams.get("actor")||undefined,kind:statusParams.get("kind")||undefined};
       try{
         res.setHeader("Content-Type","application/json");
-        res.end(JSON.stringify({...buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()}),buildId}));
+        res.end(JSON.stringify(buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()})));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { dashboardHtml } from "./dashboard-ui.js";
 import { recentExecutionAuditLogs } from "./approved-test-runner.js";
 import { MissionStore } from "./storage.js";
 import { ChatStore, type ChatRecord } from "./chats.js";
@@ -64,6 +66,14 @@ import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 const EMPTY_DOOR_GUARD: DoorGuardStats = { probes: 0, blockedMessages: 0, rateLimited: 0, probeLockedUntil: null };
 
+// Build id of the dashboard page this build ships. The status payload
+// carries it on every door (API and CLI overview return the same payload)
+// and the served page carries its own copy; when they differ the open page
+// is running an old build and refreshes itself once through the stable
+// door (Dip catch 2026-11-14: a fix shipped is not a fix received until
+// the owner's already-open tab picks it up).
+export const dashboardBuildId = createHash("sha256").update(dashboardHtml).digest("hex").slice(0, 12);
+
 export interface StatusBuildOptions {
   activity?: { actor?: string; kind?: string };
   activityLimit?: number;
@@ -105,6 +115,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
   const activityLimit = opts.activityLimit ?? 30;
   return {
     ok: true,
+    buildId: dashboardBuildId,
     at: new Date().toISOString(),
     missions,
     skills: discoverSkills(root),
