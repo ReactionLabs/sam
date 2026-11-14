@@ -21,6 +21,7 @@ import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } f
 import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
 import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
+import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resumeChatQueues } from "./chat-queue.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -87,7 +88,6 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
   const token=randomBytes(16).toString("hex");
-  const pending=new Set<string>();
   const doorLimiter=new RateLimiter(30,3600000,2000);
   const doorGuard=new DoorAbuseGuard();
   const server:Server=createServer(async(req,res)=>{
@@ -185,21 +185,33 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,match[1]);}catch{/* sources are garnish the same way */}let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,match[1]);}catch{/* artifacts are garnish the same way */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations,sources,artifacts});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,match[1]);}catch{/* sources are garnish the same way */}let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,match[1]);}catch{/* artifacts are garnish the same way */}let queue:unknown[]=[];let turnActive=false;try{queue=listChatQueue(workspace,match[1]);turnActive=chatTurnActive(workspace,match[1]);}catch{/* the queue view is garnish the same way */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations,sources,artifacts,queue,turnActive});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
     }
     if(match && req.method==="POST" && match[2]){
-      const id=match[1];if(pending.has(id)){json(409,{error:"This chat already has a response in progress"});return;}
-      pending.add(id);
+      // Message bursts (Defect 2): a message is accepted at any time,
+      // busy or not - it joins the chat's queue (chat-queue.ts) and is
+      // never refused or silently dropped. The default answer is 202
+      // with the queue receipt; the surface watches the queue through
+      // GET. A client that needs the old synchronous shape (the
+      // Telegram bridge) passes wait:true and gets the reply once the
+      // queue has drained, in the same payload as before.
+      const id=match[1];
       try{
         const body=await post();if(typeof body.content!=="string"||!body.content.trim()||body.content.length>12000)throw Error("Invalid message");
         const source=sourceFromApiBody(body.source);
         const turnStart=new Date().toISOString();
-        const reply=await runChatTurn(workspace,id,body.content,{source});
-        const result={message:{role:"assistant" as const,content:reply}};
-        let userReaction:string|null=null;let replyId:string|null=null;let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
+        const receipt=enqueueChatMessage(workspace,{chatId:id,content:body.content,source});
+        if(body.wait!==true){json(202,{status:receipt.status,id:receipt.id,...(receipt.effect?{effect:receipt.effect}:{})});return;}
+        let timedOut=false;
+        try{await awaitChatQueue(workspace,id,10*60*1000);}catch{timedOut=true;}
+        if(timedOut){json(202,{status:"queued",id:receipt.id});return;}
+        const settled=listChatQueue(workspace,id,20).find(q=>q.id===receipt.id);
+        if(settled?.status==="failed"){json(400,{error:"Message failed. Check model configuration and server logs."});return;}
+        if(receipt.status==="consumed"){json(200,{reply:{role:"assistant",content:"",id:null,citation:null,sources:null},userReaction:null,actions:[]});return;}
+        let userReaction:string|null=null;let replyId:string|null=null;let replyText="";let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;replyText=msgs[i].content;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
         let turnArtifacts:ArtifactSummary[]=[];try{turnArtifacts=artifactsForChat(workspace,id).filter(a=>a.updatedAt>=turnStart);}catch{/* the artifact card is garnish: a dead artifact store never takes the reply down */}
-        json(200,{reply:{...result.message,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart),artifacts:turnArtifacts});
-      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}finally{pending.delete(id);}return;
+        json(200,{reply:{role:"assistant",content:replyText,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart),artifacts:turnArtifacts});
+      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}return;
     }
     // Artifacts API (owner door, under the dashboard token like every
     // other /api route): list/get/create/update plus version history.
@@ -332,6 +344,8 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     res.writeHead(404);res.end();
   });
   await new Promise<void>((done,fail)=>{server.once("error",fail);server.listen(port,"127.0.0.1",()=>{server.off("error",fail);done();});});
+  // Bursts that outlived a restart resume draining on their own.
+  try{const resumed=resumeChatQueues(workspace);if(resumed.length)console.log("SAM dashboard: resumed message queues for "+resumed.length+" chat(s)");}catch{/* a dead queue store never blocks the dashboard */}
   console.log(`SAM dashboard: http://127.0.0.1:${port}/dashboard/${token}`);
   console.log("Read-only local dashboard. Press Ctrl+C to stop.");
   await new Promise<void>(done=>{const stop=()=>server.close(()=>done());process.once("SIGINT",stop);process.once("SIGTERM",stop);});

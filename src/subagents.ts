@@ -8,6 +8,8 @@ import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { turnRoutes } from "./failover.js";
 import { readProviderKey } from "./providers.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
+import { OWNER_CHAT_BUDGET, OWNER_CHAT_CEILING } from "./budgets.js";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
@@ -34,6 +36,109 @@ export const SUBAGENT_MAX_DEPTH = 2;
 export const SUBAGENT_MAX_CONCURRENT = 2;
 export const PARENT_POOL = { rounds: 6, maxCalls: 16 };
 
+// --- Turn-scoped spawn pool (Defect 3, Dip live catch 2026-11-14) ---
+// The pool a hire carves from used to be a LIFETIME ledger: carveBudget
+// summed every sub-agent a profile had ever spawned (done, failed, and
+// interrupted included) against the background-sized PARENT_POOL, so a
+// profile that had ever hired {6, 16} of workers could never hire again
+// ("0 rounds, 1 calls left" on every plan, forever). Lane F had already
+// raised OWNER turns to 30 rounds / 120 calls with tranche continuation
+// to 60/300, but the carve never got the owner sizing. The pool is now
+// scoped to the hiring context, the same shape as the turn budgets in
+// budgets.ts:
+//   - an owner chat turn hires from a pool the size of its own tranche
+//     budget ({30, 120}), refilled when the turn crosses into its next
+//     tranche, with cumulative carves across the whole turn capped by
+//     the turn's ceiling ({60, 300});
+//   - background, heartbeat, scoped, CLI, and child contexts hire from
+//     the small pool ({6, 16}) per invocation;
+//   - inside one scope, done and failed carves still count (a worker's
+//     budget is spent whether it landed or not) and a cancelled carve
+//     still frees (the coordinator's retire-and-replace path);
+//   - with no context at all (older callers, tests), counting falls
+//     back to the newest scope the profile has carved in, so the books
+//     a job leaves behind still read correctly after it closes.
+export interface SpawnPoolContext {
+  /** Turn key for owner contexts; the fixed scope id otherwise. */
+  turnKey: string;
+  /** Current tranche (owner contexts); the loops advance it as the
+   *  turn crosses its own budget tranches, and the hire doors may
+   *  advance it once to satisfy a worthwhile plan (Lane F continuation). */
+  tranche: number;
+  pool: SubagentBudget;
+  ceiling: SubagentBudget | null;
+  owner: boolean;
+}
+const spawnPoolStorage = new AsyncLocalStorage<SpawnPoolContext>();
+let ambientScope: string | null = null;
+function ambientScopeId(): string {
+  if (!ambientScope) ambientScope = "ambient:" + randomUUID();
+  return ambientScope;
+}
+export function ownerSpawnPool(turnKey: string): SpawnPoolContext {
+  return { turnKey, tranche: 0, pool: { ...OWNER_CHAT_BUDGET }, ceiling: { ...OWNER_CHAT_CEILING }, owner: true };
+}
+export function smallSpawnPool(scope: string): SpawnPoolContext {
+  return { turnKey: scope, tranche: 0, pool: { ...PARENT_POOL }, ceiling: null, owner: false };
+}
+export function currentSpawnPool(): SpawnPoolContext | null {
+  return spawnPoolStorage.getStore() ?? null;
+}
+export function withSpawnPool<T>(ctx: SpawnPoolContext, fn: () => T): T {
+  return spawnPoolStorage.run(ctx, fn);
+}
+/** The effective carve scope a context counts against right now. */
+export function spawnScopeOf(ctx: SpawnPoolContext): string {
+  return ctx.owner ? ctx.turnKey + "#t" + ctx.tranche : ctx.turnKey;
+}
+/** Advance an owner context into its next tranche (a fresh pool the
+ *  same size as the turn's own next tranche). Bounded: a plan that
+ *  fits no tranche is refused honestly instead of looping. */
+export function advanceSpawnPoolTranche(ctx: SpawnPoolContext): boolean {
+  if (!ctx.owner || ctx.tranche >= 8) return false;
+  ctx.tranche++;
+  return true;
+}
+/** A pool refusal carries its numbers as data: the hire doors turn it
+ *  into a value result (never a dead-end error) and the preparation-loop
+ *  guard reads the same mark. */
+export class SpawnPoolError extends Error {
+  readonly poolRefusal = true;
+  constructor(message: string, readonly remaining: SubagentBudget, readonly asks: SubagentBudget, readonly ceilingHit = false) {
+    super(message);
+    this.name = "SpawnPoolError";
+  }
+}
+export function isPoolRefusal(error: unknown): error is SpawnPoolError {
+  return error instanceof SpawnPoolError;
+}
+/** Carves charged inside one scope (or, context-free, inside the
+ *  newest scope the profile has carved in; unstamped legacy records
+ *  count only when no stamped scope exists for the profile yet). */
+function scopeUsed(items: Subagent[], profile: string, ctx: SpawnPoolContext | null): { used: SubagentBudget; scope: string } {
+  const mine = items.filter(s => s.profile === profile);
+  const hasStamped = mine.some(s => s.poolScope);
+  let scope: string;
+  if (ctx) scope = spawnScopeOf(ctx);
+  else if (hasStamped) scope = mine.filter(s => s.poolScope).slice(-1)[0].poolScope as string;
+  else scope = ambientScopeId();
+  const inScope = (s: Subagent): boolean => {
+    if (ctx || hasStamped) return s.poolScope === scope;
+    return s.poolScope === scope || !s.poolScope; // ambient era: this process's carves plus legacy unstamped records
+  };
+  const used = mine
+    .filter(s => s.status !== "cancelled" && inScope(s))
+    .reduce((sum, s) => ({ rounds: sum.rounds + s.budget.rounds, maxCalls: sum.maxCalls + s.budget.maxCalls }), { rounds: 0, maxCalls: 0 });
+  return { used, scope };
+}
+/** The pool the current context (or the fallback scope) has left. */
+export function spawnPoolRemaining(items: Subagent[], profile: string, ctx?: SpawnPoolContext | null): SubagentBudget & { scope: string } {
+  const resolved = ctx === undefined ? currentSpawnPool() : ctx;
+  const pool = resolved?.pool ?? PARENT_POOL;
+  const { used, scope } = scopeUsed(items, profile, resolved);
+  return { rounds: Math.max(0, pool.rounds - used.rounds), maxCalls: Math.max(0, pool.maxCalls - used.maxCalls), scope };
+}
+
 export interface SubagentBudget { rounds: number; maxCalls: number }
 export interface Subagent {
   id: string;
@@ -51,6 +156,13 @@ export interface Subagent {
   chatId: string | null;
   role: "research" | "build" | "review" | "task";
   quiet: boolean;
+  /** The spawn-pool scope this worker's budget was carved from
+   *  (Defect 3): pool accounting counts carves per scope, never as a
+   *  lifetime ledger. Absent on records written before the change. */
+  poolScope?: string;
+  /** The hiring turn's key (owner scopes): cumulative carves across
+   *  the turn's tranches are capped by the turn ceiling. */
+  poolTurn?: string;
 }
 
 export interface SubagentTurn { content: string | null; calls: Array<{ id: string; name: string; args: Record<string, unknown> }> }
@@ -219,18 +331,28 @@ function narrowTools(requested: string[] | undefined, inherited: string[]): stri
 }
 
 function carveBudget(items: Subagent[], profile: string, requested: SubagentBudget): SubagentBudget {
-  const used = items.filter(s => s.profile === profile && s.status !== "cancelled").reduce((sum, s) => ({
-    rounds: sum.rounds + s.budget.rounds,
-    maxCalls: sum.maxCalls + s.budget.maxCalls,
-  }), { rounds: 0, maxCalls: 0 });
   const budget = {
     rounds: requested.rounds,
     maxCalls: requested.maxCalls,
   };
   if (!Number.isInteger(budget.rounds) || budget.rounds < 1 || budget.rounds > 6) throw new Error("Sub-agent rounds must be 1 to 6");
   if (!Number.isInteger(budget.maxCalls) || budget.maxCalls < 1 || budget.maxCalls > 16) throw new Error("Sub-agent calls must be 1 to 16");
-  if (used.rounds + budget.rounds > PARENT_POOL.rounds || used.maxCalls + budget.maxCalls > PARENT_POOL.maxCalls)
-    throw new Error("Sub-agent budget exceeds the parent's remaining pool (" + (PARENT_POOL.rounds - used.rounds) + " rounds, " + (PARENT_POOL.maxCalls - used.maxCalls) + " calls left)");
+  // Turn-scoped pool (Defect 3): the carve is charged to the hiring
+  // context's current scope, sized by that context (owner tranche or
+  // the small pool) - never to a lifetime ledger. The per-helper caps
+  // above stay as sanity bounds on any single worker.
+  const ctx = currentSpawnPool();
+  const pool = ctx?.pool ?? PARENT_POOL;
+  const { used } = scopeUsed(items, profile, ctx);
+  if (used.rounds + budget.rounds > pool.rounds || used.maxCalls + budget.maxCalls > pool.maxCalls)
+    throw new SpawnPoolError("Sub-agent budget exceeds the parent's remaining pool (" + Math.max(0, pool.rounds - used.rounds) + " rounds, " + Math.max(0, pool.maxCalls - used.maxCalls) + " calls left)", { rounds: Math.max(0, pool.rounds - used.rounds), maxCalls: Math.max(0, pool.maxCalls - used.maxCalls) }, { ...budget });
+  if (ctx?.ceiling) {
+    const turnUsed = items
+      .filter(s => s.profile === profile && s.status !== "cancelled" && s.poolTurn === ctx.turnKey)
+      .reduce((sum, s) => ({ rounds: sum.rounds + s.budget.rounds, maxCalls: sum.maxCalls + s.budget.maxCalls }), { rounds: 0, maxCalls: 0 });
+    if (turnUsed.rounds + budget.rounds > ctx.ceiling.rounds || turnUsed.maxCalls + budget.maxCalls > ctx.ceiling.maxCalls)
+      throw new SpawnPoolError("Sub-agent budget exceeds the turn's total hiring ceiling (" + Math.max(0, ctx.ceiling.rounds - turnUsed.rounds) + " rounds, " + Math.max(0, ctx.ceiling.maxCalls - turnUsed.maxCalls) + " calls left of the ceiling)", { rounds: Math.max(0, ctx.ceiling.rounds - turnUsed.rounds), maxCalls: Math.max(0, ctx.ceiling.maxCalls - turnUsed.maxCalls) }, { ...budget }, true);
+  }
   return budget;
 }
 
@@ -319,10 +441,13 @@ function openSubagent(root: string, input: SpawnInput): Subagent {
   try {
     loopId = journal.create(prompt.slice(0, 4000)).id;
   } finally { journal.close(); }
+  const poolCtx = currentSpawnPool();
   const item: Subagent = {
     id: loopId, profile, parentId: parent?.id ?? null, depth, prompt, tools, budget,
     status: "running", result: null, loopId, createdAt: new Date().toISOString(), finishedAt: null, chatId,
     role, quiet: input.quiet === true,
+    poolScope: scopeUsed(items, profile, poolCtx).scope,
+    poolTurn: poolCtx?.owner ? poolCtx.turnKey : undefined,
   };
   put(root, item);
   live.add(item.id);
@@ -334,11 +459,16 @@ async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Pr
   try {
     const env = opts?.env ?? process.env;
     const injected = opts?.complete;
+    // A child hires from its OWN carved budget, never from its
+    // parent's scope: its context shadows the hiring one for the
+    // length of its turn (Defect 3 pool scoping).
+    const childCtx = smallSpawnPool("sub:" + item.id);
+    childCtx.pool = { ...item.budget };
     const result = injected
-      ? await runChild(root, item, injected)
+      ? await withSpawnPool(childCtx, () => runChild(root, item, injected))
       : childTurnRoute(root, item.profile) === "plain"
-        ? await runChildPlain(root, item, env)
-        : await runChild(root, item, await connectorComplete(root, item.profile, env));
+        ? await withSpawnPool(childCtx, () => runChildPlain(root, item, env))
+        : await withSpawnPool(childCtx, async () => runChild(root, item, await connectorComplete(root, item.profile, env)));
     const latest = read(root).find(s => s.id === item.id);
     if (latest?.status === "cancelled") {
       item.status = "cancelled";

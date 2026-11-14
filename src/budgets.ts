@@ -33,6 +33,13 @@ export function toolBudget(route: TurnRoute = "chat"): ToolBudget {
 // synthesis from the material already gathered - never with the
 // incomplete-answer text, which is unreachable on owner surfaces.
 export type ChatSurface = "owner" | "scoped";
+/** Mid-turn owner steering (Defect 2): at a tool-round boundary the
+ *  loop asks the provider for whatever the owner sent while the turn
+ *  ran. The provider has already persisted the messages to the chat;
+ *  the loop only folds them into its live prompt. cancel means the
+ *  owner said stop: the turn closes after this step. */
+export interface SteerBatch { contents: string[]; cancel: boolean }
+export type SteerProvider = () => SteerBatch | null;
 export const OWNER_CHAT_BUDGET: ToolBudget = { rounds: 30, maxCalls: 120 };
 export const OWNER_CHAT_CEILING: ToolBudget = { rounds: 60, maxCalls: 300 };
 export function chatTurnBudget(input: { route: TurnRoute; surface?: ChatSurface; visitor?: boolean }): { budget: ToolBudget; ceiling: ToolBudget | null } {

@@ -7,7 +7,7 @@ import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferenc
 import { detectCorrection, tryRouteCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
-import { chatTurnBudget, type ChatSurface, type TurnRoute } from "./budgets.js";
+import { chatTurnBudget, type ChatSurface, type SteerProvider, type TurnRoute } from "./budgets.js";
 import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
 import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
@@ -84,7 +84,7 @@ export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,erro
   }catch{/* best effort: the line lands under the core actor */}
   recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
 }
-export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface}):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
   try{
     return await runChatTurnInner(root,chatId,content,opts);
   }catch(error){
@@ -92,7 +92,7 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     throw error;
   }
 }
-async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface}):Promise<string>{
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
   const route=opts?.route??"chat";
   const source=opts?.source;
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
@@ -161,6 +161,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;}
     else userMessageId=db.add(chatId,"user",content,source).id;
     if(!resuming)history=db.messages(chatId);
+    // Message bursts (Defect 2): follow-ups that landed before this
+    // turn started are stored as their own user rows, in arrival
+    // order, right behind the primary message - the burst folds into
+    // this turn as consecutive owner messages, the latest governing,
+    // and every one of them is in the transcript.
+    if(opts?.burst?.length){for(const extra of opts.burst)db.add(chatId,"user",extra,source);history=db.messages(chatId);}
   }finally{db.close();}
   // Reactions (Dip, 2026-11-10): on a live owner chat turn the
   // owner's message gets an eyes stamp while SAM works and a heart
@@ -199,6 +205,11 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // reach the preference store.
       if(!resuming)captureSuppressionsFromText(root,profileName,content,chatId);
       if(!resuming)for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(content),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
+      // Burst follow-ups are the owner's words too: their explicit
+      // preferences capture the same way, through the same
+      // suppression filter (correction routing stays one-per-turn
+      // on the primary message).
+      if(!resuming)for(const extra of opts?.burst??[])for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(extra),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
     }else{
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName));
@@ -288,13 +299,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
-        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling);
+        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
       }else if(chatAgent){
-        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling);
+        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
       }else{
         const useConnectors=connectors(root).some(c=>c.enabled&&connectorCredentialPresent(root,c));
-        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling);
-        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling);
+        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
+        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
       }
       answered=true;
       break;

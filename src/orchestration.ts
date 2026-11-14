@@ -33,8 +33,9 @@ import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import {
-  PARENT_POOL, ROLE_TOOLS, listSubagents, ownerFold, profileToolNames,
-  startBackgroundSubagent, updateSubagent, whenSubagentSettled, type Subagent,
+  ROLE_TOOLS, currentSpawnPool, listSubagents, ownerFold, profileToolNames,
+  smallSpawnPool, spawnPoolRemaining, startBackgroundSubagent, updateSubagent,
+  whenSubagentSettled, withSpawnPool, type Subagent,
 } from "./subagents.js";
 import { parseReview } from "./team-runtime.js";
 import { ChatStore } from "./chats.js";
@@ -63,6 +64,12 @@ export interface LaneSpec {
   dependsOn?: string[];
   verify?: LaneVerifySpec;
   workers?: LaneSpec[];
+  /** Per-lane budget override (issue #96): a plan may price a lane
+   *  explicitly; the price is honored exactly as given (validated
+   *  against the per-worker caps) instead of the kind default being
+   *  silently substituted - the recorded failure repriced every plan
+   *  to the same totals no matter what the planner asked for. */
+  budget?: { rounds: number; maxCalls: number };
 }
 export interface Lane {
   id: string; jobId: string; name: string; kind: LaneKind;
@@ -88,11 +95,14 @@ export interface OrchestrationJob {
 
 // Lane budgets: the ONE seam where worker sizing lives. Lane F's
 // owner-budget doctrine landed 2026-11-14 as owner-TURN budgets in
-// budgets.ts (chatTurnBudget) and deliberately did not change the spawn
-// layer's parent pool {6, 16}, so lane budgets stay sized to that pool:
-// a three-lane job fits with headroom for one replacement after its
-// retired worker's carve returns. If the pool shape ever moves, it
-// moves here and in remainingPool, nowhere else.
+// budgets.ts (chatTurnBudget) and at first did not change the spawn
+// layer's pool, so lane budgets were sized to the background pool
+// {6, 16}. Defect 3 (2026-11-14, same day) scoped the pool to the
+// hiring context (subagents.ts): an owner turn hires from a pool the
+// size of its own tranche budget, so these per-lane budgets now read
+// as the price of one lane inside whatever pool the hiring context
+// carries, and remainingPool reads that live context. If the pool
+// shape ever moves, it moves in subagents.ts and here, nowhere else.
 export const ORCH_LANE_BUDGETS: Record<LaneKind, { rounds: number; maxCalls: number }> = {
   research: { rounds: 2, maxCalls: 5 },
   build: { rounds: 2, maxCalls: 6 },
@@ -185,6 +195,19 @@ function putRefusal(root: string, refusal: DispatchRefusal): void {
   try { db.prepare("INSERT OR REPLACE INTO orch_refusals (id, data) VALUES (?, ?)").run(refusal.id, JSON.stringify(refusal)); }
   catch (error) { recordStoreFailure(root, "write", error); throw error; } finally { db.close(); }
 }
+/** Retract provisional refusal records by id. The hire door's
+ *  tranche continuation (Defect 3) retries a refused plan in the
+ *  turn's next tranche; when the retry hires, the first attempt's
+ *  record described an event that did not finally happen, so the
+ *  door retracts exactly the records its own attempts created.
+ *  A refusal that stays refused keeps its record. */
+export function deleteDispatchRefusals(root: string, ids: string[]): void {
+  if (!ids.length || !orchestrationStoreExists(root)) return;
+  const db = openStore(root);
+  try { const del = db.prepare("DELETE FROM orch_refusals WHERE id = ?"); for (const id of ids) del.run(id); }
+  catch (error) { recordStoreFailure(root, "write", error); throw error; } finally { db.close(); }
+}
+
 export function listDispatchRefusals(root: string, profile?: string): DispatchRefusal[] {
   if (!orchestrationStoreExists(root)) return [];
   const db = openStore(root);
@@ -228,12 +251,25 @@ export function listJobs(root: string, profile?: string): OrchestrationJob[] {
 }
 export function listLanes(root: string, jobId: string): Lane[] { return readLanes(root, jobId); }
 
-/** The spawn pool a profile has left, read live from the sub-agent registry. */
+/** A team that does not fit the hiring context's pool: the numbers
+ *  ride as data so the hire door can continue the turn into its next
+ *  tranche and retry, or answer with a value result, instead of the
+ *  refusal dying as an opaque error (Defect 3). */
+export class OrchestrationFitError extends Error {
+  readonly poolRefusal = true;
+  constructor(message: string, readonly remaining: { rounds: number; maxCalls: number }, readonly asks: { rounds: number; maxCalls: number }) {
+    super(message);
+    this.name = "OrchestrationFitError";
+  }
+}
+
+/** The spawn pool a profile has left, read live from the sub-agent
+ *  registry IN THE CURRENT HIRING CONTEXT (subagents.ts): an owner
+ *  turn sees its tranche pool, anything else the small pool, counted
+ *  per scope - never as a lifetime ledger (Defect 3). */
 export function remainingPool(root: string, profile: string): { rounds: number; maxCalls: number } {
-  const used = listSubagents(root, profile)
-    .filter(s => s.status !== "cancelled")
-    .reduce((sum, s) => ({ rounds: sum.rounds + s.budget.rounds, maxCalls: sum.maxCalls + s.budget.maxCalls }), { rounds: 0, maxCalls: 0 });
-  return { rounds: Math.max(0, PARENT_POOL.rounds - used.rounds), maxCalls: Math.max(0, PARENT_POOL.maxCalls - used.maxCalls) };
+  const left = spawnPoolRemaining(listSubagents(root, profile), profile);
+  return { rounds: left.rounds, maxCalls: left.maxCalls };
 }
 
 function laneTools(kind: LaneKind, requested: string[] | undefined, profileTools: string[]): string[] {
@@ -247,8 +283,21 @@ function laneTools(kind: LaneKind, requested: string[] | undefined, profileTools
   return [...new Set(requested)];
 }
 
+/** The price of one lane: its explicit budget when the plan carries
+ *  one, else the kind default. An explicit budget outside the
+ *  per-worker caps is refused BY NAME - never silently repriced
+ *  (issue #96). */
+export function laneBudget(spec: LaneSpec): { rounds: number; maxCalls: number } {
+  if (spec.budget === undefined) return { ...ORCH_LANE_BUDGETS[spec.kind] };
+  const b = spec.budget;
+  if (!b || !Number.isInteger(b.rounds) || !Number.isInteger(b.maxCalls) || b.rounds < 1 || b.rounds > 6 || b.maxCalls < 1 || b.maxCalls > 16)
+    throw new Error("Lane " + (spec.name ?? "?") + " has an unsupported budget (" + JSON.stringify(b) + "): a lane budget is {rounds: 1 to 6, maxCalls: 1 to 16}. Give a budget inside those caps or omit it for the kind default.");
+  return { rounds: b.rounds, maxCalls: b.maxCalls };
+}
+
 function validateSpec(spec: LaneSpec, profileTools: string[]): void {
   if (!spec.name?.trim() || !/^[a-z][a-z0-9-]{0,40}$/.test(spec.name.trim())) throw new Error("Lane needs a simple name (lowercase, dashes): " + (spec.name ?? ""));
+  laneBudget(spec);
   for (const field of ["goal", "doneLooksLike", "notDoneLooksLike", "landsAt"] as const) {
     if (!spec[field]?.trim()) throw new Error("Lane " + spec.name + " is missing its done-shape: " + field + " is required (end goal / what done looks like / what done does not look like / where it lands)");
   }
@@ -289,7 +338,7 @@ export function planJob(root: string, input: PlanInput): { job: OrchestrationJob
     }
   }
   const total = flat.reduce((sum, { spec }) => {
-    const b = ORCH_LANE_BUDGETS[spec.kind];
+    const b = laneBudget(spec);
     return { rounds: sum.rounds + b.rounds, maxCalls: sum.maxCalls + b.maxCalls };
   }, { rounds: 0, maxCalls: 0 });
   const left = remainingPool(root, profile);
@@ -299,7 +348,11 @@ export function planJob(root: string, input: PlanInput): { job: OrchestrationJob
     try { putRefusal(root, refusal); } catch { /* the refusal record never masks the refusal itself */ }
     writeChatCallout(root, refusal.chatId, "Dispatch blocked · 0 of " + flat.length + " workers started",
       "Requested " + total.rounds + " rounds / " + total.maxCalls + " calls; available " + left.rounds + " rounds / " + left.maxCalls + " calls.\n" + reason);
-    throw new Error(reason);
+    // The refusal is recorded and called out above; the throw stays
+    // the TYPED fit error (Defect 3): the hire doors catch it to
+    // continue the turn into its next tranche before any refusal
+    // reaches the owner as a value.
+    throw new OrchestrationFitError(reason, left, total);
   }
   const now = new Date().toISOString();
   const job: OrchestrationJob = { id: randomUUID(), profile, ask: input.ask.trim(), status: "planned", consolidated: null, createdAt: now, finishedAt: null, chatId: input.chatId ?? null, poolAtDispatch: { ...left } };
@@ -314,7 +367,7 @@ export function planJob(root: string, input: PlanInput): { job: OrchestrationJob
       dependsOn: [...(spec.dependsOn ?? [])], verify: spec.verify ?? null,
       depth, parentLaneId: null,
       status: "planned", workerId: null, attempts: 0, result: null, verdict: null, verdictReasons: null, blocker: null,
-      budget: { ...ORCH_LANE_BUDGETS[spec.kind] },
+      budget: laneBudget(spec),
       createdAt: now, updatedAt: now,
     };
     idByName.set(lane.name, lane.id);
@@ -353,7 +406,7 @@ export function openWorkerLane(root: string, coordinatorLaneId: string, spec: La
     dependsOn: [...(spec.dependsOn ?? [])], verify: spec.verify ?? null,
     depth: parent.depth + 1, parentLaneId: parent.id,
     status: "planned", workerId: null, attempts: 0, result: null, verdict: null, verdictReasons: null, blocker: null,
-    budget: { ...ORCH_LANE_BUDGETS[spec.kind] }, createdAt: now, updatedAt: now,
+    budget: laneBudget(spec), createdAt: now, updatedAt: now,
   };
   putLane(root, lane);
   recordActivity(root, job.profile, "orchestration-hired", "Lane " + lane.name + " opened under coordinator " + parent.name + " at depth " + lane.depth);
@@ -625,6 +678,17 @@ export async function runJob(root: string, jobId: string): Promise<{ job: Orches
  * loader-loop guard; the job had already run).
  */
 export async function orchestrate(root: string, input: PlanInput): Promise<{ job: OrchestrationJob; lanes: Lane[] }> {
+  // A job submitted with no hiring context (the CLI, a test) carries
+  // its own small-pool scope, so its workers' carves are the job's
+  // books and never leak into the next job's pool (Defect 3). Inside
+  // a turn, the turn's context rules and nothing is re-scoped.
+  if (!currentSpawnPool()) {
+    return withSpawnPool(smallSpawnPool("job:" + randomUUID()), () => orchestrateInContext(root, input));
+  }
+  return orchestrateInContext(root, input);
+}
+
+async function orchestrateInContext(root: string, input: PlanInput): Promise<{ job: OrchestrationJob; lanes: Lane[] }> {
   const profile = input.profile?.trim() || "sam";
   const ask = input.ask?.trim() ?? "";
   if (ask) {

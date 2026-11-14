@@ -6,9 +6,10 @@ import { linkExchange } from "./collab.js";
 import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions.js";
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
-import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type ToolBudget, type TurnEndReason } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, deferredCatalogLine, isLoaderOnlyRound, loadedTools, loaderLoopFallbackAnswer, loaderLoopLedgerSummary, loaderLoopNudge, notLoadedStubContent, partitionTools, recordToolLoad, toolNameOf } from "./tool-tiers.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
+import type { SpawnPoolContext } from "./subagents.js";
 import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
 import { verificationStatus } from "./verification.js";
 import { patchNote, saveNote } from "./notes.js";
@@ -101,6 +102,20 @@ export function skillCatalogForPrompt(root:string,actor?:string):string{
   return line.slice(0,3000);
 }
 const collabInFlight=new Set<string>();
+/** A hire that fits no tranche of this turn returns as DATA, not an
+ *  error (Defect 3): the numbers ride along, the result is marked
+ *  noProgress (a repeat call is preparation, never work), and the note
+ *  tells the model the honest exits - a smaller team, its own tools,
+ *  or the background - instead of re-planning the same team. */
+function poolRefusalResult(e:{remaining:{rounds:number;maxCalls:number};asks:{rounds:number;maxCalls:number}}):Record<string,unknown>{
+  return {
+    status:"does-not-fit",
+    noProgress:true,
+    remaining:e.remaining,
+    asks:e.asks,
+    note:"This hire does not fit the worker pool left in this turn ("+e.remaining.rounds+" rounds, "+e.remaining.maxCalls+" calls left; it asks "+e.asks.rounds+" rounds, "+e.asks.maxCalls+" calls), and the turn cannot refill further. Do not re-plan the same team - it will refuse again with the same numbers. Hire a smaller team that fits the remaining numbers, do the work with your own tools, or hand it to the background with sam_handoff_task and tell the owner it is handed off.",
+  };
+}
 async function executeOwnToolAsyncInner(root:string,actor:string,name:string,args:Record<string,unknown>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,userMessageId?:string):Promise<unknown>{
   if(name==="sam_search_skills"){
     try{const results=await searchSkillRegistry(typeof args.query==="string"?args.query:"",8);return {untrusted:true,results};}
@@ -117,17 +132,36 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
     if(!chatId)return {error:"A helper needs the current chat so its answer can be folded back"};
     try{
       const cs=new ChatStore(root);try{if(cs.isVisitor(chatId))return {error:"Visitors cannot spawn helpers: a visitor is not the owner"};}finally{cs.close();}
-      const { startBackgroundSubagent, spawnSubagent, currentParentId } = await import("./subagents.js");
+      const { startBackgroundSubagent, spawnSubagent, currentParentId, isPoolRefusal, currentSpawnPool, advanceSpawnPoolTranche } = await import("./subagents.js");
       const role = args.role === "build" || args.role === "review" || args.role === "research" ? args.role : "research";
       const tools = Array.isArray(args.tools) ? args.tools.filter((tool): tool is string => typeof tool === "string") : undefined;
       const parentId = currentParentId();
       const prompt = typeof args.prompt === "string" ? args.prompt : "";
-      if (parentId) {
-        const child = await spawnSubagent(root, { profile: actor, prompt, role, tools, parentId, chatId, quiet: true });
-        return { status: child.status, id: child.id, result: child.result, note: "This result is for you, not the owner. Do not quote the helper or any verdict label." };
+      const hire=async():Promise<unknown>=>{
+        if (parentId) {
+          const child = await spawnSubagent(root, { profile: actor, prompt, role, tools, parentId, chatId, quiet: true });
+          return { status: child.status, id: child.id, result: child.result, note: "This result is for you, not the owner. Do not quote the helper or any verdict label." };
+        }
+        const started = startBackgroundSubagent(root, { profile: actor, prompt, role, tools, chatId });
+        return { status: started.status, id: started.id, ownerLine: started.ownerLine, note: "Tell the owner only: Working on it. Do not mention the helper. The folded answer is posted when it finishes." };
+      };
+      // Pool refusals (Defect 3): on an owner turn the answer is the
+      // Lane F continuation - advance into the turn's next tranche,
+      // whose pool is refilled, and hire there - never a refusal that
+      // pushes the work back on the owner. A plan that fits no tranche
+      // comes back as a value result carrying its numbers, marked
+      // noProgress so re-calling it cannot pose as work.
+      try{return await hire();}
+      catch(e){
+        if(!isPoolRefusal(e))throw e;
+        const ctx=currentSpawnPool();
+        if(ctx&&advanceSpawnPoolTranche(ctx)){
+          try{recordActivity(root,actor,"orchestration-continued","Hiring continued into tranche "+ctx.tranche+" of this turn: the spawn pool refilled instead of refusing the hire");}catch{/* the ledger never breaks a turn */}
+          try{return await hire();}
+          catch(e2){if(!isPoolRefusal(e2))throw e2;return poolRefusalResult(e2);}
+        }
+        return poolRefusalResult(e);
       }
-      const started = startBackgroundSubagent(root, { profile: actor, prompt, role, tools, chatId });
-      return { status: started.status, id: started.id, ownerLine: started.ownerLine, note: "Tell the owner only: Working on it. Do not mention the helper. The folded answer is posted when it finishes." };
     }catch(e){return {error:e instanceof Error?e.message:"Sub-agent failed to start"};}
   }
   if(name==="sam_orchestrate"){
@@ -139,10 +173,42 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
     if(!chatId)return {error:"Orchestration needs a chat to report back into"};
     try{
       const cs=new ChatStore(root);try{if(cs.isVisitor(chatId))return {error:"Visitors cannot run orchestrated jobs: a visitor is not the owner"};}finally{cs.close();}
-      const { orchestrate } = await import("./orchestration.js");
+      const { orchestrate, OrchestrationFitError, listDispatchRefusals, deleteDispatchRefusals } = await import("./orchestration.js");
+      const { isPoolRefusal, currentSpawnPool, advanceSpawnPoolTranche } = await import("./subagents.js");
       const lanes = Array.isArray(args.lanes) ? args.lanes.filter((l): l is Record<string,unknown> => !!l && typeof l==="object") : [];
-      const { job } = await orchestrate(root, { profile: actor, ask: typeof args.goal==="string"?args.goal:"", lanes: lanes as never });
-      return { status: job.status, jobId: job.id, result: job.consolidated, note: "This consolidated result is the whole owner-facing outcome of the job. Report it in your own words; do not mention lanes, workers, or retries unless the owner asks for the lane detail." };
+      const plan={ profile: actor, ask: typeof args.goal==="string"?args.goal:"", lanes: lanes as never };
+      // planJob records every refused plan for the run inspector.
+      // A plan this door goes on to hire in the next tranche was
+      // only provisionally refused: snapshot the records so a
+      // successful retry can retract exactly its own attempts'.
+      const refusalIdsBefore=new Set(listDispatchRefusals(root,actor).map(r=>r.id));
+      // Pool fit (Defect 3): the coordinator's fit-check reads the
+      // hiring turn's live pool. A worthwhile team that does not fit
+      // what remains of this tranche continues the turn into its next
+      // tranche (Lane F) and hires there; only a team that fits no
+      // tranche comes back, as a value result with its numbers.
+      let job;
+      try{ ({ job } = await orchestrate(root, plan)); }
+      catch(e){
+        if(!(e instanceof OrchestrationFitError)&&!isPoolRefusal(e))throw e;
+        const ctx=currentSpawnPool();
+        if(!ctx||!advanceSpawnPoolTranche(ctx))return poolRefusalResult(e as {remaining:{rounds:number;maxCalls:number};asks:{rounds:number;maxCalls:number}});
+        try{recordActivity(root,actor,"orchestration-continued","Team hiring continued into tranche "+ctx.tranche+" of this turn: the worker pool refilled instead of refusing the plan");}catch{/* the ledger never breaks a turn */}
+        try{ ({ job } = await orchestrate(root, plan)); }
+        catch(e2){
+          if(!(e2 instanceof OrchestrationFitError)&&!isPoolRefusal(e2))throw e2;
+          return poolRefusalResult(e2 as {remaining:{rounds:number;maxCalls:number};asks:{rounds:number;maxCalls:number}});
+        }
+        // The retry hired: retract the provisional refusal records
+        // this hire's attempts created (the final refusal path
+        // above keeps its records).
+        try{ deleteDispatchRefusals(root, listDispatchRefusals(root,actor).filter(r=>!refusalIdsBefore.has(r.id)).map(r=>r.id)); }catch{ /* retraction never breaks a hire */ }
+      }
+      // An idempotent return (the same ask already has a job inside
+      // the window) created no lanes: it is preparation, not progress,
+      // so the loop guard can see a repeat for the filler it is.
+      const alreadyExisted=Date.now()-new Date(job.createdAt).getTime()>2000;
+      return { status: job.status, jobId: job.id, result: job.consolidated, ...(alreadyExisted?{noProgress:true}:{}), note: "This consolidated result is the whole owner-facing outcome of the job. Report it in your own words; do not mention lanes, workers, or retries unless the owner asks for the lane detail." };
     }catch(e){return {error:e instanceof Error?e.message:"Orchestration failed"};}
   }
   if(name==="sam_coding_task"){
@@ -516,7 +582,7 @@ export const OWN_TOOLS:Array<Record<string,unknown>>=[
  {type:"function",function:{name:"sam_code",description:"Your coder hands in the ONE designated code root (a project tree the operator designated with the CLI; it is never SAM's own home, and you cannot move it). Actions: status (the root, the allowlisted commands, recent writes), list (path), read (path), write (path, content - create or replace a whole text file), edit (path, oldText, newText - oldText must appear exactly once), writes (the ledgered write history with diffs), run (command - ONLY these allowlisted names: build, test, lint = the code root's own package.json scripts; git-status, git-diff, git-log = read-only git; git-clone = clone one url into a destination directory inside the code root, both fields required, no shell and no push, URL and destination ledgered; agent-reach-channels, agent-reach-doctor = the agent-reach CLI's read-only reports, which report not-installed when the binary is absent), python (path of a script file already inside the code root, or path plus sandbox to run a file inside that sandbox; argv is the interpreter plus the file; the run is ledgered with the script's content hash; timeout and output cap apply; the environment is scrubbed of connector tokens and model keys unless passThrough lists variable NAMES to keep), sandbox-list, sandbox-create (name), sandbox-destroy (name - only a sandbox SAM created), sandbox-write (name, path, content), sandbox-pip (name, package, version - ledgered as that exact package and version). A sandbox is dependency and filesystem isolation under a SAM-managed sandboxes directory, with its own venv. Env files, secrets, keys, binaries, dot-paths, and symlinks are refused on every action. There is NO arbitrary shell: you never supply a command line or a flag. Every code-root write is ledgered with its diff and counts as unverified until build and test pass - run both after writing before calling work done. Visitors cannot use this tool.",parameters:{type:"object",properties:{action:{type:"string",enum:["status","list","read","write","edit","writes","run","python","sandbox-list","sandbox-create","sandbox-destroy","sandbox-write","sandbox-pip"]},path:{type:"string"},content:{type:"string"},oldText:{type:"string"},newText:{type:"string"},command:{type:"string"},url:{type:"string"},destination:{type:"string"},sandbox:{type:"string"},passThrough:{type:"array",items:{type:"string"}},name:{type:"string"},package:{type:"string"},version:{type:"string"}},required:["action"],additionalProperties:false}}},
  {type:"function",function:{name:"sam_handoff_task",description:"Hand a long or research-heavy task to the background: it runs later on a deeper tool budget and posts its result back into THIS chat. The current turn ends without waiting. Use it when the owner asks for deep research, a big comparison, or anything that would take many tool calls; keep the prompt self-contained, since the background run starts from the prompt plus this chat's history.",parameters:{type:"object",properties:{prompt:{type:"string"},title:{type:"string"}},required:["prompt"],additionalProperties:false}}},
  {type:"function",function:{name:"sam_spawn_subagent",description:"Start an invisible helper for one chunk of work (research, a build step, or a review pass) and return immediately so this chat stays responsive. The owner never sees the helper. After this tool returns, your only reply is the one line Working on it. The helper's result is folded into a later answer. Spawn a review helper before you tell the owner a piece of work is done. The helper inherits your tools or a narrower list; it cannot gain tools you do not have. A consequential proposal it makes still waits for the owner. When no connector is pinned, the helper runs on the plain chat path.",parameters:{type:"object",properties:{prompt:{type:"string",description:"Self-contained task. The helper does not see this chat."},role:{type:"string",enum:["research","build","review"]},tools:{type:"array",items:{type:"string"},description:"Optional narrower allowlist. Omit to use the role's default, which is already narrower than yours."}},required:["prompt"],additionalProperties:false}}},
- {type:"function",function:{name:"sam_orchestrate",description:"Run a whole job as lanes when an ask has several parts that different workers should carry (research plus build plus verify, or a sweep across sources). YOU decompose the job: each lane gets a name, a kind (research, build, verify, coordinate, general), a goal, doneLooksLike (what done looks like), notDoneLooksLike (what does NOT count as done), and landsAt (where its result lands). Workers are invisible: each gets only its lane's facts and rules, a narrower tool hand than yours, and a real budget. The coordinator verifies every lane's result before it counts (artifacts must exist with the required content; research must name its sources; a verify lane must approve), retires and replaces a stuck worker once, and returns ONE consolidated result: what landed and what is blocked, by name. A lane may carry dependsOn (lane names that must land first) and verify {artifact, mustMention}. A coordinate lane may carry workers (its own lanes, one level deep, never deeper). Report the consolidated result to the owner in your own words; never make the owner manage the workers, and never mention lanes or retries unless the owner asks for the lane detail.",parameters:{type:"object",properties:{goal:{type:"string",description:"The owner's ask, in one line."},lanes:{type:"array",description:"The lanes you planned for this job.",items:{type:"object",additionalProperties:true,properties:{name:{type:"string"},kind:{type:"string",enum:["research","build","verify","coordinate","general"]},goal:{type:"string"},doneLooksLike:{type:"string"},notDoneLooksLike:{type:"string"},landsAt:{type:"string"},tools:{type:"array",items:{type:"string"}},facts:{type:"array",items:{type:"string"}},lawLines:{type:"array",items:{type:"string"}},dependsOn:{type:"array",items:{type:"string"}},verify:{type:"object",additionalProperties:true,properties:{artifact:{type:"string"},mustMention:{type:"array",items:{type:"string"}}}}}},required:["name","kind","goal","doneLooksLike","notDoneLooksLike","landsAt"]}},required:["goal","lanes"],additionalProperties:false}}},
+ {type:"function",function:{name:"sam_orchestrate",description:"Run a whole job as lanes when an ask has several parts that different workers should carry (research plus build plus verify, or a sweep across sources). YOU decompose the job: each lane gets a name, a kind (research, build, verify, coordinate, general), a goal, doneLooksLike (what done looks like), notDoneLooksLike (what does NOT count as done), and landsAt (where its result lands). Workers are invisible: each gets only its lane's facts and rules, a narrower tool hand than yours, and a real budget. The coordinator verifies every lane's result before it counts (artifacts must exist with the required content; research must name its sources; a verify lane must approve), retires and replaces a stuck worker once, and returns ONE consolidated result: what landed and what is blocked, by name. A lane may carry dependsOn (lane names that must land first) and verify {artifact, mustMention}. A coordinate lane may carry workers (its own lanes, one level deep, never deeper). Report the consolidated result to the owner in your own words; never make the owner manage the workers, and never mention lanes or retries unless the owner asks for the lane detail.",parameters:{type:"object",properties:{goal:{type:"string",description:"The owner's ask, in one line."},lanes:{type:"array",description:"The lanes you planned for this job.",items:{type:"object",additionalProperties:true,properties:{name:{type:"string"},kind:{type:"string",enum:["research","build","verify","coordinate","general"]},goal:{type:"string"},doneLooksLike:{type:"string"},notDoneLooksLike:{type:"string"},landsAt:{type:"string"},tools:{type:"array",items:{type:"string"}},facts:{type:"array",items:{type:"string"}},lawLines:{type:"array",items:{type:"string"}},dependsOn:{type:"array",items:{type:"string"}},verify:{type:"object",additionalProperties:true,properties:{artifact:{type:"string"},mustMention:{type:"array",items:{type:"string"}}}},budget:{type:"object",additionalProperties:false,properties:{rounds:{type:"number",description:"Worker rounds for this lane, 1 to 6"},maxCalls:{type:"number",description:"Worker tool calls for this lane, 1 to 16"}},description:"Optional per-lane budget, priced exactly as given; omit for the kind default. A budget outside the caps is refused by name, never silently repriced."}}},required:["name","kind","goal","doneLooksLike","notDoneLooksLike","landsAt"]}},required:["goal","lanes"],additionalProperties:false}}},
  {type:"function",function:{name:"sam_coding_task",description:"Queue a CODING task for the background coding loop: give a self-contained spec of the change to make in the designated code root. The loop runs later on a deep budget: it plans, edits through sam_code, runs build and test, treats a verification failure as data and iterates (up to maxIterations, default 3), and posts a summary with every change's diff back into THIS chat. The task only counts as done when the verification ledger confirms a fresh build and test pass after the last change; if iterations run out first it closes as blocked, never as done. When the code root is a git repository the loop works on a sam/<task> branch made for the task and commits its writes locally on that branch as it goes (a tree dirty before the task starts blocks it); the branch is never pushed by the loop - pushing it is the owner's approval via a git-push proposal. Use it when the owner asks for a code change that may take several edit-and-verify rounds instead of stalling the conversation; keep the spec concrete (files, behavior, what passing looks like). Visitors cannot queue coding tasks.",parameters:{type:"object",properties:{spec:{type:"string"},maxIterations:{type:"number"}},required:["spec"],additionalProperties:false}}},
  {type:"function",function:{name:"sam_brief",description:"Assemble the morning brief: the core profile's deterministic daily digest - today's calendar and the last day's mail through the senses, what needs the owner (approvals waiting, stuck or failed deliveries, heartbeat jobs that failed in the last day), each heartbeat watch's latest verdict, and the open background/coding/engine queues. Core profile only: a scoped profile is refused, and visitors are refused. A section whose source is not available says so plainly in the brief itself (for example when no senses reader is installed) - report that instead of guessing. Use it when the owner asks for their brief, their day, or what needs them.",parameters:{type:"object",properties:{},required:[],additionalProperties:false}}},
  {type:"function",function:{name:"sam_senses",description:"The CORE profile's senses: read the owner's Gmail and Calendar, read-only. Actions: status (whether the senses reader - gog, the Google Workspace CLI - is installed on this machine), mail (search Gmail: query is a Gmail search string, max results 1-25; with no query it reads the last 7 days of the inbox), agenda (calendar events from now through the next N days, 1-7, default 1). Only the core profile (sam) may use this: a scoped profile reads only its own connector data, never the owner's mailbox or calendar, and visitors are refused. Nothing here can send, modify, or delete mail or events. When no reader is installed the result says so plainly - report that instead of guessing at the owner's day.",parameters:{type:"object",properties:{action:{type:"string",enum:["status","mail","agenda"]},query:{type:"string"},max:{type:"number"},days:{type:"number"}},required:["action"],additionalProperties:false}}},
@@ -537,7 +603,7 @@ export function ownToolsFor(root:string):Array<Record<string,unknown>>{
   return {type:"function",function:{...fn,description:(fn.description??"")+" For kind heartbeat, detail.profile MUST be exactly one of these profile names: "+names+". A connector's display name (for example \"Second Shift\") is NOT a profile name; use the profile name from this list."}};
  });
 }
-export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null):Promise<string>{
+async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider,poolCtx?:SpawnPoolContext):Promise<string>{
  // Deferred tool loading (harness item 4): the full set is partitioned
  // per round - below the threshold everything rides upfront exactly as
  // before; above it, only the upfront tier plus the loader are sent,
@@ -554,7 +620,15 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
   ...history];
  let callsUsed=0;
  const executed:string[]=[];const skipped:string[]=[];let exhausted=false;
- let loaderOnlyStreak=0;let loaderLoop=false;
+ // Preparation-loop state (Defect 1): the streak counts consecutive
+ // preparation-only rounds (loads, and hire calls that created
+ // nothing); on an owner turn a trip steers hard and disables the
+ // loader instead of ending the turn, on any other turn it stops the
+ // turn into the honest fallback below. steerStopped is Defect 2's
+ // owner stop, folded in at a round boundary.
+ let prepStreak=0;let loaderLoop=false;let loaderDisabled=false;let steerStopped=false;let trimLogged=false;
+ const trimTurnHistory=()=>{ if(messages.length>REQUEST_MESSAGE_CAP){ const dropped=trimRoundBlocks(messages); if(dropped&&!trimLogged){ trimLogged=true; try{ recordActivity(root,actor,"turn-history-trimmed","Folded "+dropped+" older completed round(s) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger"); }catch{ /* the ledger never breaks a turn */ } } } };
+
  // Owner-turn ceiling (budgets.ts): when a ceiling rides, the soft
  // budget is only the first tranche - the loop runs to the ceiling,
  // each tranche crossing ledgers one budget-continued line, and only
@@ -574,6 +648,9 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  const noteTranche=()=>{
   if(!ceilingMode)return;
   const tranche=Math.max(Math.floor(callsUsed/budget.maxCalls),Math.floor(roundsUsed/budget.rounds));
+  // The spawn pool rides the same tranches (Defect 3): when the turn
+  // crosses into a fresh tranche, the hiring pool refills with it.
+  if(poolCtx&&poolCtx.owner&&tranche>poolCtx.tranche)poolCtx.tranche=tranche;
   if(tranche>lastTranche){lastTranche=tranche;try{recordActivity(root,actor,"budget-continued",budgetContinuedSummary(tranche,executed,roundsUsed));}catch{/* the ledger never breaks a turn */}}
  };
  // The turn-end lines that must land however the turn closes: a
@@ -606,10 +683,25 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
  };
  for(let round=0;round<effRounds&&!exhausted&&!guardrailed&&!loaderLoop;round++){
   roundsUsed=round+1;
+  // Owner steering (Defect 2): at each tool-round boundary after the
+  // first, fold in whatever the owner sent while the turn ran. The
+  // provider has already persisted those messages to the chat; here
+  // they join the live prompt as user messages, the latest governing.
+  // A stop closes the turn after this step through the synthesis.
+  if(steer&&round>0){
+   const batch=steer();
+   if(batch&&(batch.contents.length||batch.cancel)){
+    for(const extra of batch.contents)messages.push({role:"user",content:extra});
+    if(batch.cancel){messages.push({role:"system",content:stopSystemNote()});steerStopped=true;}
+    else messages.push({role:"system",content:steerSystemNote(batch.contents.length)});
+    try{recordActivity(root,actor,batch.cancel?"message-stop":"message-steer",batch.cancel?("Owner said stop mid-turn after "+executed.length+" calls; the turn closes with an accounting"):("Owner sent "+batch.contents.length+" message(s) mid-turn; folded into the running turn, the latest governs"));}catch{/* the ledger never breaks a turn */}
+    if(batch.cancel)break;
+   }
+  }
   const part=partitionTools(allDefs,currentLoaded());
-  const sendTools=part.active?[...part.upfront,LOADER_TOOL_DEF]:part.upfront;
+  const sendTools=part.active?(loaderDisabled?part.upfront:[...part.upfront,LOADER_TOOL_DEF]):part.upfront;
   let turn;
-  try { turn = await provider.completeConnectorTurn(model, messages, sendTools); }
+  try { trimTurnHistory(); turn = await provider.completeConnectorTurn(model, messages, sendTools); }
   catch (e) {
     // Context-reset retry (owner defect 2026-11-10): a long or
     // failure-poisoned history can make the model emit nothing but
@@ -623,7 +715,7 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
     if (!trimmed || trimmed.length >= messages.length) throw e;
     messages.splice(0, messages.length, ...trimmed);
     recordActivity(root, actor, "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
-    turn = await provider.completeConnectorTurn(model, messages, sendTools);
+    trimTurnHistory(); turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
   if(!turn.calls.length){flushEndLines();return finish(turn.content??"No response.");}
   // Failover may only happen before any tool runs. The moment this
@@ -638,6 +730,7 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
   const outputs=new Map<string,unknown>();
   const pending:Array<{id:string;run:()=>Promise<unknown>}>=[];  
   const roundCalls:string[]=[];
+  const roundExecuted=new Set<string>();
   const roundSigs=new Map<string,string>();
   const dupOf:Array<{id:string;of:string;name:string}>=[];
   for(const call of turn.calls){
@@ -663,12 +756,25 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
     const firstId=roundSigs.get(sig);
     if(firstId){dupOf.push({id:call.id,of:firstId,name:call.name});continue;}
    }
+   // Repeat loads are no-ops (Defect 1): a loader call whose every
+   // valid name is already loaded for this chat returns the cached
+   // acknowledgement - no budget spent, nothing executed, and the
+   // round does not count as a loader round. After a preparation-loop
+   // trip the loader is off for the turn and calls stub the same way.
+   if(call.name===LOADER_TOOL_NAME){
+    if(loaderDisabled){outputs.set(call.id,loaderDisabledStubContent());continue;}
+    const wantNames=Array.isArray(call.args?.names)?call.args.names.filter((n):n is string=>typeof n==="string"):[];
+    const validNames=new Set(allDefs.map(toolNameOf));
+    const loadedNowSet=currentLoaded();
+    const fresh=wantNames.filter(n=>validNames.has(n)&&!loadedNowSet.has(n));
+    if(!fresh.length){const again=wantNames.filter(n=>validNames.has(n));for(const n of again){ephemeralLoaded.delete(n);ephemeralLoaded.add(n);}if(chatId&&again.length)touchToolLoads(root,chatId,again);outputs.set(call.id,alreadyLoadedAck(again,wantNames.filter(n=>!validNames.has(n))));continue;}
+   }
    if(callsUsed>=effCalls){if(ceilingMode){guardrailed=true;guardrailReason="calls";outputs.set(call.id,guardrailStubContent(executed,ceiling as ToolBudget));}else{exhausted=true;outputs.set(call.id,budgetStubContent(executed,budget.maxCalls));}skipped.push(call.name);continue;}
    // A deferred tool called before loading is stubbed, not executed, and
    // does not spend budget: the stub names the loader, the model loads,
    // and the next round sends the real definition.
-   if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
-   callsUsed++;executed.push(call.name);roundCalls.push(call.name);
+   if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)&&!currentLoaded().has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
+   callsUsed++;executed.push(call.name);roundCalls.push(call.name);roundExecuted.add(call.id);
    if(call.name!==LOADER_TOOL_NAME)roundSigs.set(failureSignature(call.name,call.args),call.id);
    if(call.name===LOADER_TOOL_NAME){
     const names=Array.isArray(call.args?.names)?call.args.names.filter((n):n is string=>typeof n==="string"):[];
@@ -720,25 +826,49 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
   }
-  // Loader-loop guard: one loader-only round gets a nudge for the
-  // next step; a second consecutive one stops the turn here and
-  // the synthesis below (or the loader-loop fallback) reports it
-  // honestly - never as a step or budget failure.
-  if(isLoaderOnlyRound(roundCalls)){
-   loaderOnlyStreak++;
-   if(loaderOnlyStreak>=LOADER_LOOP_LIMIT){loaderLoop=true;recordActivity(root,actor,"loader-loop",loaderLoopLedgerSummary(executed));}
+  // Preparation-loop guard (Defect 1, generalizing the loader-loop
+  // guard): a round counts as preparation-only when every call it
+  // executed was a load or a hire call whose result created nothing
+  // (marked noProgress) - the recorded loop interleaved the two and
+  // thrashed for 13 calls. One such round gets the nudge; a second
+  // consecutive one trips. On an owner turn the trip never ends the
+  // turn (Lane F doctrine): it ledgers, steers hard, disables the
+  // loader for the rest of the turn, and the turn continues with the
+  // tools already loaded until it answers or the ceiling closes it.
+  // On any other turn the trip stops the turn into the honest
+  // fallback below - never dressed as a step or budget failure.
+  let roundProgress=false;
+  for(const call of turn.calls){
+   if(!roundExecuted.has(call.id))continue;
+   if(!PREPARATION_CALLS.has(call.name)){roundProgress=true;break;}
+   if(call.name==="sam_orchestrate"||call.name==="sam_spawn_subagent"){
+    const out=outputs.get(call.id);
+    if(!(out&&typeof out==="object"&&(out as {noProgress?:unknown}).noProgress===true))roundProgress=true;
+   }
+  }
+  if(isPreparationOnlyRound(roundCalls,roundProgress)){
+   prepStreak++;
+   if(prepStreak>=LOADER_LOOP_LIMIT){
+    const pureLoader=executed.every(n=>n===LOADER_TOOL_NAME);
+    if(ceilingMode){
+     loaderDisabled=true;prepStreak=0;
+     recordActivity(root,actor,pureLoader?"loader-loop":"preparation-loop",prepLoopLedgerSummary(executed,pureLoader)+" - owner turn steered, loader disabled, turn continues with the tools already loaded");
+     messages.push({role:"system",content:prepLoopSteer()});
+    }else{loaderLoop=true;recordActivity(root,actor,pureLoader?"loader-loop":"preparation-loop",prepLoopLedgerSummary(executed,pureLoader));}
+   }
    else messages.push({role:"system",content:loaderLoopNudge()});
-  }else if(roundCalls.length)loaderOnlyStreak=0;
+  }else if(roundCalls.length)prepStreak=0;
  }
  // Rounds exhaustion on an owner turn is a guardrail trip too:
  // the loop spent every round the ceiling allows and the model
  // still had not answered.
- if(ceilingMode&&!guardrailed&&!loaderLoop&&roundsUsed>=effRounds){guardrailed=true;guardrailReason="steps";}
+ if(ceilingMode&&!guardrailed&&!loaderLoop&&!steerStopped&&roundsUsed>=effRounds){guardrailed=true;guardrailReason="steps";}
  flushEndLines();
  if(guardrailed)recordActivity(root,actor,"budget-guardrail",guardrailLedgerSummary(executed,skipped,ceiling as ToolBudget,guardrailReason));
  else if(exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
  const final=await provider.completeConnectorTurn(model,messages,[]);
  if(final.content)return finish(final.content);
+ if(steerStopped)return finish(stopFallbackAnswer(executed));
  if(loaderLoop)return finish(loaderLoopFallbackAnswer(executed));
  if(ceilingMode){
   // The guardrail ending: one reinforced tool-free attempt to
@@ -755,4 +885,24 @@ export async function ownToolsChat(root:string,actor:string,provider:OpenAICompa
   return finish(budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps"));
  }
  return finish("Results received but no summary was produced.");
+}
+
+/** The public turn door: establishes the turn's spawn-pool context
+ *  (Defect 3) and runs the loop inside it. An owner turn (one carrying
+ *  a ceiling) hires from a pool the size of its own tranche budget,
+ *  refilled per tranche and capped cumulatively by its ceiling; every
+ *  other turn hires from the small pool scoped to this invocation -
+ *  so no turn ever inherits a previous turn's spent carves, and no
+ *  profile's history can starve a fresh turn again. */
+export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider):Promise<string>{
+ const { ownerSpawnPool, smallSpawnPool, withSpawnPool, currentSpawnPool } = await import("./subagents.js");
+ const { randomUUID } = await import("node:crypto");
+ // A context already in force was scoped deliberately by the caller
+ // (a sub-agent's drive wraps its turn in its own carved budget):
+ // ride it, never shadow it.
+ const existing=currentSpawnPool();
+ if(existing)return ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,existing);
+ const turnKey="turn:"+(chatId??"ephemeral")+":"+(userMessageId??randomUUID());
+ const poolCtx=ceiling?ownerSpawnPool(turnKey):smallSpawnPool(turnKey);
+ return withSpawnPool(poolCtx,()=>ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,poolCtx));
 }
