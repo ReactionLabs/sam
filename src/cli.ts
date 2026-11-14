@@ -103,6 +103,7 @@ import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
+import { organizeChats } from "./chat-organize.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, patchNote, saveNote } from "./notes.js";
@@ -593,6 +594,7 @@ chats.command("unpin").argument("<id>").option("--profile <name>","Acting profil
 chats.command("branch").argument("<id>").argument("<title>").option("--profile <name>","Acting profile (default sam)").action((id:string,title:string,o:{profile?:string})=>output(branchManagedChat(program.opts().workspace,o.profile??"sam",id,title)));
 chats.command("archive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(archiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
 chats.command("unarchive").argument("<id>").option("--profile <name>","Acting profile (default sam)").action((id:string,o:{profile?:string})=>output(unarchiveManagedChat(program.opts().workspace,o.profile??"sam",id)));
+chats.command("organize").option("--profile <name>","Acting profile (default sam)").description("One organize pass over the acting profile's own chats (the engine behind sam_manage_chats action organize): names chats still carrying a placeholder title from their content, archives stale scratch/test/proof chats idle 7+ days. Reversible; never deletes, never pins. Prints the same summary the chat tool returns.").action(async(o:{profile?:string})=>output(await organizeChats(program.opts().workspace,o.profile??"sam")));
 chats.command("activity").description("Every chat with its last-message time and message count, newest activity first").action(()=>{const db=new ChatStore(program.opts().workspace);try{const act=new Map(db.lastActivity().map(a=>[a.chat_id,a] as const));output(db.list({includeArchived:true}).map(c=>({...c,lastMessageAt:act.get(c.id)?.last_message_at??null,messageCount:act.get(c.id)?.messages??0})).sort((x,y)=>String(y.lastMessageAt??"").localeCompare(String(x.lastMessageAt??""))));}finally{db.close();}});
 chats.command("search").argument("<query>").option("--profile <name>","Acting profile (default sam)").option("--limit <n>","Max hits (default 20)").description("Full-text search (FTS5, relevance-ranked, multi-term prefix) across the acting profile's own chats - the engine behind the sam_search_chats chat tool").action((query:string,o:{profile?:string;limit?:string})=>output(searchManagedChats(program.opts().workspace,o.profile??"sam",query,o.limit?Number(o.limit):20)));
 chats.command("show").argument("<id>").action((id:string)=>{const db=new ChatStore(program.opts().workspace);try{output(db.messages(id));}finally{db.close();}});

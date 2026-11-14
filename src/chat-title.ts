@@ -11,6 +11,24 @@ import { modelRoutingTable } from "./model-routing.js";
 // rename only lands while the chat still carries the provisional title the
 // client created it with, so an owner rename in the meantime always wins.
 
+/**
+ * The provisional title the dashboard client gives a chat created from
+ * the Talk empty state: a cleaned slice of the first message. This is
+ * the server twin of provisionalTitle() in dashboard-ui.ts - the two
+ * must agree, because the organize pass (chat-organize.ts) recognizes
+ * a still-provisional chat by recomputing this from its first message
+ * and comparing it with the stored title.
+ */
+export function provisionalTitle(text: string): string {
+  let t = (text ?? "").split("\n")[0].trim();
+  t = t.replace(/^(hey|hi|ok|okay|so|please|sam)[\s,:\-]+/i, "");
+  t = t.replace(/^(what's|whats|what|how|why|when|where|who|can|could|should|would|is|are|do|does|did)\s+(is|are|was|were|do|does|did|i|we|you|the|a|an)?\s*/i, "");
+  t = t.replace(/\s+/g, " ").replace(/[?.!,;:]+$/, "").trim();
+  if (t.length > 42) t = t.slice(0, 42).replace(/\s+\S*$/, "");
+  if (t) t = t.charAt(0).toUpperCase() + t.slice(1);
+  return t || "New conversation";
+}
+
 export function sanitizeChatTitle(raw: string): string | null {
   let t = (raw ?? "").split("\n")[0].trim();
   t = t.replace(/^["'`]+|["'`]+$/g, "").replace(/\*+/g, "").trim();
