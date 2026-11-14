@@ -10,6 +10,7 @@ import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswe
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, deadlineCloseNote, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
+import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import type { SpawnPoolContext } from "./subagents.js";
 import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
 import { verificationStatus } from "./verification.js";
@@ -649,6 +650,16 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  // the interactive deadline stops new rounds and closes the turn
  // with the status synthesis in the endings section below.
  let deadlineHit=false;
+ // Reply guard (reply-guard.ts): a completion that narrates the
+ // model's process instead of answering is withheld - once the
+ // turn is steered to answer directly, and after that the honest
+ // blocked line closes it. The monologue never becomes the reply.
+ let reasoningRetried=false;
+ const acceptAnswer=(text:string):string|null=>{
+  if(!isReasoningNarration(text))return text;
+  try{recordActivity(root,actor,"reasoning-leak-blocked",reasoningBlockedLedgerSummary(reasoningNarrationSignals(text),"own-tools loop"));}catch{/* the ledger never breaks a turn */}
+  return null;
+ };
  const trimTurnHistory=()=>{ if(messages.length>REQUEST_MESSAGE_CAP){ const dropped=trimRoundBlocks(messages); if(dropped&&!trimLogged){ trimLogged=true; try{ recordActivity(root,actor,"turn-history-trimmed","Folded "+dropped+" older completed round(s) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger"); }catch{ /* the ledger never breaks a turn */ } } } };
 
  // Owner-turn ceiling (budgets.ts): when a ceiling rides, the soft
@@ -746,7 +757,13 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
     recordActivity(root, actor, "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
     trimTurnHistory(); turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
-  if(!turn.calls.length){flushEndLines();return finish(turn.content??"No response.");}
+  if(!turn.calls.length){
+   const raw=turn.content??"No response.";
+   const accepted=acceptAnswer(raw);
+   if(accepted!==null){flushEndLines();return finish(accepted);}
+   if(!reasoningRetried){reasoningRetried=true;messages.push({role:"system",content:answerDirectlyNote()});continue;}
+   flushEndLines();return finish(REASONING_BLOCKED_REPLY);
+  }
   // Failover may only happen before any tool runs. The moment this
   // round has tool calls, later provider errors stay on this route.
   if(guard)guard.toolsStarted=true;
@@ -902,11 +919,12 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   messages.push({role:"system",content:deadlineCloseNote()});
   let closed:string|null=null;
   try{const f=await provider.completeConnectorTurn(model,messages,[]);closed=f.content;}catch{if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);closed=null;}
-  if(closed)return finish(closed);
+  if(closed){const ca=acceptAnswer(closed);if(ca!==null)return finish(ca);}
   return finish(turnDeadlineFallbackAnswer(executed));
  }
  const final=await provider.completeConnectorTurn(model,messages,[]);
- if(final.content)return finish(final.content);
+ let finalBlocked=false;
+ if(final.content){const fa=acceptAnswer(final.content);if(fa!==null)return finish(fa);finalBlocked=true;}
  if(steerStopped)return finish(stopFallbackAnswer(executed));
  if(loaderLoop)return finish(loaderLoopFallbackAnswer(executed));
  if(ceilingMode){
@@ -916,9 +934,10 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   // unreachable on owner surfaces by construction.
   messages.push({role:"system",content:"Your tool access is now off and this turn must close. Answer the person's question now, in plain text, from the tool results already in this conversation. Do not ask for more tools and do not call the answer incomplete: give the best answer the gathered material supports, and name plainly anything it does not cover."});
   const retry=await provider.completeConnectorTurn(model,messages,[]);
-  if(retry.content)return finish(retry.content);
+  if(retry.content){const ra=acceptAnswer(retry.content);if(ra!==null)return finish(ra);return finish(REASONING_BLOCKED_REPLY);}
   return finish(guardrailFallbackAnswer(executed,skipped,ceiling as ToolBudget));
  }
+ if(finalBlocked)return finish(REASONING_BLOCKED_REPLY);
  if(final.calls.length||exhausted){
   if(!exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls,"steps"));
   return finish(budgetFallbackAnswer(executed,skipped,budget.maxCalls,exhausted?"calls":"steps"));

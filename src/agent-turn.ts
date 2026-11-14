@@ -24,6 +24,7 @@ import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIM
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, type TurnControl } from "./turn-control.js";
+import { REASONING_BLOCKED_REPLY, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
 import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
@@ -305,6 +306,11 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       provider.onPartial=(accumulated)=>{
         const visible=stripModelMarkup(accumulated);
         if(!visible)return;
+        // Reply guard, render seam: a draft that reads as process
+        // narration is never persisted as a partial, so it never
+        // renders as a bubble while the turn works. The final
+        // answer is judged on its own full text at the save seam.
+        if(isReasoningNarration(visible))return;
         const text=resuming?joinPartial(resuming.content,visible):visible;
         try{const store=new ChatStore(root);try{partialId=store.savePartial(chatId,partialId,text);}finally{store.close();}}catch{/* a partial write never breaks the read */}
       };
@@ -387,6 +393,15 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
   }
   let finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
+  // Reply guard, save seam (the last net, behind the loops' own
+  // acceptance): reasoning-shaped text never persists as the
+  // assistant reply, whatever path produced it. The loops steer
+  // and retry first; a narration that still reaches this seam is
+  // replaced by the short honest line and ledgered once here.
+  if(isReasoningNarration(finalText)){
+    try{recordActivity(root,profileName,"reasoning-leak-blocked",reasoningBlockedLedgerSummary(reasoningNarrationSignals(finalText),"save"));}catch{/* the ledger never breaks a turn */}
+    finalText=REASONING_BLOCKED_REPLY;
+  }
   // Chat-history citations (issue #92): the citation pass runs
   // BEFORE the save, so a cite marker never reaches the stored
   // text. The model's selection is validated against the hits this
