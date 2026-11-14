@@ -269,6 +269,7 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The next proactive deliveries record their assessments in delivery-ledger.jsonl again instead of worthiness-failed lines, and duplicate/rate decisions move with them",
      "Exactly one worthiness-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "The gate still never breaks the delivery it judges: assessDelivery returns its verdict on a dead ledger (law rules alone when the read died) exactly as callers expect",
+     "A failed worthiness read on a direct surface (the status counts, the deliveries list) still fails closed (one ledger line, then the rethrow) instead of folding to zero counts or dying raw, and an assessment's read never ledgers twice for one touch",
      "The full suite is green, including the worthiness failure-ledger tests"]);
   if (key.startsWith("verification-failed:")) return base(
     ["verification.ts", "file-edits.ts", "code.ts", "approved-test-runner.ts"],
