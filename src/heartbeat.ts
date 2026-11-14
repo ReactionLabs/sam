@@ -360,11 +360,46 @@ function saveState(root:string,state:HeartbeatState){
   writeAll();
  }finally{db.close();}
 }
-export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
- if(!existsSync(logPath(root)))return [];
- return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
+export function heartbeatLogFailureSummary(phase:string,entryType:string,name:string|null,reason:string):string{
+ const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+ if(phase==="read")return ("Heartbeat log read failed for ledger: "+clean).slice(0,300);
+ return ("Heartbeat log append failed for "+entryType+(name?" job '"+name+"'":"")+": "+clean).slice(0,300);
 }
-function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
+export function recordHeartbeatLogFailure(root:string,phase:string,entryType:string,name:string|null,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,"sam","heartbeat-log-failed",heartbeatLogFailureSummary(phase,entryType,name,reason));
+}
+export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
+ // Read seam (gap found 2026-11-13, hourly run 21:04): this log is
+ // folded as truth by status and the daily brief (failed-job counts,
+ // last-tick state), so a dead read fails closed - one
+ // heartbeat-log-failed line, then the rethrow - instead of folding
+ // to [] and reporting no failed jobs and no ticks ever. An absent
+ // log still reads [] and torn-line parsing stays forgiving.
+ let raw:string;
+ try{
+  if(!existsSync(logPath(root)))return [];
+  raw=readFileSync(logPath(root),"utf8");
+ }catch(e){recordHeartbeatLogFailure(root,"read","ledger",null,e);throw e;}
+ return raw.split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
+}
+function appendLog(root:string,entry:Record<string,unknown>):boolean{
+ // Append seam (same gap): the heartbeat log must never break the
+ // work it records - above all the tick guard, whose tick-failed
+ // line rides this append BEFORE its activity line. A dead append
+ // ledgers ONE heartbeat-log-failed activity line (the entry's type
+ // and job name only, never any other payload - job lines carry
+ // reply previews) and returns whether the line landed.
+ try{
+  mkdirSync(join(resolve(root),".sam"),{recursive:true});
+  appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");
+  return true;
+ }catch(e){
+  const name=typeof entry.name==="string"?entry.name:null;
+  recordHeartbeatLogFailure(root,"append",typeof entry.type==="string"?entry.type:"entry",name,e);
+  return false;
+ }
+}
 export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[];correctionFailures:number;curatorFailed:boolean}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
