@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { buildStatusPayload } from "./status.js";
@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
 import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } from "./chat-citations.js";
+import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
@@ -76,6 +77,13 @@ async function refresh(){try{const r=await fetch('/api/status',{cache:'no-store'
 refresh();setInterval(refresh,10000);
 </script></body></html>`;
 function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try{return db.agents();}finally{db.close();}}
+// Build id of the dashboard page this server ships. The status payload
+// carries it and the served page carries its own copy; when they differ the
+// open page is running an old build and refreshes itself once through the
+// stable door (Dip catch 2026-11-14: a fix shipped is not a fix received
+// until the owner's already-open tab picks it up).
+const buildId=createHash("sha256").update(dashboardHtml).digest("hex").slice(0,12);
+
 export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
@@ -141,6 +149,10 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const leads=await readConnectorTool(c,"list_leads",{limit:10},workspace);
         json(200,{identity,summary,leads});
       }catch(e){const m=e instanceof Error?e.message:"Connector request failed";json(400,{error:m.startsWith("MCP ")||m.startsWith("Connector ")||m.startsWith("Required ")||m.startsWith("Tool ") ?m:"Connector request failed"});}return;
+    }
+    const autotitleMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/autotitle$"));
+    if(req.method==="POST"&&autotitleMatch){
+      try{const body=await post();const placeholder=typeof body.placeholder==="string"?body.placeholder:"";const title=await autotitleChat(workspace,autotitleMatch[1],placeholder);json(200,{title});}catch{json(400,{error:"Unable to name chat"});}return;
     }
     const branchMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/branch$"));
     if(req.method==="POST"&&branchMatch){
@@ -222,7 +234,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     // Stable door: the dashboard token rotates on every start. Clients that
     // bookmark /sam (the Rust CLI, a reloaded page) get the current token URL.
     if(req.url==="/sam"||req.url==="/sam/"){res.writeHead(302,{Location:"/dashboard/"+token});res.end();return;}
-    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml);return;}
+    if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml.replaceAll("__SAM_BUILD_ID__",buildId));return;}
     const statusParts=(req.url??"").split("?");
     const bearer=typeof req.headers["authorization"]==="string"&&req.headers["authorization"].startsWith("Bearer ")?req.headers["authorization"].slice(7):"";
     const queryToken=new URLSearchParams(statusParts[1]??"").get("token")??"";
@@ -232,7 +244,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       const activityFilter={actor:statusParams.get("actor")||undefined,kind:statusParams.get("kind")||undefined};
       try{
         res.setHeader("Content-Type","application/json");
-        res.end(JSON.stringify(buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()})));
+        res.end(JSON.stringify({...buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()}),buildId}));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }
