@@ -4,7 +4,7 @@ import { searchWeb } from "./web-search.js";
 import { converse, type ModelProvider } from "./model-conversation.js";
 import { runMemoryToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 import { join, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
@@ -252,19 +252,73 @@ export function updateTeamRun(root: string, id: string, patch: Partial<TeamRunRe
 
 export function listTeamMembers(root: string): StandingMember[] { return readMembers(root); }
 export function listTeamRuns(root: string): TeamRunRecord[] { return readRuns(root); }
-export function listTeamMessages(root: string, limit = 40): TeamMessage[] {
-  if (!existsSync(messagesPath(root))) return [];
+// The team-messages ledger follows the house contract, split
+// by what the append records (gap found 2026-11-14, hourly run
+// 00:04). APPENDING never breaks the work it records and never
+// fails silently: every team message already happened in the
+// world when its append runs - the worker produced the work,
+// the reviewer judged it - and the append sits inside
+// runStandingTeam's try, so a bare throw there marked the
+// whole run failed with the filesystem error as its result
+// and discarded the product, and the activity + chat
+// mirroring below the append never ran either. A dead append
+// therefore ledgers one team-messages-failed line and returns
+// whether the record landed, instead of throwing. READING is
+// the opposite call (the family fail-closed precedent):
+// teamStatus folds this ledger as the team's record, so a
+// dead read ledgers one line and rethrows exactly instead of
+// presenting a team that never said anything as truth; an
+// absent ledger still reads [], and parsing is per-line
+// forgiving (a torn line from a crash mid-append is skipped,
+// never the whole history - the old one-map parse lost every
+// healthy message to a single torn line).
+export function teamMessagesFailureSummary(phase: "read" | "append", label: string, reason: string): string {
+  const clean = String(reason ?? "").replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Team messages " + phase + " failed for " + label + ": " + clean).slice(0, 200);
+}
+export function recordTeamMessagesFailure(root: string, phase: "read" | "append", label: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "team-messages-failed", teamMessagesFailureSummary(phase, label, reason));
+}
+function teamMessageLabel(message: TeamMessage): string {
+  return message.kind + " " + message.from + " -> " + message.to;
+}
+function appendTeamMessage(root: string, message: TeamMessage): boolean {
   try {
-    return readFileSync(messagesPath(root), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as TeamMessage).slice(-limit);
-  } catch { return []; }
+    mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+    appendFileSync(messagesPath(root), JSON.stringify(message) + "\n", { mode: 0o600 });
+    return true;
+  } catch (error) {
+    recordTeamMessagesFailure(root, "append", teamMessageLabel(message), error);
+    return false;
+  }
+}
+export function listTeamMessages(root: string, limit = 40): TeamMessage[] {
+  const path = messagesPath(root);
+  let raw: string;
+  try {
+    if (!existsSync(path)) return [];
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    recordTeamMessagesFailure(root, "read", "ledger", error);
+    throw error;
+  }
+  const messages: TeamMessage[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (value && typeof value === "object") messages.push(value as TeamMessage);
+    } catch { /* a torn line is skipped, never the whole history */ }
+  }
+  return messages.slice(-limit);
 }
 export function teamStatus(root: string): { members: StandingMember[]; runs: TeamRunRecord[]; messages: TeamMessage[] } {
   return { members: listTeamMembers(root), runs: listTeamRuns(root).slice(-10), messages: listTeamMessages(root) };
 }
 
 function ledger(root: string, message: TeamMessage, chatId: string | null): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(messagesPath(root), JSON.stringify(message) + "\n", { flag: "a", mode: 0o600 });
+  appendTeamMessage(root, message);
   recordActivity(root, message.from, "team-" + message.kind, message.from + " -> " + message.to + ": " + message.text.replace(/\s+/g, " ").slice(0, 220));
   if (!chatId) return;
   try {
