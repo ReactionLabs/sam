@@ -3,6 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
 
 // Links: the only bridge between profiles. Profiles are isolated by default -
@@ -72,15 +73,80 @@ function rowToLink(data:string):LinkGroup|null{
 function storeExists(root:string):boolean{
  return existsSync(linksDbFile(root))||existsSync(linksPath(root));
 }
-export function links(root:string):LinkGroup[]{
+// Failure visibility (gap found 2026-11-14, hourly run
+// 11:04 EST): links() is the one read door for the link
+// registry - the ONLY bridge between profiles - and
+// visibleScopes rides it to decide, on every memory read,
+// which scopes an actor may see. Every touch was unguarded:
+// the direct readers (the CLI links list, collab's
+// linkExchange, own-tools' sam_ask_linked lookup) threw raw
+// on a dead store, and visibleScopes threw raw into three
+// different fates (recall.ts ledgered it as a recall failure
+// with the links seam unnamed, memory-recall threw raw to
+// its caller, the memory tools dressed it as an ordinary
+// tool error) - which failure mode a surface got depended
+// on which catch happened to wrap the call, and none named
+// the store. Now the read door owns its touch (the bindings
+// / dashboard-config precedent): a failed open/read ledgers
+// ONE link-failed line (phase read for the direct readers,
+// actor sam, "Link read failed: <reason>"; phase resolve
+// when visibleScopes is the caller, which passes its actor
+// as context, actor the requesting actor, "Link resolve
+// failed for <actor>: <reason>"; the verbatim reason
+// collapsed and capped; never any link record - group names
+// and member lists are scoping data, not failure data),
+// tags the error, and rethrows exactly, so every caller's
+// handling is unchanged (recall still ledgers its own
+// assemble seam, the turn-failed two-line precedent; the
+// memory tools still return their tool error; linkExchange
+// still throws). An absent store still reads [] / own-scope
+// only with no line and creates nothing, and torn row
+// payloads still parse forgiving - only the store touch is
+// guarded.
+export type LinkPhase = "read" | "resolve";
+
+export function linkFailureSummary(phase: LinkPhase, actor: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  if (phase === "resolve") return ("Link resolve failed for " + actor + ": " + clean).slice(0, 200);
+  return ("Link read failed: " + clean).slice(0, 200);
+}
+
+export function recordLinkFailure(root: string, phase: LinkPhase, actor: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, phase === "resolve" ? actor : "sam", "link-failed", linkFailureSummary(phase, actor, reason));
+}
+
+function tagLinkLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { linkLedgered?: boolean }).linkLedgered = true;
+  }
+}
+
+export function isLinkLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { linkLedgered?: boolean }).linkLedgered === true;
+}
+
+function failLink(root: string, phase: LinkPhase, actor: string, error: unknown): never {
+  if (!isLinkLedgered(error)) recordLinkFailure(root, phase, actor, error);
+  tagLinkLedgered(error);
+  throw error;
+}
+
+function readLinks(root:string,phase:LinkPhase,actor:string):LinkGroup[]{
  if(!storeExists(root))return [];
- const db=openLinksStore(root);
+ let db:Database.Database;
+ try{ db=openLinksStore(root); }catch(error){ failLink(root,phase,actor,error); }
  try{
-  const rows=db.prepare("SELECT data FROM link_groups ORDER BY rowid").all() as Array<{data:string}>;
+  const rows=db!.prepare("SELECT data FROM link_groups ORDER BY rowid").all() as Array<{data:string}>;
   const items:LinkGroup[]=[];
   for(const row of rows){const group=rowToLink(row.data);if(group)items.push(group);}
   return items;
- }finally{db.close();}
+ }catch(error){ failLink(root,phase,actor,error); }
+ finally{ db!.close(); }
+}
+export function links(root:string):LinkGroup[]{
+ return readLinks(root,"read","sam");
 }
 function findLinkRow(root:string,id:string):LinkGroup|null{
  if(!storeExists(root))return null;
@@ -151,6 +217,6 @@ export function deleteLink(root:string,id:string):boolean{
 // core, and never sees another profile's private scope, linked or not.
 export function visibleScopes(root:string,actor:string):string[]{
  const own=actor==="sam"?"core":"profile:"+actor;
- const shared=links(root).filter(g=>g.members.includes(actor)).map(g=>"link:"+g.id);
+ const shared=readLinks(root,"resolve",actor).filter(g=>g.members.includes(actor)).map(g=>"link:"+g.id);
  return [own,...shared];
 }

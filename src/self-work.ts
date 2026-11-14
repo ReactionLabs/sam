@@ -409,6 +409,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Resolution still never breaks routing: coreActor still falls back to the core profile on a failed resolve exactly as before, a read already ledgered by the store is never recorded twice, and a failure line never carries any config content",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the config as the defaults, exactly as its readers expect, and an absent store still reads as the defaults with no line",
      "The full suite is green, including the dashboard config failure-ledger tests"]);
+  if (key.startsWith("link-failed:")) return base(
+    ["links.ts", "memory-recall.ts", "recall.ts", "own-tools.ts", "collab.ts"],
+    "Link store reads stop failing: '" + label + "' has ledgered " + n + " failures, and the link registry (.sam/links.db) must load instead of dying at the read - links are the only bridge between profiles and visibleScopes rides this read to decide which memory scopes an actor may see, so while it is dead every memory read either dies raw with the seam unnamed, is counted under the wrong seam, or is dressed as an ordinary tool error, and which failure a surface gets depends on which catch happens to wrap the call.",
+    ["The next memory reads, link lookups, and links list resolve their scopes again instead of link-failed lines",
+     "Exactly one link-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Scoping still fails closed exactly as before: a failed resolve rethrows instead of widening or narrowing an actor's scopes on a guess, a read already ledgered by the store is never recorded twice, and a failure line never carries a link record (group names and member lists are scoping data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the registry as no links, exactly as its readers expect, and an absent store still reads as no links / own-scope only with no line",
+     "The full suite is green, including the link failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -643,6 +651,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Dashboard config ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "dashboard-config-failed:" + phase, label: "dashboard config store failures (" + phase + " step)" };
+    }
+    case "link-failed": {
+      const m = summary.match(/^Link ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "link-failed:" + phase, label: "link store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
