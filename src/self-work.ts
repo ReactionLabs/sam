@@ -296,6 +296,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The nightly backup run completes and writes its success line with a manifest-verified archive instead of backup-failed lines",
      "Exactly one backup-failed ledger line still lands per genuinely failed run, with the verbatim reason, so the class stays countable",
      "The full suite is green, including the backup failure-ledger tests"]);
+  if (key.startsWith("outbox-failed:")) return base(
+    ["delivery-outbox.ts", "heartbeat.ts", "loop-revisit.ts"],
+    "The delivery outbox ledger stops failing: '" + label + "' has ledgered " + n + " failures, and a delivery event (queued, delivered, attempt-failed, suppressed) must land in .sam/delivery-outbox.jsonl instead of dying at the append or the read - the outbox is the durable delivery ledger, so while it is dead a queued delivery is owed that nobody can prove was owed, a delivered record stays pending and is sent twice, and the status counts keep folding the frozen file as truth.",
+    ["The next heartbeat and second-answer deliveries record their outbox events again instead of outbox-failed lines, and pending / delivered / suppressed counts move with them",
+     "Exactly one outbox-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Recording still never reclassifies the work it records: a failed transition append ledgers once and the mark reports whether it landed instead of throwing, while a failed queue append and a failed read still fail closed (one ledger line, then the rethrow) exactly as callers expect",
+     "The full suite is green, including the delivery outbox failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -445,6 +452,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     }
     case "backup-failed":
       return { key: "backup-failed", label: "state backup failures" };
+    case "outbox-failed": {
+      const m = summary.match(/^Delivery outbox ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "outbox-failed:" + phase, label: "delivery outbox ledger failures (" + phase + " step)" };
+    }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":
