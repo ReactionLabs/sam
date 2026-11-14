@@ -380,6 +380,16 @@ export const defaultEngineRunner: EngineRunner = (binary, args, cwd, timeoutMs) 
     const timedOut = !!error && (error as unknown as { killed?: boolean }).killed === true;
     done({ exitCode: error ? (typeof (error as unknown as { code?: unknown }).code === "number" ? (error as unknown as { code: number }).code : null) : 0, output: (stdout ?? "") + (stderr ?? ""), timedOut });
   });
+  // Close the child's stdin immediately: execFile leaves the pipe
+  // open, and `codex exec` (prompt passed as an argv item) ALSO
+  // reads stdin to EOF before starting - with the pipe held open
+  // the run hangs until the timeout kills it ("Reading additional
+  // input from stdin..." was the only output). Caught live in the
+  // 2026-11-14 Program E proof: every Codex slice timed out at
+  // 600s while the same command with stdin at EOF finished in 13s.
+  // No engine run ever receives stdin input by design (the prompt
+  // is an argv item), so EOF at spawn is the correct contract.
+  child.stdin?.end();
   child.on("error", err => {
     if (settled) return; settled = true;
     done({ exitCode: null, output: String(err) });
