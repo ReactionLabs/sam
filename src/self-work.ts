@@ -371,6 +371,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The episode store still never breaks a turn: a failed open keeps the speak once-ish fallback, a failed close never breaks a successful turn, and a read already ledgered by the store is never recorded twice",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the episode as closed, exactly as its readers expect",
      "The full suite is green, including the rate-limit failure-ledger tests"]);
+  if (key.startsWith("door-failed:")) return base(
+    ["mini-door.ts", "dashboard.ts", "status.ts"],
+    "Mini-door store reads stop failing: '" + label + "' has ledgered " + n + " failures, and the web-door store (.sam/mini-doors.db) must load instead of dying at the read - while it is dead a person holding a legitimate door key gets a dead door (and the owner/visitor scoping read dies with it, before the visitor capture fence can be consulted), and the status payload / CLI doors audit keep dying raw on the same touch.",
+    ["The next door requests resolve their keys and modes again instead of door-failed lines, and the status payload / CLI doors audit read the doors back",
+     "Exactly one door-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Resolution still fails closed exactly as before: a dead store never reads as an invalid key (no false probe counts toward the door lockout) and never as a valid one, and a failure line never carries a door key, a session id, or a door record",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the doors as absent, exactly as its readers expect",
+     "The full suite is green, including the mini-door failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -581,6 +589,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Rate limit ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "rate-limit-failed:" + phase, label: "rate-limit episode failures (" + phase + " step)" };
+    }
+    case "door-failed": {
+      const m = summary.match(/^Door ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "door-failed:" + phase, label: "mini-door store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

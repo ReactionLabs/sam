@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { minis } from "./minis.js";
+import { recordActivity } from "./activity.js";
 
 // The web door: how a person reaches their mini. Each mini can have one door,
 // addressed by an unguessable key in the path, the same pattern as the
@@ -129,10 +130,68 @@ function readSessions(db:Database.Database):DoorSession[]{
   for(const row of rows){const session=rowToSession(row.data);if(session)items.push(session);}
   return items;
 }
-function load(root:string):DoorFile{
+// Door-store failure visibility (hourly run 2026-11-14):
+// every door surface rides this ONE read, and it threw raw
+// on a dead .sam/mini-doors.db with no line anywhere. The
+// dashboard door handler calls doorForKey outside its
+// message try, so a dead store killed a legitimate key
+// holder's door outright (a mini's person, or a client on
+// a P12 visitor door); doorModeForKey is the owner/visitor
+// scoping read, so the same throw killed the message path
+// before the visitor capture fence could be consulted; and
+// the direct readers (doorEnabled + listDoors in the status
+// payload, the CLI `minis doors` P10 audit) threw raw,
+// killing the whole /api/status payload on the same touch.
+// Now load owns its touch (the bindings / rate-limit
+// precedent): a failed open/read ledgers ONE door-failed
+// line (phase read for the direct readers, phase resolve
+// for the key / mode / home-link / session resolvers and
+// rotateSessionChat's read; actor sam; the verbatim reason
+// collapsed and capped; NEVER any door key, session id, or
+// door record - a door key is a P10 bearer credential) and
+// rethrows exactly, tagged so a catching caller records
+// nothing more for the same touch. Resolution still fails
+// closed exactly as before: a dead store never reads as an
+// invalid key (no false probe counts toward the door
+// lockout) and never as a valid one. An absent store still
+// reads empty / resolves null with no line and creates
+// nothing.
+export type DoorPhase = "read" | "resolve";
+
+export function doorFailureSummary(phase:DoorPhase,reason:string):string{
+  const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+  return ("Door "+phase+" failed: "+clean).slice(0,200);
+}
+
+export function recordDoorFailure(root:string,phase:DoorPhase,error:unknown):void{
+  const reason=error instanceof Error?error.message:String(error);
+  recordActivity(root,"sam","door-failed",doorFailureSummary(phase,reason));
+}
+
+function tagDoorLedgered(error:unknown):void{
+  if(error!==null&&(typeof error==="object"||typeof error==="function")){
+    (error as {doorLedgered?:boolean}).doorLedgered=true;
+  }
+}
+
+export function isDoorLedgered(error:unknown):boolean{
+  return error!==null&&(typeof error==="object"||typeof error==="function")
+    &&(error as {doorLedgered?:boolean}).doorLedgered===true;
+}
+
+function failDoor(root:string,phase:DoorPhase,error:unknown):never{
+  if(!isDoorLedgered(error))recordDoorFailure(root,phase,error);
+  tagDoorLedgered(error);
+  throw error;
+}
+
+function load(root:string,phase:DoorPhase="read"):DoorFile{
   if(!storeExists(root))return {doors:[],sessions:[]};
-  const db=openDoorsStore(root);
-  try{return {doors:readDoors(db),sessions:readSessions(db)};}finally{db.close();}
+  let db:Database.Database;
+  try{db=openDoorsStore(root);}catch(error){failDoor(root,phase,error);}
+  try{return {doors:readDoors(db!),sessions:readSessions(db!)};}
+  catch(error){failDoor(root,phase,error);}
+  finally{db!.close();}
 }
 // The store's read door (the readPairingStore precedent): the full
 // door snapshot read through the store's own shape. A pure read on
@@ -178,7 +237,7 @@ export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolea
 export function doorModeForKey(root:string,key:string):DoorMode|null{
   if(!keyShapeOk(key))return null;
   const wanted=Buffer.from(hashKey(key),"hex");
-  for(const door of load(root).doors){
+  for(const door of load(root,"resolve").doors){
     if(!doorLive(door))continue;
     const stored=Buffer.from(door.keyHash,"hex");
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return door.mode??"owner";
@@ -202,7 +261,7 @@ function keyShapeOk(key:string):boolean{return /^[0-9a-f]{32}$/.test(key)||/^[0-
 export function doorForKey(root:string,key:string):string|null{
   if(!keyShapeOk(key))return null;
   const wanted=Buffer.from(hashKey(key),"hex");
-  for(const door of load(root).doors){
+  for(const door of load(root,"resolve").doors){
     if(!doorLive(door))continue;
     const stored=Buffer.from(door.keyHash,"hex");
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return door.mini;
@@ -212,7 +271,7 @@ export function doorForKey(root:string,key:string):string|null{
 export function doorHomeLink(root:string,key:string):boolean{
   if(!keyShapeOk(key))return false;
   const wanted=Buffer.from(hashKey(key),"hex");
-  for(const door of load(root).doors){
+  for(const door of load(root,"resolve").doors){
     if(!doorLive(door))continue;
     const stored=Buffer.from(door.keyHash,"hex");
     if(stored.length===wanted.length&&timingSafeEqual(stored,wanted))return !!door.homeLink;
@@ -221,7 +280,7 @@ export function doorHomeLink(root:string,key:string):boolean{
 }
 export function peekSessionChat(root:string,miniName:string,session:string):string|null{
   if(!/^[A-Za-z0-9-]{16,64}$/.test(session))return null;
-  return load(root).sessions.find(s=>s.mini===miniName&&s.session===session)?.chatId??null;
+  return load(root,"resolve").sessions.find(s=>s.mini===miniName&&s.session===session)?.chatId??null;
 }
 export function sessionChat(root:string,miniName:string,session:string,createChat:()=>string):string{
   if(!/^[A-Za-z0-9-]{16,64}$/.test(session))throw new Error("Invalid session");
@@ -253,7 +312,7 @@ export function sessionChat(root:string,miniName:string,session:string,createCha
   return chatId;
 }
 export function rotateSessionChat(root:string,miniName:string,session:string,createChat:()=>string):string{
-  const existing=storeExists(root)?load(root):{doors:[],sessions:[]};
+  const existing=storeExists(root)?load(root,"resolve"):{doors:[],sessions:[]};
   const chatId=createChat();
   const found=existing.sessions.find(s=>s.mini===miniName&&s.session===session);
   const record:DoorSession=found?{...found,chatId,updated_at:new Date().toISOString()}:{mini:miniName,session,chatId,updated_at:new Date().toISOString()};
