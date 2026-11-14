@@ -206,11 +206,11 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           const visitorDoor=doorModeForKey(workspace,doorMatch[1])==="visitor";
           const makeChat=()=>{const store=new ChatStore(workspace);try{return store.create("Web chat",miniName==="sam"?null:miniName,{visitor:visitorDoor}).id;}finally{store.close();}};
           const chatId=sessionChat(workspace,miniName,session,makeChat);
-          try{const reply=await runChatTurn(workspace,chatId,content.trim());json(200,{reply:{role:"assistant",content:reply}});}
+          try{const reply=await runChatTurn(workspace,chatId,content.trim(),{surface:"scoped"});json(200,{reply:{role:"assistant",content:reply}});}
           catch(error){
             if(error instanceof Error&&error.message==="Chat history limit reached"){
               const fresh=rotateSessionChat(workspace,miniName,session,makeChat);
-              const reply=await runChatTurn(workspace,fresh,content.trim());json(200,{reply:{role:"assistant",content:reply}});
+              const reply=await runChatTurn(workspace,fresh,content.trim(),{surface:"scoped"});json(200,{reply:{role:"assistant",content:reply}});
             }else throw error;
           }
         }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";console.error("[SAM door chat]",safe,"| cause:",message);json(400,{error:safe});}

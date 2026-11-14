@@ -478,6 +478,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
   switch (line.kind) {
     case "tool-budget":
       return { key: "tool-budget", label: "tool-budget endings (exhaustion and step-limit)" };
+    case "budget-guardrail":
+      return { key: "budget-guardrail", label: "owner-turn budget guardrail trips (hard ceiling hit; turn closed with a synthesis from gathered material)" };
     case "loader-loop":
       return { key: "loader-loop", label: "loader loops (turns that only loaded tools)" };
     case "turn-failed": {

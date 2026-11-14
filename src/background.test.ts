@@ -133,13 +133,17 @@ test("the heartbeat budget stops a tool-hungry loop sooner than the background b
     } as unknown as OpenAICompatibleProvider;
     // Exhaustion is graceful since the budget fix: the turn RESOLVES with a
     // partial answer instead of rejecting, but the heartbeat tier still runs
-    // out sooner (fewer model rounds) than the background tier.
+    // out sooner (fewer model rounds) than the background tier. Since
+    // duplicate suppression (2026-11-14) the greedy loop's identical calls
+    // execute once and repeat from cache, so the ROUNDS cap is what binds
+    // first and the ending names steps rather than the call budget; either
+    // wording is the same graceful budget ending this test guards.
     const heartbeatAnswer = await ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("heartbeat"));
-    assert.match(heartbeatAnswer, /tool budget/i);
+    assert.match(heartbeatAnswer, /ran out of steps|tool budget/i);
     const heartbeatCalls = calls;
     calls = 0;
     const backgroundAnswer = await ownToolsChat(root, "sam", greedy, "m", [{ role: "user", content: "go" }], undefined, undefined, toolBudget("background"));
-    assert.match(backgroundAnswer, /tool budget/i);
+    assert.match(backgroundAnswer, /ran out of steps|tool budget/i);
     assert.ok(calls > heartbeatCalls, "background tier must allow more tool rounds than a heartbeat poll");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
