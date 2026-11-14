@@ -251,6 +251,11 @@ export function terminalSetupIo(): SetupIo & { close(): void } {
     if (!isTty && !echo) {
       return Promise.reject(new Error("No terminal available for the hidden key prompt. Pass --key-env <NAME> to take the key from an environment variable instead."));
     }
+    // No terminal: nobody can answer, and a silent pipe would block
+    // the read forever (the official cold walk's harness hung on
+    // exactly this). Visible prompts take their defaults instead;
+    // scripted installs drive setup with flags and --key-env.
+    if (!isTty) return Promise.resolve("");
     start();
     return new Promise<string>((resolve, reject) => {
       pending = { echo, value: "", resolve, reject };
