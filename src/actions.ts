@@ -117,21 +117,84 @@ function migrateLegacyActions(db: Database.Database, root: string): void {
   importAll(data);
   renameSync(file, file + ".migrated");
 }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 17:04 EST): the action store is the ONE approval gate's own
+// store - every proposal, decision, and auto-settle rides it -
+// and every touch opened it raw. listActions is the one read
+// door (dashboard status + Approvals block, the CLI actions
+// views, decideAction, settleAutoApprovals, the re-proposal
+// path); insertAction is proposeAction's write; updateAction
+// is every decision's write. A dead actions.db threw into
+// whichever catch happened to wrap the call with the seam
+// unnamed, and no action-store failure kind existed (the
+// self-work "action-failed" class is gated EXECUTION failures,
+// kind "failed" - a different seam), so the gate itself could
+// be blind and uncountable. Now the store's touches own their
+// failure (the contacts / drafts precedent): a failed touch
+// ledgers ONE action-store-failed line (phase read for
+// listActions, write for insertAction / updateAction; actor
+// sam; the verbatim reason collapsed and capped; never any
+// proposal record - titles and details are the owner's gated
+// words, not failure data), tags the error, and rethrows
+// exactly, so every caller's handling is unchanged and reads
+// still fail closed (never folded as no proposals, which
+// would hide pending cards the owner still must decide).
+// Validation errors in proposeAction and the never-list
+// refusal are not store failures and ledger nothing at this
+// seam - they throw before any store touch - and an executor
+// failure inside a decision keeps its existing kind "failed"
+// line, gaining an action-store line only when the decision's
+// own update touch is what dies. An absent store still reads
+// as no proposals with no line and creates nothing.
+export type ActionStorePhase = "read" | "write";
+
+export function actionStoreFailureSummary(phase: ActionStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Action store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordActionStoreFailure(root: string, phase: ActionStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "action-store-failed", actionStoreFailureSummary(phase, reason));
+}
+
+function tagActionStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { actionStoreLedgered?: boolean }).actionStoreLedgered = true;
+  }
+}
+
+export function isActionStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { actionStoreLedgered?: boolean }).actionStoreLedgered === true;
+}
+
+function failActionStore(root: string, phase: ActionStorePhase, error: unknown): never {
+  if (!isActionStoreLedgered(error)) recordActionStoreFailure(root, phase, error);
+  tagActionStoreLedgered(error);
+  throw error;
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
-  const db = openActionStore(root);
-  try { return (db.prepare("SELECT " + ACTION_COLUMNS + " FROM actions ORDER BY rowid").all() as ActionRow[]).map(rowToProposal); }
-  finally { db.close(); }
+  let db: Database.Database;
+  try { db = openActionStore(root); } catch (error) { failActionStore(root, "read", error); }
+  try { return (db!.prepare("SELECT " + ACTION_COLUMNS + " FROM actions ORDER BY rowid").all() as ActionRow[]).map(rowToProposal); }
+  catch (error) { failActionStore(root, "read", error); }
+  finally { db!.close(); }
 }
 function insertAction(root: string, item: ActionProposal): void {
-  const db = openActionStore(root);
-  try { db.prepare("INSERT INTO actions (" + ACTION_COLUMNS + ") VALUES (@id, @actor, @kind, @title, @detail, @status, @created_at, @decided_at, @result, @chat_id, @supersedes, @risk, @decided_by)").run(proposalParams(item)); }
-  finally { db.close(); }
+  let db: Database.Database;
+  try { db = openActionStore(root); } catch (error) { failActionStore(root, "write", error); }
+  try { db!.prepare("INSERT INTO actions (" + ACTION_COLUMNS + ") VALUES (@id, @actor, @kind, @title, @detail, @status, @created_at, @decided_at, @result, @chat_id, @supersedes, @risk, @decided_by)").run(proposalParams(item)); }
+  catch (error) { failActionStore(root, "write", error); }
+  finally { db!.close(); }
 }
 function updateAction(root: string, item: ActionProposal): void {
-  const db = openActionStore(root);
-  try { db.prepare("UPDATE actions SET actor=@actor, kind=@kind, title=@title, detail=@detail, status=@status, created_at=@created_at, decided_at=@decided_at, result=@result, chat_id=@chat_id, supersedes=@supersedes, risk=@risk, decided_by=@decided_by WHERE id=@id").run(proposalParams(item)); }
-  finally { db.close(); }
+  let db: Database.Database;
+  try { db = openActionStore(root); } catch (error) { failActionStore(root, "write", error); }
+  try { db!.prepare("UPDATE actions SET actor=@actor, kind=@kind, title=@title, detail=@detail, status=@status, created_at=@created_at, decided_at=@decided_at, result=@result, chat_id=@chat_id, supersedes=@supersedes, risk=@risk, decided_by=@decided_by WHERE id=@id").run(proposalParams(item)); }
+  catch (error) { failActionStore(root, "write", error); }
+  finally { db!.close(); }
 }
 // Profile-reference validation (found live 2026-11-09 on Dip's PC): a
 // heartbeat proposal named profile "Second Shift" - the connector's DISPLAY

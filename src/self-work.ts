@@ -449,6 +449,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Drafting still fails closed exactly as before: a failed read rethrows instead of folding the store as no drafts (which would hide drafts the owner still means to send), a touch already ledgered by the store is never recorded twice, the contact block check keeps its own single contact-failed line with no second draft line for the same touch, and a failure line never carries a draft record (a draft's recipient, subject, and body are the owner's outbound words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no drafts with no line",
      "The full suite is green, including the draft failure-ledger tests"]);
+  if (key.startsWith("action-store-failed:")) return base(
+    ["actions.ts", "status.ts", "cli.ts"],
+    "Action store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the action store (.sam/actions.db) must open, read, and write instead of dying at that seam - this store is the ONE approval gate itself, so while it is dead no proposal can be listed, proposed, or decided, the status payload dies raw, and a chat's proposal returns the raw store error to the model as an ordinary tool error.",
+    ["The next status reads, proposals, decisions, and auto-settles resolve their cards again instead of action-store-failed lines",
+     "Exactly one action-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The gate still fails closed exactly as before: a failed read rethrows instead of folding the store as no proposals (which would hide pending cards the owner still must decide), a touch already ledgered by the store is never recorded twice, an executor failure keeps its own kind 'failed' line with an action-store line only when the decision's update touch itself dies, and a failure line never carries a proposal record (titles and details are the owner's gated words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no proposals with no line",
+     "The full suite is green, including the action store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -708,6 +716,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Draft ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "draft-failed:" + phase, label: "draft store failures (" + phase + " step)" };
+    }
+    case "action-store-failed": {
+      const m = summary.match(/^Action store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "action-store-failed:" + phase, label: "action store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
