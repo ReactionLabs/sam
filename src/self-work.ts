@@ -333,6 +333,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one team-messages-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
      "Recording still never reclassifies the run it records: a failed append ledgers once and the run's verdict, result, and activity / chat mirroring proceed exactly as before, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
      "The full suite is green, including the team-messages failure-ledger tests"]);
+  if (key.startsWith("standing-file-failed:")) return base(
+    ["standing-files.ts", "agent-turn.ts"],
+    "Standing file reads stop failing: '" + label + "' has ledgered " + n + " failures, and a profile's standing file (persona, owner brief, ops notes) must load from .sam/standing/<profile>/ instead of dying at the read - while it is dead the file silently vanishes from every system prompt (and, before the per-file guard, took the healthy files after it with it), a state indistinguishable from the owner clearing the files, and the status standing summary keeps dying raw on the same touch.",
+    ["The next turns assemble their prompts with the standing files present again instead of standing-file-failed lines, and the standing summary reads the files back",
+     "Exactly one standing-file-failed ledger line still lands per genuinely failed touch, naming the profile, the file, and the verbatim reason, so the class stays countable",
+     "Prompt assembly still never breaks a turn on a broken file: the failed file is skipped, its healthy siblings still assemble, and a read already ledgered by the reader is never recorded twice",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the file as absent, exactly as its readers expect",
+     "The full suite is green, including the standing-file failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -506,6 +514,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Team messages ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "team-messages-failed:" + phase, label: "team-messages ledger failures (" + phase + " step)" };
+    }
+    case "standing-file-failed": {
+      const m = summary.match(/^Standing file ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "standing-file-failed:" + phase, label: "standing file failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
