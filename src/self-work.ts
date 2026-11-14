@@ -379,6 +379,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Resolution still fails closed exactly as before: a dead store never reads as an invalid key (no false probe counts toward the door lockout) and never as a valid one, and a failure line never carries a door key, a session id, or a door record",
      "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the doors as absent, exactly as its readers expect",
      "The full suite is green, including the mini-door failure-ledger tests"]);
+  if (key.startsWith("dashboard-config-failed:")) return base(
+    ["dashboard-config.ts", "chat-manage.ts", "agent-turn.ts", "status.ts"],
+    "Dashboard config store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the dashboard config store (.sam/dashboard-config.db) must open, read, and write instead of dying at that seam - while it is dead every unbound turn and heartbeat tick resolves its default actor through a dying read (turns and ticks die with the seam unnamed, and the status payload dies raw), or the coreActor resolver silently falls back to the core profile, routing a scoped default agent's unbound chats to the wrong profile dressed as no config existing.",
+    ["The next unbound turns, ticks, and status reads resolve the recorded default agent again instead of dashboard-config-failed lines, and a config save through the dashboard panel lands",
+     "Exactly one dashboard-config-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Resolution still never breaks routing: coreActor still falls back to the core profile on a failed resolve exactly as before, a read already ledgered by the store is never recorded twice, and a failure line never carries any config content",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the config as the defaults, exactly as its readers expect, and an absent store still reads as the defaults with no line",
+     "The full suite is green, including the dashboard config failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -594,6 +602,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Door ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "door-failed:" + phase, label: "mini-door store failures (" + phase + " step)" };
+    }
+    case "dashboard-config-failed": {
+      const m = summary.match(/^Dashboard config ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "dashboard-config-failed:" + phase, label: "dashboard config store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

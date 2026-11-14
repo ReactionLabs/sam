@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 // The dashboard config store: which profile the dashboard (and
 // every unbound chat, turn, and heartbeat tick) treats as the
@@ -15,10 +16,11 @@ import { openDatabase } from "./sqlite.js";
 // torn file) while chat-manage.ts coreActor read the raw file
 // again its own way (a non-empty string only, errors swallowed)
 // - two readers of one fact, already disagreeing at the edges.
-// Both now ride readDashboardConfig here. The module imports
-// nothing from the app on purpose: dashboard.ts already cycles
-// with agent-turn / own-tools / chat-manage, and a leaf store
-// adds no new cycle.
+// Both now ride readDashboardConfig here. The module stays a
+// leaf store on purpose: dashboard.ts already cycles with
+// agent-turn / own-tools / chat-manage, and its only app
+// import is the activity ledger (itself a leaf), so it adds
+// no new cycle.
 
 export interface DashboardConfig { defaultAgent: string; showTeamEvents: boolean }
 
@@ -89,28 +91,94 @@ function configStoreExists(root: string): boolean {
   return existsSync(configDbPath(root)) || existsSync(configPath(root));
 }
 
+// Dashboard-config failure visibility (hourly run
+// 2026-11-14): this store is read on nearly every turn, and
+// every touch was unguarded. The direct readers (agent-turn's
+// profile resolution, heartbeat's consolidation resolution,
+// status.ts folding the config into buildStatusPayload) rode
+// readDashboardConfig bare, so a dead .sam/dashboard-config.db
+// threw raw - a turn or tick died with the config seam
+// unnamed, and the whole /api/status payload died with no
+// line anywhere. The resolver, chat-manage's coreActor,
+// wrapped the same read in a bare catch returning "sam" -
+// the designed answer for no config saved - so a workspace
+// whose default agent is a scoped profile silently routed
+// every unbound chat to the core profile instead, a routing
+// / scoping failure indistinguishable from no config. The
+// write door threw raw behind the dashboard's config save.
+// Now the store owns its touches (the bindings / mini-door
+// precedent): a failed open/read/write ledgers ONE
+// dashboard-config-failed line (phase read for the direct
+// readers, phase resolve when the caller is coreActor, phase
+// write for the write door; actor sam; the verbatim reason
+// collapsed and capped; never any config content) and
+// rethrows exactly, tagged so a catching caller records
+// nothing more for the same touch. coreActor still returns
+// "sam" on a failure exactly as before, now countable. A
+// failed direct read still fails closed exactly as before,
+// now ledgered. An absent store still returns the defaults
+// with no line and creates nothing, and a torn row payload
+// still parses forgiving to the defaults - only the store
+// touch is guarded.
+export type DashboardConfigPhase = "read" | "resolve" | "write";
+
+export function dashboardConfigFailureSummary(phase: DashboardConfigPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Dashboard config " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordDashboardConfigFailure(root: string, phase: DashboardConfigPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "dashboard-config-failed", dashboardConfigFailureSummary(phase, reason));
+}
+
+function tagDashboardConfigLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { dashboardConfigLedgered?: boolean }).dashboardConfigLedgered = true;
+  }
+}
+
+export function isDashboardConfigLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { dashboardConfigLedgered?: boolean }).dashboardConfigLedgered === true;
+}
+
+function failDashboardConfig(root: string, phase: DashboardConfigPhase, error: unknown): never {
+  if (!isDashboardConfigLedgered(error)) recordDashboardConfigFailure(root, phase, error);
+  tagDashboardConfigLedgered(error);
+  throw error;
+}
+
 /** The store's write door: one UPSERT of the full config.
  *  Validation (key set, types, the agent-name regex, the
  *  unknown-agent refusal) stays with the caller in
  *  dashboard.ts saveDashboardConfig, exactly where it lived
  *  when the store was a file. */
 export function writeDashboardConfig(root: string, config: DashboardConfig): void {
-  const db = openConfigStore(root);
+  let db: Database.Database;
+  try { db = openConfigStore(root); } catch (error) { failDashboardConfig(root, "write", error); }
   try {
-    db.prepare("INSERT INTO dashboard_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(config));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO dashboard_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(config));
+  } catch (error) { failDashboardConfig(root, "write", error); }
+  finally { db!.close(); }
 }
 
 // The store's read door: the recorded config through the
 // store's own shape, or the defaults when no config has ever
 // been saved - and a read on an install with no store at all
-// creates nothing.
-export function readDashboardConfig(root: string): DashboardConfig {
+// creates nothing. The phase names the caller's shape for
+// the failure line: "read" for direct readers (the default),
+// "resolve" for chat-manage's coreActor, whose fallback to
+// "sam" is the designed answer for no config and must stay
+// distinguishable from a dead store.
+export function readDashboardConfig(root: string, phase: DashboardConfigPhase = "read"): DashboardConfig {
   if (!configStoreExists(root)) return { ...defaultDashboardConfig };
-  const db = openConfigStore(root);
+  let db: Database.Database;
+  try { db = openConfigStore(root); } catch (error) { failDashboardConfig(root, phase, error); }
   try {
-    const row = db.prepare("SELECT data FROM dashboard_config WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM dashboard_config WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return { ...defaultDashboardConfig };
     try { return parseDashboardConfig(JSON.parse(row.data)) ?? { ...defaultDashboardConfig }; } catch { return { ...defaultDashboardConfig }; }
-  } finally { db.close(); }
+  } catch (error) { failDashboardConfig(root, phase, error); }
+  finally { db!.close(); }
 }
