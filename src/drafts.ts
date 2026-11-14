@@ -73,15 +73,76 @@ function rowToDraft(data: string): Draft | null {
 function storeExists(root: string): boolean {
   return existsSync(draftsDbFile(root)) || existsSync(draftsPath(root));
 }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 16:04 EST): the draft store is SAM's outbound drafting
+// surface (P12: stored text the owner copies out and sends
+// with their own hand; there is deliberately no send
+// function), and every touch opened it raw. listDrafts
+// rides the dashboard status build and the CLI drafts
+// views; getDraft rides the CLI show view; createDraft is
+// the CLI create path and the ONE gate's draft executor;
+// updateDraft / removeDraft are the update and discard
+// doors. A dead drafts.db threw into whichever catch
+// happened to wrap the call with the seam unnamed, and no
+// draft-failed kind existed, so the class was uncountable.
+// Now the store's touches own their failure (the contacts /
+// pairing precedent): a failed touch ledgers ONE
+// draft-failed line (phase read for listDrafts / getDraft,
+// write for createDraft / updateDraft / removeDraft; actor
+// sam; the verbatim reason collapsed and capped; never any
+// draft record - a draft's recipient, subject, and body are
+// the owner's outbound words, not failure data), tags the
+// error, and rethrows exactly, so every caller's handling
+// is unchanged and reads still fail closed (never folded
+// as no drafts, which would hide drafts the owner still
+// means to send). Validation errors (bad recipient /
+// channel / subject / body / actor) and the noDraft
+// refusal are not store failures and ledger nothing, and a
+// contact-tagged error from createDraft's block check
+// rethrows with no draft line - that touch already
+// ledgered its one contact-failed line at its own seam.
+// An absent store still reads as no drafts with no line
+// and creates nothing, and torn row payloads still parse
+// forgiving - only the store touch is guarded.
+export type DraftPhase = "read" | "write";
+
+export function draftFailureSummary(phase: DraftPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Draft " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordDraftFailure(root: string, phase: DraftPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "draft-failed", draftFailureSummary(phase, reason));
+}
+
+function tagDraftLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { draftLedgered?: boolean }).draftLedgered = true;
+  }
+}
+
+export function isDraftLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { draftLedgered?: boolean }).draftLedgered === true;
+}
+
+function failDraft(root: string, phase: DraftPhase, error: unknown): never {
+  if (!isDraftLedgered(error)) recordDraftFailure(root, phase, error);
+  tagDraftLedgered(error);
+  throw error;
+}
 export function listDrafts(root: string): Draft[] {
   if (!storeExists(root)) return [];
-  const db = openDraftsStore(root);
+  let db: Database.Database;
+  try { db = openDraftsStore(root); } catch (error) { failDraft(root, "read", error); }
   try {
-    const rows = db.prepare("SELECT data FROM drafts ORDER BY rowid").all() as Array<{ data: string }>;
+    const rows = db!.prepare("SELECT data FROM drafts ORDER BY rowid").all() as Array<{ data: string }>;
     const items: Draft[] = [];
     for (const row of rows) { const draft = rowToDraft(row.data); if (draft) items.push(draft); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failDraft(root, "read", error); }
+  finally { db!.close(); }
 }
 function findDraftRow(root: string, id: string): Draft | null {
   if (!storeExists(root)) return null;
@@ -98,13 +159,15 @@ function findDraftRow(root: string, id: string): Draft | null {
 // install with no store at all creates nothing.
 export function updateDraft(root: string, id: string, patch: Partial<Draft>): Draft | null {
   if (!id || !storeExists(root)) return null;
-  const current = findDraftRow(root, id);
-  if (!current) return null;
-  const next: Draft = { ...current, ...patch, id: current.id, status: "draft" };
-  const db = openDraftsStore(root);
-  try { db.prepare("UPDATE drafts SET data = ? WHERE id = ?").run(JSON.stringify(next), current.id); }
-  finally { db.close(); }
-  return next;
+  try {
+    const current = findDraftRow(root, id);
+    if (!current) return null;
+    const next: Draft = { ...current, ...patch, id: current.id, status: "draft" };
+    const db = openDraftsStore(root);
+    try { db.prepare("UPDATE drafts SET data = ? WHERE id = ?").run(JSON.stringify(next), current.id); }
+    finally { db.close(); }
+    return next;
+  } catch (error) { failDraft(root, "write", error); }
 }
 export function createDraft(root: string, input: { actor: string; to: string; channel?: string; subject?: string | null; body: string; via?: "cli" | "proposal" }): Draft {
   const to = (input.to ?? "").trim();
@@ -122,23 +185,28 @@ export function createDraft(root: string, input: { actor: string; to: string; ch
     id: randomUUID(), actor: input.actor, to, channel, subject, body,
     status: "draft", createdAt: new Date().toISOString(), via: input.via ?? "cli",
   };
-  const db = openDraftsStore(root);
-  try { db.prepare("INSERT INTO drafts (id, data) VALUES (?, ?)").run(draft.id, JSON.stringify(draft)); }
-  finally { db.close(); }
+  let db: Database.Database;
+  try { db = openDraftsStore(root); } catch (error) { failDraft(root, "write", error); }
+  try { db!.prepare("INSERT INTO drafts (id, data) VALUES (?, ?)").run(draft.id, JSON.stringify(draft)); }
+  catch (error) { failDraft(root, "write", error); }
+  finally { db!.close(); }
   recordActivity(root, input.actor, "draft", "Drafted " + channel + " to " + to + (subject ? ": " + subject : ""));
   return draft;
 }
 export function getDraft(root: string, id: string): Draft | null {
-  return findDraftRow(root, id);
+  try { return findDraftRow(root, id); }
+  catch (error) { failDraft(root, "read", error); }
 }
 export function removeDraft(root: string, id: string): boolean {
   if (!id || !storeExists(root)) return false;
-  const db = openDraftsStore(root);
+  let db: Database.Database;
+  try { db = openDraftsStore(root); } catch (error) { failDraft(root, "write", error); }
   let removed = false;
   try {
-    const result = db.prepare("DELETE FROM drafts WHERE id = ?").run(id);
+    const result = db!.prepare("DELETE FROM drafts WHERE id = ?").run(id);
     removed = result.changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failDraft(root, "write", error); }
+  finally { db!.close(); }
   if (!removed) return false;
   recordActivity(root, "owner", "draft", "Discarded draft " + id.slice(0, 8));
   return true;
