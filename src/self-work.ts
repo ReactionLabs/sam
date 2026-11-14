@@ -602,6 +602,13 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     }
     case "citation-rejected":
       return { key: "citation-rejected", label: "citation markers naming sources outside the run's search results" };
+    case "source-citation-failed": {
+      const m = summary.match(/^Source citation ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "source-citation-failed:" + phase, label: "source citation failures (" + phase + " step)" };
+    }
+    case "source-citation-rejected":
+      return { key: "source-citation-rejected", label: "source citations naming numbers outside the run's registered sources" };
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":

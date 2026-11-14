@@ -21,6 +21,7 @@ import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIM
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
+import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
@@ -329,6 +330,24 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     finalText=processed.text;
     citationHit=processed.hit;
   }catch{/* the citation pass never breaks a turn */}
+  // Source citations (Dip ruling 2026-11-14): the general sibling
+  // of the pass above, running on the text the citation pass left.
+  // The run's source-bearing tool results were registered and
+  // numbered at the dispatch seam; this pass validates the reply's
+  // inline [n] citations against that registry, strips fabricated
+  // numbers (ledgered by the pass), replaces any Sources list the
+  // model wrote with the canonical one built from the registry
+  // entries actually cited, and appends it BEFORE the save - so
+  // the stored reply itself carries the one list every surface
+  // shows. Source plumbing never breaks a turn.
+  let citedSources:RunSource[]=[];
+  let registeredSources:RunSource[]=[];
+  try{
+    const processedSources=processReplySources(root,{chatId,userMessageId,actor:profileName,text:finalText});
+    finalText=processedSources.text;
+    citedSources=processedSources.sources;
+    registeredSources=processedSources.registered;
+  }catch{/* the source pass never breaks a turn */}
   const saved=new ChatStore(root);
   let savedId:string|null=null;
   try{
@@ -338,6 +357,10 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   if(citationHit&&savedId){
     if(attachCitation(root,{messageId:savedId,chatId,actor:profileName,hit:citationHit}))
       recordActivity(root,profileName,"chat-citation","Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citationHit.chatId.slice(0,8)+", message "+citationHit.messageId.slice(0,8));
+  }
+  if(savedId&&registeredSources.length){
+    if(attachReplySources(root,{messageId:savedId,chatId,actor:profileName,registered:registeredSources,cited:citedSources})&&citedSources.length)
+      recordActivity(root,profileName,"source-citation","Sources attached in chat "+chatId.slice(0,8)+": "+citedSources.length+" cited of "+registeredSources.length+" registered this run");
   }
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is
