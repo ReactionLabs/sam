@@ -20,7 +20,9 @@ test("connection indicator is honest and tappable", () => {
 test("first exchange earns a Sam-given name", () => {
   assert.ok(dashboardHtml.includes("function provisionalTitle("), "provisional title heuristic exists");
   assert.ok(dashboardHtml.includes("/autotitle'"), "page asks the server to name the chat after the first exchange");
-  assert.ok(dashboardHtml.includes("if(autoCreated)await nameChatFromExchange(selected,content);"), "naming runs after the first reply lands");
+  // Turn behavior (2026-11-14): the reply is asynchronous now (the message queues and the turn drains in the background), so naming is armed at send and fired by the queue watch when the first reply lands.
+  assert.ok(dashboardHtml.includes("pendingAutotitle={chatId:selected,firstMessage:content};"), "naming is armed when the auto-created chat sends");
+  assert.ok(dashboardHtml.includes("nameChatFromExchange(pa.chatId,pa.firstMessage);"), "naming runs after the first reply lands");
 });
 
 test("daily paths have no prompt dialogs left", () => {
@@ -36,7 +38,8 @@ test("composer maturity: desktop Enter, auto-grow, honest busy state", () => {
   assert.ok(dashboardHtml.includes("window.innerWidth>820"), "Enter sends on desktop widths only");
   assert.ok(dashboardHtml.includes("function autogrow()"), "textarea auto-grows");
   assert.ok(dashboardHtml.includes("Math.min(t.scrollHeight,180)"), "auto-grow is capped");
-  assert.ok(dashboardHtml.includes("el('message').placeholder='Sam is working...'"), "busy state is honest in the composer");
+  // Turn behavior (2026-11-14): the composer never locks while Sam works (messages queue instead), and the placeholder stays honest about the state without disabling the send.
+  assert.ok(dashboardHtml.includes("Sam is working - yours will queue and be seen"), "working state is honest in the composer, and the composer stays open");
 });
 
 test("header and bubbles cannot collide", () => {
@@ -48,7 +51,8 @@ test("header and bubbles cannot collide", () => {
 test("opening a chat lands on the newest message, and readers are never yanked", () => {
   assert.ok(dashboardHtml.includes("function pinToBottom()"), "bounded pin helper exists");
   const open = dashboardHtml.slice(dashboardHtml.indexOf("async function openChat("), dashboardHtml.indexOf("async function createChat()"));
-  assert.ok(open.indexOf("setView('talk')") < open.indexOf("replaceChildren()"), "mobile view is revealed before rendering, not after");
+  // Turn behavior (2026-11-14): thread rendering was extracted into renderThreadData (shared with the queue watch); the ordering intent is unchanged.
+  assert.ok(open.indexOf("setView('talk')") < open.indexOf("renderThreadData(data)"), "mobile view is revealed before rendering, not after");
   assert.ok(open.includes("threadPinned=true;pinToBottom();"), "openChat pins to the newest message at the end");
   assert.ok(dashboardHtml.includes("if(threadPinned)el('thread').scrollTop=el('thread').scrollHeight;"), "append scrolls respect a scrolled-up reader");
   assert.ok(dashboardHtml.includes("lastJumpAt=Date.now();const m="), "citation deep links suppress the pin");
