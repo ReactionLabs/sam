@@ -28,8 +28,13 @@ export function coreActor(root: string): string {
   // own sanitization that already disagreed with the dashboard
   // reader at the edges. A broken config reads as the default
   // through the store, which is what this fallback always
-  // claimed to mirror.
-  try { return readDashboardConfig(root).defaultAgent || "sam"; } catch { return "sam"; }
+  // claimed to mirror. The resolve phase names this caller's
+  // shape in the store's failure line: a dead store ledgers
+  // ONE dashboard-config-failed:resolve line in the reader
+  // (tagged, so this catch records nothing more) and this
+  // fallback to "sam" - the designed answer for no config -
+  // is now countable instead of indistinguishable from it.
+  try { return readDashboardConfig(root, "resolve").defaultAgent || "sam"; } catch { return "sam"; }
 }
 
 function boundProfile(root: string, chat: ChatRecord): string {
