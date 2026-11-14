@@ -24,6 +24,7 @@ import { heartbeatJobs, heartbeatLog } from "./heartbeat.js";
 import { minis } from "./minis.js";
 import { doorEnabled, listDoors } from "./mini-door.js";
 import { listDrafts } from "./drafts.js";
+import { listArtifacts, type ArtifactSummary } from "./artifacts.js";
 import { listContacts } from "./contacts.js";
 import type { DoorGuardStats } from "./door-guard.js";
 import { connectors, connectorCredentialPresent } from "./connectors.js";
@@ -110,6 +111,12 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
   finally { prefStore.close(); }
   const observability = observabilityReport(root);
   const actions = listActions(root);
+  // Artifact summaries ride the status payload for the dashboard
+  // library. The store ledgers its own artifact-failed line before
+  // throwing, so a dead store degrades the library to empty here
+  // instead of taking the whole status payload down with it.
+  let artifacts: ArtifactSummary[] = [];
+  try { artifacts = listArtifacts(root); } catch { /* ledgered in the store */ }
   const jobs = heartbeatJobs(root);
   const people = minis(root);
   const activityLimit = opts.activityLimit ?? 30;
@@ -155,6 +162,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     usage: usageSummary(root),
     usageToday: usageToday(root),
     drafts: listDrafts(root).slice(-20),
+    artifacts,
     contacts: listContacts(root),
     compactions: listCompactions(root),
     pairing: pairingStatus(root),

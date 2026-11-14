@@ -671,6 +671,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     }
     case "source-citation-rejected":
       return { key: "source-citation-rejected", label: "source citations naming numbers outside the run's registered sources" };
+    case "artifact-failed": {
+      const m = summary.match(/^Artifact ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "artifact-failed:" + phase, label: "artifact store failures (" + phase + " step)" };
+    }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
     case "bridge-failed":

@@ -86,6 +86,10 @@ export function repeatCallResult(out: unknown): unknown {
 const READ_ONLY_CODE_ACTIONS = new Set(["status", "list", "read", "writes"]);
 const STATE_CHANGING_TOOLS = new Set(["sam_save_note", "sam_patch_note", "sam_propose_action", "sam_author_skill", "sam_open_loop", "sam_react", "sam_manage_chats", "sam_handoff_task", "sam_coding_task", "sam_spawn_subagent", "sam_ask_linked"]);
 export function callChangesState(name: string, args: Record<string, unknown> | undefined): boolean {
+  if (name === "sam_artifact") {
+    const action = typeof args?.action === "string" ? args.action : "create";
+    return action === "create" || action === "update";
+  }
   if (name === "sam_code") {
     const action = typeof args?.action === "string" ? args.action : "";
     return !READ_ONLY_CODE_ACTIONS.has(action);
