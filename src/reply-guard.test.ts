@@ -46,6 +46,12 @@ test("detector: a bare process fragment as the whole reply is narration", () => 
   assert.equal(isReasoningNarration("Yes."), false);
 });
 
+test("detector: the live partial from the reset proof reads as narration too", () => {
+  // Verbatim working partial streamed by the proof turn on the
+  // box (2026-11-14): a mid-task work note, not an answer.
+  assert.equal(isReasoningNarration("The python runner takes no args, so let me write per-file summaries and read"), true);
+});
+
 // --- through the turn path -------------------------------------
 
 type Msg = { role: string; content?: string | null };

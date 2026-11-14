@@ -31,7 +31,7 @@
 export interface ReasoningSignal { name: string; weight: number }
 
 const SIGNAL_RULES: Array<{ name: string; weight: number; re: RegExp }> = [
-  { name: "process-verb", weight: 2, re: /\b(let me|let's|i need to|i should|i'll|i will|i am going to|i'm going to)\s+(check|search|look|load|use|find|read|fetch|run|call|start|see|pull|open)\b/i },
+  { name: "process-verb", weight: 2, re: /\b(let me|let's|i need to|i should|i'll|i will|i am going to|i'm going to)\s+(check|search|look|load|use|find|read|fetch|run|call|start|see|pull|open|write|draft)\b/i },
   { name: "meta-ask", weight: 2, re: /\b(the user|the owner)\s+(is\s+)?(asking|asked|wants|wanted)\b|\balso,?\s+the\s+question\b/i },
   { name: "tool-names", weight: 1, re: /\bsam_[a-z][a-z_]*\b/ },
   { name: "machinery", weight: 1, re: /\b(code root|tool implementation|system prompt|tool calls?|orchestration file)\b/i },
