@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { recentExecutionAuditLogs } from "./approved-test-runner.js";
 import { MissionStore } from "./storage.js";
 import { ChatStore, type ChatRecord } from "./chats.js";
 import { recentSkillUse, lastSkillByChat } from "./skill-use.js";
@@ -92,12 +92,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     chats = chatStore.list().map(enrich);
     archivedChats = chatStore.list({ includeArchived: true }).filter(c => c.archived === 1).map(enrich);
   } finally { chatStore.close(); }
-  const audit = join(root, ".sam", "execution-audit.jsonl");
-  let logs: string[] = [];
-  if (existsSync(audit)) {
-    const raw = readFileSync(audit, "utf8");
-    logs = raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line => line.slice(0, 800));
-  }
+  const logs = recentExecutionAuditLogs(root);
   const prefStore = new PreferenceStore(root);
   let preferences: unknown;
   try { preferences = prefStore.list(); }

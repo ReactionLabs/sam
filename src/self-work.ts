@@ -317,6 +317,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one activity-failed ledger line still lands per genuinely failed read where the append path lives, naming the verbatim reason, so the class stays countable",
      "Recording still never breaks the work it records: recordActivity still never throws, while a failed read still fails closed (one ledger attempt, then the rethrow) exactly as callers expect",
      "The full suite is green, including the activity failure-ledger tests"]);
+  if (key.startsWith("execution-audit-failed:")) return base(
+    ["approved-test-runner.ts", "status.ts"],
+    "The execution-audit ledger stops failing: '" + label + "' has ledgered " + n + " failures, and an approved test run event (requested, started, finished) must land in .sam/execution-audit.jsonl instead of dying at the append or the read - the ledger is the approved runner's own record, so while it is dead an audit append can spend a consumed one-use authorization without the run executing, discard a finished run's result before its verification settles, and status keeps folding the frozen file as the audit history.",
+    ["The next approved build/test runs record their requested / started / finished events again instead of execution-audit-failed lines, and the status audit tail moves with them",
+     "Exactly one execution-audit-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Recording still never breaks the run it records: a failed append ledgers once and the request, execution, result, and verification settle proceed exactly as before, while a failed read still fails closed (one ledger line, then the rethrow) exactly as callers expect",
+     "The full suite is green, including the execution-audit failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -480,6 +487,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Activity ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "activity-failed:" + phase, label: "activity ledger failures (" + phase + " step)" };
+    }
+    case "execution-audit-failed": {
+      const m = summary.match(/^Execution audit ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "execution-audit-failed:" + phase, label: "execution-audit ledger failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
