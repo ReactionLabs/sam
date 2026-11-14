@@ -745,7 +745,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
           continue;
         }
       }
-      close("done", "All " + job.slices.length + " slices landed and merged onto " + job.branch + "; the merged battery is green" + (job.verifyIterations.length ? " after " + job.verifyIterations.length + " fix iteration(s)" : "") + (deps.reviewDiff ? " and the fresh-context review passed" : "") + ". " + job.filesTouched.length + " files touched.");
+      close("done", "All " + job.slices.length + " slices landed and merged onto " + job.branch + "; the merged battery is green" + (job.verifyIterations.length ? " after " + job.verifyIterations.length + " fix iteration(s)" : "") + (deps.reviewDiff ? " and the fresh-context review passed" : "") + ". The file count is on the record (filesTouched, read from the job branch diff at close).");
     }
     return { ran, blocked, failed, recovered };
   } finally { draining.delete(key); }
