@@ -37,6 +37,7 @@ import {
   startBackgroundSubagent, updateSubagent, whenSubagentSettled, type Subagent,
 } from "./subagents.js";
 import { parseReview } from "./team-runtime.js";
+import { ChatStore } from "./chats.js";
 import { codeRoot } from "./code.js";
 
 export const ORCH_MAX_DEPTH = 2;
@@ -78,6 +79,11 @@ export interface Lane {
 export interface OrchestrationJob {
   id: string; profile: string; ask: string; status: JobStatus;
   consolidated: string | null; createdAt: string; finishedAt: string | null;
+  // Run-inspector fields (2026-11-14): the chat the dispatch came from when
+  // the door passes one, and the worker pool as it stood at dispatch time.
+  // Optional because jobs recorded before this change carry neither.
+  chatId?: string | null;
+  poolAtDispatch?: { rounds: number; maxCalls: number } | null;
 }
 
 // Lane budgets: the ONE seam where worker sizing lives. Lane F's
@@ -98,13 +104,24 @@ export const ORCH_LANE_BUDGETS: Record<LaneKind, { rounds: number; maxCalls: num
 const ROLE_FOR_KIND: Record<LaneKind, Subagent["role"]> = {
   research: "research", build: "build", verify: "review", coordinate: "task", general: "task",
 };
-const ROLE_TOOLS_FOR_KIND: Record<LaneKind, string[]> = {
-  research: ROLE_TOOLS.research,
-  build: ROLE_TOOLS.build,
-  verify: ROLE_TOOLS.review,
-  coordinate: profileToolNames(),
-  general: profileToolNames(),
-};
+// Computed on first use, never at module init: profileToolNames() reads
+// own-tools' catalog, and module load order inside that cycle is not
+// guaranteed (a dashboard-side import chain reached this module while
+// own-tools was still initializing and the init-time call crashed on the
+// TDZ, 2026-11-14). Same values, evaluated when a lane actually needs them.
+let roleToolsForKindCache: Record<LaneKind, string[]> | null = null;
+function roleToolsForKind(): Record<LaneKind, string[]> {
+  if (!roleToolsForKindCache) {
+    roleToolsForKindCache = {
+      research: ROLE_TOOLS.research,
+      build: ROLE_TOOLS.build,
+      verify: ROLE_TOOLS.review,
+      coordinate: profileToolNames(),
+      general: profileToolNames(),
+    };
+  }
+  return roleToolsForKindCache;
+}
 
 function dbFile(root: string): string { return join(resolve(root), ".sam", "orchestration.db"); }
 export function orchestrationStoreExists(root: string): boolean { return existsSync(dbFile(root)); }
@@ -120,7 +137,8 @@ function openStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   const db = openDatabase(dbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS orch_jobs (id TEXT PRIMARY KEY, data TEXT NOT NULL);" +
-    "CREATE TABLE IF NOT EXISTS orch_lanes (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, data TEXT NOT NULL);");
+    "CREATE TABLE IF NOT EXISTS orch_lanes (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, data TEXT NOT NULL);" +
+    "CREATE TABLE IF NOT EXISTS orch_refusals (id TEXT PRIMARY KEY, data TEXT NOT NULL);");
   return db;
 }
 function readJobs(root: string): OrchestrationJob[] {
@@ -153,6 +171,47 @@ function putLane(root: string, lane: Lane): void {
   try { db.prepare("INSERT OR REPLACE INTO orch_lanes (id, job_id, data) VALUES (?, ?, ?)").run(lane.id, lane.jobId, JSON.stringify(lane)); }
   catch (error) { recordStoreFailure(root, "write", error); throw error; } finally { db.close(); }
 }
+// A dispatch the pool refused, recorded at refusal time (2026-11-14, run
+// inspector): before this, a refused plan threw and left no record at all,
+// so the owner could never see what was asked versus what was available.
+export interface DispatchRefusal {
+  id: string; profile: string; chatId: string | null; ask: string;
+  requested: { rounds: number; maxCalls: number };
+  available: { rounds: number; maxCalls: number };
+  reason: string; at: string;
+}
+function putRefusal(root: string, refusal: DispatchRefusal): void {
+  const db = openStore(root);
+  try { db.prepare("INSERT OR REPLACE INTO orch_refusals (id, data) VALUES (?, ?)").run(refusal.id, JSON.stringify(refusal)); }
+  catch (error) { recordStoreFailure(root, "write", error); throw error; } finally { db.close(); }
+}
+export function listDispatchRefusals(root: string, profile?: string): DispatchRefusal[] {
+  if (!orchestrationStoreExists(root)) return [];
+  const db = openStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM orch_refusals ORDER BY rowid").all() as Array<{ data: string }>;
+    const all = rows.map(row => { try { return JSON.parse(row.data) as DispatchRefusal; } catch { return null; } })
+      .filter((r): r is DispatchRefusal => r !== null);
+    return profile ? all.filter(r => r.profile === profile) : all;
+  } catch (error) { recordStoreFailure(root, "read", error); throw error; } finally { db.close(); }
+}
+
+// Thread furniture for blocked and refused runs: a team event whose content
+// carries the callout marker; the dashboard renders those as compact
+// callout cards with expandable evidence instead of prose bubbles.
+export const CALLOUT_PREFIX = "[[callout]] ";
+export function calloutEventContent(title: string, evidence: string): string {
+  return CALLOUT_PREFIX + title + (evidence ? "\n" + evidence : "");
+}
+function writeChatCallout(root: string, chatId: string | null | undefined, title: string, evidence: string): void {
+  if (!chatId) return;
+  try {
+    const store = new ChatStore(root);
+    try { store.addEvent(chatId, "sam", "result", calloutEventContent(title, evidence)); }
+    finally { store.close(); }
+  } catch { /* furniture never breaks the run it describes */ }
+}
+
 export function updateLane(root: string, id: string, patch: Partial<Lane>): Lane | null {
   const lane = readLanes(root).find(l => l.id === id) ?? null;
   if (!lane) return null;
@@ -178,7 +237,7 @@ export function remainingPool(root: string, profile: string): { rounds: number; 
 }
 
 function laneTools(kind: LaneKind, requested: string[] | undefined, profileTools: string[]): string[] {
-  const roleTools = ROLE_TOOLS_FOR_KIND[kind].filter(name => profileTools.includes(name));
+  const roleTools = roleToolsForKind()[kind].filter(name => profileTools.includes(name));
   if (!requested) return roleTools;
   const unknown = requested.filter(name => !profileTools.includes(name));
   if (unknown.length) throw new Error("Lane tools must be tools the profile actually has (default-deny): " + unknown.join(", "));
@@ -197,7 +256,7 @@ function validateSpec(spec: LaneSpec, profileTools: string[]): void {
   laneTools(spec.kind, spec.tools, profileTools);
 }
 
-export interface PlanInput { profile?: string; ask: string; lanes: LaneSpec[] }
+export interface PlanInput { profile?: string; ask: string; lanes: LaneSpec[]; chatId?: string }
 
 /**
  * Plan a job: validate every lane's done-shape, scope, and depth, check the
@@ -235,10 +294,15 @@ export function planJob(root: string, input: PlanInput): { job: OrchestrationJob
   }, { rounds: 0, maxCalls: 0 });
   const left = remainingPool(root, profile);
   if (total.rounds > left.rounds || total.maxCalls > left.maxCalls) {
-    throw new Error("This team does not fit the remaining worker pool (" + left.rounds + " rounds, " + left.maxCalls + " calls left; the plan asks " + total.rounds + " rounds, " + total.maxCalls + " calls). Plan a smaller team or fewer lanes.");
+    const reason = "This team does not fit the remaining worker pool (" + left.rounds + " rounds, " + left.maxCalls + " calls left; the plan asks " + total.rounds + " rounds, " + total.maxCalls + " calls). Plan a smaller team or fewer lanes.";
+    const refusal: DispatchRefusal = { id: randomUUID(), profile, chatId: input.chatId ?? null, ask: input.ask.trim(), requested: { ...total }, available: { ...left }, reason, at: new Date().toISOString() };
+    try { putRefusal(root, refusal); } catch { /* the refusal record never masks the refusal itself */ }
+    writeChatCallout(root, refusal.chatId, "Dispatch blocked · 0 of " + flat.length + " workers started",
+      "Requested " + total.rounds + " rounds / " + total.maxCalls + " calls; available " + left.rounds + " rounds / " + left.maxCalls + " calls.\n" + reason);
+    throw new Error(reason);
   }
   const now = new Date().toISOString();
-  const job: OrchestrationJob = { id: randomUUID(), profile, ask: input.ask.trim(), status: "planned", consolidated: null, createdAt: now, finishedAt: null };
+  const job: OrchestrationJob = { id: randomUUID(), profile, ask: input.ask.trim(), status: "planned", consolidated: null, createdAt: now, finishedAt: null, chatId: input.chatId ?? null, poolAtDispatch: { ...left } };
   putJob(root, job);
   const idByName = new Map<string, string>();
   const lanes: Lane[] = flat.map(({ spec, depth, parentName }) => {
@@ -543,6 +607,12 @@ export async function runJob(root: string, jobId: string): Promise<{ job: Orches
   job.finishedAt = new Date().toISOString();
   putJob(root, job);
   recordActivity(root, job.profile, "orchestration-job-done", "Job " + job.id.slice(0, 8) + " closed " + job.status + ": " + fresh.filter(l => l.verdict === "verified").length + "/" + fresh.length + " lane(s) verified");
+  if (job.chatId && job.status !== "done") {
+    const verified = fresh.filter(l => l.status === "done" && l.verdict === "verified").length;
+    const evidence = fresh.filter(l => !(l.status === "done" && l.verdict === "verified"))
+      .map(l => l.name + ": " + (l.blocker ?? l.verdictReasons ?? l.status)).join("\n");
+    writeChatCallout(root, job.chatId, "Run " + job.status + " · " + verified + " of " + fresh.length + " lanes landed", evidence);
+  }
   return { job, lanes: fresh };
 }
 

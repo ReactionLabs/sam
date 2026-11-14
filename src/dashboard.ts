@@ -3,6 +3,7 @@ import { randomBytes, createHash } from "node:crypto";
 import { ChatStore } from "./chats.js";
 import { dashboardHtml } from "./dashboard-ui.js";
 import { buildStatusPayload, dashboardBuildId } from "./status.js";
+import { runInspectorForChat, panelMemory, panelFiles } from "./run-inspector.js";
 import { runChatTurn } from "./agent-turn.js";
 import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore } from "./preferences.js";
@@ -169,6 +170,18 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const ok=editChat[2]==="rename"?(typeof body.title==="string"&&db.rename(editChat[1],body.title)):editChat[2]==="pin"?(typeof body.pinned==="boolean"&&db.pin(editChat[1],body.pinned)):editChat[2]==="archive"?(typeof body.archived==="boolean"&&db.archive(editChat[1],body.archived)):(profileOk&&db.setAgent(editChat[1],body.agent==="sam"?null:(body.agent as string|null)));
         if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
       }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
+    }
+    const runMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/run$"));
+    if(runMatch && req.method==="GET"){
+      try{json(200,runInspectorForChat(workspace,runMatch[1]));}catch{json(404,{error:"Chat not found"});}return;
+    }
+    const panelMatch=req.url?.match(new RegExp("^/api/"+token+"/panel/(memory|files)(\\?.*)?$"));
+    if(panelMatch && req.method==="GET"){
+      const q=new URLSearchParams((panelMatch[2]||"").slice(1));const profile=(q.get("profile")||"sam").slice(0,64);
+      try{
+        if(panelMatch[1]==="memory")json(200,panelMemory(workspace,profile,q.get("q")||"",q.get("id")||undefined));
+        else json(200,panelFiles(workspace,profile));
+      }catch{json(500,{error:"Panel unavailable"});}return;
     }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
