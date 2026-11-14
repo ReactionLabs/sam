@@ -122,6 +122,21 @@ export class OpenAICompatibleProvider implements ModelProvider {
   // visible text so far. JSON responses (tests, non-streaming hosts)
   // still parse, and report once.
   onPartial?: (accumulated: string) => void;
+  // Turn control (turn-control.ts): a turn that must be stoppable
+  // from outside - the interactive deadline, or the owner's Reset -
+  // sets this signal, and every request below links its own abort
+  // controller to it, so stopping the turn aborts the in-flight
+  // request immediately instead of at the next round boundary.
+  // The per-request timeout still applies on top.
+  abortSignal?: AbortSignal;
+  private linkAbort(controller: AbortController): () => void {
+    const sig = this.abortSignal;
+    if (!sig) return () => {};
+    if (sig.aborted) { controller.abort(); return () => {}; }
+    const onAbort = () => controller.abort();
+    sig.addEventListener("abort", onAbort, { once: true });
+    return () => sig.removeEventListener("abort", onAbort);
+  }
   private reportUsage(payload: unknown, model: string): void {
     try {
       const usage = parseTokenUsage(payload);
@@ -159,6 +174,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw new Error("Remote model requires an API key");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const unlinkAbort = this.linkAbort(controller);
     try {
       const response = await fetch(this.endpoint, {
         method: "POST",
@@ -203,7 +219,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       if (error instanceof Error && error.name === "AbortError") throw new Error("Model tool request timed out");
       if (error instanceof TypeError) throw new Error("Model tool network request failed");
       throw error;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); unlinkAbort(); }
   }
   /** Bounded dashboard connector tool turn. Only host-supplied tool definitions are advertised. */
   async completeConnectorTurn(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
@@ -227,6 +243,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
   private async connectorTurnOnce(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),this.timeoutMs);
+    const unlinkAbort=this.linkAbort(controller);
     try{
       const stream=!!this.onPartial;
       // Streamed turns must ASK for usage: providers only emit a usage
@@ -282,7 +299,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       }
       if(!content&&!calls.length)throw Error("Empty model response");
       return {content:content||null,calls};
-    }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw Error("Model connector network error");throw e;}finally{clearTimeout(timer);}
+    }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw Error("Model connector network error");throw e;}finally{clearTimeout(timer);unlinkAbort();}
   }
   async complete(request: ConversationRequest): Promise<ConversationResponse> {
     validateConversation(request);
@@ -290,6 +307,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw new Error("Remote model requires an API key");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const unlinkAbort = this.linkAbort(controller);
     try {
       const response = await fetch(this.endpoint, {
         method: "POST",
@@ -335,6 +353,6 @@ export class OpenAICompatibleProvider implements ModelProvider {
       // Never echo network errors or response bodies: they can contain secrets.
       if (error instanceof TypeError) throw new Error("Model network request failed");
       throw error;
-    } finally { clearTimeout(timer); }
+    } finally { clearTimeout(timer); unlinkAbort(); }
   }
 }

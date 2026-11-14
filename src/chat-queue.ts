@@ -4,9 +4,10 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
 import { readDashboardConfig } from "./dashboard-config.js";
+import { abortChatTurnRequests, bumpTurnGeneration, createTurnControl, OWNER_TURN_DEADLINE_MS } from "./turn-control.js";
 import type { SteerProvider } from "./budgets.js";
 
 // Message bursts (Defect 2, Dip 2026-11-14: "i want to be able to fire
@@ -35,7 +36,7 @@ import type { SteerProvider } from "./budgets.js";
 // One drain per chat per process; the claim row is the cross-restart
 // record, and a claim older than the stale window may be taken over.
 
-export type QueueItemStatus = "queued" | "folded" | "steered" | "dropped" | "consumed" | "failed";
+export type QueueItemStatus = "queued" | "folded" | "steered" | "dropped" | "consumed" | "failed" | "cancelled";
 export interface QueueItem {
   id: string; chatId: string; content: string; source: string;
   status: QueueItemStatus; createdAt: string; settledAt: string | null;
@@ -44,6 +45,53 @@ export interface QueueItem {
 const STALE_CLAIM_MS = 15 * 60 * 1000;
 const NEVERMIND_RE = /^\s*(nevermind|never mind|nvm|forget it|scratch that)\b/i;
 const STOP_RE = /^\s*(stop|halt|cancel)(\s+(it|that|everything|now))?\s*[.!]?\s*$/i;
+
+// The fast status lane (Dip, 2026-11-14): while a turn runs, a
+// short message that is plainly the owner checking whether Sam
+// is stuck must be answered by the RUNTIME, immediately, from
+// queue/claim/activity state - never folded into the very turn
+// it asks about, where it would wait minutes for a status it
+// needed in seconds. The matcher is deliberately narrow and
+// deterministic: a short message, whole-text, from the owner's
+// own recorded phrasings. Anything ambiguous is not a status
+// check and follows the normal steer path.
+const STATUS_RES: readonly RegExp[] = [
+  /^(are|r)\s+(you|u)\s+(stuck|working|ok|okay|alive|there)$/,
+  /^(you|u)\s+(seem|look)\s+stuck\b/,
+  /^(are|r)\s+(you|u)\s+still\s+(working|there)$/,
+  /^what'?s\s+happening$/,
+  /^what\s+is\s+happening$/,
+  /^(do|did)\s+(you|u)\s+see\s+what\s+happ\w+$/,
+  /^you\s+there$/,
+  /^still\s+there$/,
+  /^hello$/,
+];
+export function isStatusCheck(content: string): boolean {
+  const t = content.trim().toLowerCase().replace(/\s+/g, " ").replace(/[!.,]+$/, "").replace(/\?+$/, "").trim();
+  if (!t || t.length > 48) return false;
+  return STATUS_RES.some(re => re.test(t));
+}
+function formatRunDuration(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return s + "s";
+  return Math.floor(s / 60) + "m " + String(s % 60).padStart(2, "0") + "s";
+}
+/** The runtime's own status answer: how long the turn has run,
+ *  the last ledger fact naming this chat, and what is queued
+ *  behind it. No model call, so it lands in milliseconds. */
+function statusReplyFor(root: string, chatId: string): string {
+  const claim = claimRow(root, chatId);
+  const runningFor = claim ? formatRunDuration(Date.now() - new Date(claim.claimedAt).getTime()) : "a moment";
+  const queued = queuedItems(root, chatId).length;
+  let lastFact = "";
+  try {
+    const hit = [...readActivity(root, 80)].reverse().find(l => l.summary.includes(chatId.slice(0, 8)));
+    if (hit) lastFact = " Last thing on my record for this chat: " + hit.summary.slice(0, 180) + ".";
+  } catch { /* the ledger never breaks the status lane */ }
+  return "Still here. Yes, a turn is still running in this chat: it has been going " + runningFor + "." + lastFact +
+    (queued ? " " + queued + " message(s) are queued behind it." : "") +
+    " If you want it stopped cold, press Reset and I will drop it mid-step.";
+}
 
 function dbFile(root: string): string { return join(resolve(root), ".sam", "chat-queue.db"); }
 function openStore(root: string): Database.Database {
@@ -106,11 +154,11 @@ function setStatus(root: string, id: string, status: QueueItemStatus): void {
   try { db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?").run(status, new Date().toISOString(), id); }
   finally { db.close(); }
 }
-function claimRow(root: string, chatId: string): { claimedAt: string; cancelRequested: boolean } | null {
+function claimRow(root: string, chatId: string): { claimedAt: string; cancelRequested: boolean; token: string } | null {
   const db = openStore(root);
   try {
-    const row = db.prepare("SELECT claimed_at, cancel_requested FROM turn_claims WHERE chat_id = ?").get(chatId) as { claimed_at: string; cancel_requested: number } | undefined;
-    return row ? { claimedAt: row.claimed_at, cancelRequested: row.cancel_requested === 1 } : null;
+    const row = db.prepare("SELECT claimed_at, cancel_requested, token FROM turn_claims WHERE chat_id = ?").get(chatId) as { claimed_at: string; cancel_requested: number; token: string } | undefined;
+    return row ? { claimedAt: row.claimed_at, cancelRequested: row.cancel_requested === 1, token: String(row.token) } : null;
   } finally { db.close(); }
 }
 export function chatTurnActive(root: string, chatId: string): boolean {
@@ -119,12 +167,14 @@ export function chatTurnActive(root: string, chatId: string): boolean {
   return !!claim && Date.now() - new Date(claim.claimedAt).getTime() < STALE_CLAIM_MS;
 }
 
-export interface EnqueueResult { id: string; status: QueueItemStatus; effect?: "nevermind" | "stop" }
+export interface EnqueueResult { id: string; status: QueueItemStatus; effect?: "nevermind" | "stop" | "status"; reply?: string }
 
 /** Accept one owner message. Always accepted; the return says how it
  *  was accounted for. Control messages (nevermind / stop) are consumed
- *  by the queue itself and never reach a turn as work. */
-export function enqueueChatMessage(root: string, input: { chatId: string; content: string; source?: string }): EnqueueResult {
+ *  by the queue itself and never reach a turn as work. A plain status
+ *  check during a running turn is answered by the runtime on the
+ *  spot (the fast status lane) and likewise never waits on a turn. */
+export function enqueueChatMessage(root: string, input: { chatId: string; content: string; source?: string; deadlineMs?: number }): EnqueueResult {
   const actor = actorForChat(root, input.chatId);
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -152,9 +202,22 @@ export function enqueueChatMessage(root: string, input: { chatId: string; conten
       }
       return { id, status: "consumed", effect: "stop" };
     }
+    if (isStatusCheck(input.content) && chatTurnActive(root, input.chatId)) {
+      // Fast status lane: the exchange is persisted as a real
+      // user/assistant pair (the owner asked, the runtime
+      // answered), the queue item is consumed, and the running
+      // turn is not touched.
+      const reply = statusReplyFor(root, input.chatId);
+      db.prepare("INSERT INTO queue_items (id, chat_id, content, source, status, created_at, settled_at) VALUES (?, ?, ?, ?, 'consumed', ?, ?)").run(id, input.chatId, input.content, source, now, now);
+      const store = new ChatStore(root);
+      try { store.add(input.chatId, "user", input.content, source); store.add(input.chatId, "assistant", reply); }
+      finally { store.close(); }
+      ledger(root, actor, "message-status", "Owner status check in chat " + input.chatId.slice(0, 8) + " answered by the runtime while a turn runs; the turn was not disturbed and the model was not called");
+      return { id, status: "consumed", effect: "status", reply };
+    }
     db.prepare("INSERT INTO queue_items (id, chat_id, content, source, status, created_at, settled_at) VALUES (?, ?, ?, ?, 'queued', ?, NULL)").run(id, input.chatId, input.content, source, now);
   } finally { db.close(); }
-  kickChatDrain(root, input.chatId);
+  kickChatDrain(root, input.chatId, input.deadlineMs);
   return { id, status: "queued" };
 }
 
@@ -187,22 +250,23 @@ const drainsInFlight = new Set<string>();
 /** Start the chat's drain if it is not already running in this
  *  process. Fire-and-forget by design: surfaces return immediately
  *  and watch the queue through the chat payload. */
-export function kickChatDrain(root: string, chatId: string): void {
+export function kickChatDrain(root: string, chatId: string, deadlineMs?: number): void {
   if (drainsInFlight.has(chatId)) return;
-  void drainChatQueue(root, chatId).catch(() => { /* a drain failure is ledgered per turn; the queue rows remain */ });
+  void drainChatQueue(root, chatId, deadlineMs === undefined ? undefined : { deadlineMs }).catch(() => { /* a drain failure is ledgered per turn; the queue rows remain */ });
 }
 
 /** Run turns until the chat's queue is empty. One claim per chat;
  *  each iteration folds everything queued into one turn, then loops
  *  (messages that arrived during the turn run as the next turn
  *  automatically - no re-send). */
-export async function drainChatQueue(root: string, chatId: string): Promise<void> {
+export async function drainChatQueue(root: string, chatId: string, opts?: { deadlineMs?: number }): Promise<void> {
   if (drainsInFlight.has(chatId)) return;
   drainsInFlight.add(chatId);
+  const claimToken = randomUUID();
   const db = openStore(root);
   try {
     db.prepare("INSERT INTO turn_claims (chat_id, token, claimed_at, cancel_requested) VALUES (?, ?, ?, 0) ON CONFLICT(chat_id) DO UPDATE SET token = excluded.token, claimed_at = excluded.claimed_at")
-      .run(chatId, randomUUID(), new Date().toISOString());
+      .run(chatId, claimToken, new Date().toISOString());
   } finally { db.close(); }
   try {
     for (;;) {
@@ -211,10 +275,15 @@ export async function drainChatQueue(root: string, chatId: string): Promise<void
       const actor = actorForChat(root, chatId);
       if (items.length > 1) ledger(root, actor, "message-fold", items.length + " owner messages folded into one turn in chat " + chatId.slice(0, 8) + ", in arrival order; the latest governs");
       try {
+        // Every queue turn rides a turn control scoped to this
+        // drain's claim: the interactive deadline, and reset
+        // invalidation the moment the claim token stops matching.
+        const control = createTurnControl(root, chatId, { claimToken, deadlineMs: opts?.deadlineMs ?? OWNER_TURN_DEADLINE_MS });
         await runChatTurn(root, chatId, items[0].content, {
           source: items[0].source,
           burst: items.slice(1).map(item => item.content),
           steer: makeSteerProvider(root, chatId),
+          control,
         });
       } catch {
         // runChatTurn already ledgered the failure (turn-failed); the
@@ -226,16 +295,58 @@ export async function drainChatQueue(root: string, chatId: string): Promise<void
     }
   } finally {
     // Release the claim only when the queue is truly drained; the
-    // recheck closes the enqueue-during-release race.
+    // recheck closes the enqueue-during-release race. The delete
+    // matches this drain's token: a reset (or a successor drain)
+    // that replaced the claim is never undone by this release.
     const remaining = queuedItems(root, chatId).length;
     if (!remaining) {
       const release = openStore(root);
-      try { release.prepare("DELETE FROM turn_claims WHERE chat_id = ?").run(chatId); }
+      try { release.prepare("DELETE FROM turn_claims WHERE chat_id = ? AND token = ?").run(chatId, claimToken); }
       finally { release.close(); }
     }
     drainsInFlight.delete(chatId);
     if (remaining) kickChatDrain(root, chatId);
   }
+}
+
+export const TURN_RESET_MESSAGE = "I stopped that turn. Nothing was deleted. Send the next message when you are ready.";
+export interface ChatResetResult { wasActive: boolean; ranForMs: number | null; cancelledQueued: number; abortedRequests: number }
+
+/** The Reset button (Dip, 2026-11-14: "we need to be able to
+ *  stop that"). One press, effective immediately, in this order:
+ *  the chat's turn generation bumps (every running turn is
+ *  invalid wherever it executes, and its late reply can never
+ *  save), the in-flight model request is aborted through the
+ *  per-chat registry, the claim is deleted (the chat is ready
+ *  the moment the press returns, not at the next round
+ *  boundary), still-queued messages are cancelled (their rows
+ *  stay visible in the chat, struck as cancelled), one plain
+ *  status message lands in the transcript, and one turn-reset
+ *  line lands in the ledger. Nothing is deleted; the transcript
+ *  is preserved. A press with nothing running and nothing
+ *  queued is a quiet no-op. */
+export function resetChatTurn(root: string, chatId: string): ChatResetResult {
+  const actor = actorForChat(root, chatId);
+  const claim = claimRow(root, chatId);
+  const wasActive = !!claim || drainsInFlight.has(chatId);
+  const ranForMs = claim ? Math.max(0, Date.now() - new Date(claim.claimedAt).getTime()) : null;
+  bumpTurnGeneration(root, chatId);
+  const abortedRequests = abortChatTurnRequests(chatId);
+  const db = openStore(root);
+  let cancelledQueued = 0;
+  try {
+    cancelledQueued = db.transaction(() => {
+      db.prepare("DELETE FROM turn_claims WHERE chat_id = ?").run(chatId);
+      return db.prepare("UPDATE queue_items SET status = 'cancelled', settled_at = ? WHERE chat_id = ? AND status = 'queued'").run(new Date().toISOString(), chatId).changes;
+    })();
+  } finally { db.close(); }
+  if (wasActive || cancelledQueued > 0) {
+    const store = new ChatStore(root);
+    try { store.add(chatId, "assistant", TURN_RESET_MESSAGE); }
+    finally { store.close(); }
+    ledger(root, actor, "turn-reset", "Owner reset chat " + chatId.slice(0, 8) + ": turn stopped" + (ranForMs !== null ? " after " + formatRunDuration(ranForMs) : "") + ", claim released on the press, " + abortedRequests + " in-flight request(s) aborted, " + cancelledQueued + " queued message(s) cancelled; nothing was deleted");
+  }
+  return { wasActive, ranForMs, cancelledQueued, abortedRequests };
 }
 
 /** Dashboard startup: resume drains for chats whose queued messages

@@ -21,7 +21,7 @@ import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } f
 import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
 import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
-import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resumeChatQueues } from "./chat-queue.js";
+import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resetChatTurn, resumeChatQueues } from "./chat-queue.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -171,6 +171,15 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         if(!ok){json(404,{error:"Chat not found or invalid input"});}else{json(200,{ok:true});}
       }finally{db.close();}}catch{json(400,{error:"Unable to update chat"});}return;
     }
+    const resetMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/reset$"));
+    if(req.method==="POST"&&resetMatch){
+      // The Reset button (Dip, 2026-11-14): stops the chat's
+      // running turn cold - aborts its in-flight model request,
+      // releases the claim on the press, cancels its queued
+      // messages. Rides the same dashboard auth + X-SAM-Request
+      // header as every POST here (the post() reader enforces it).
+      try{await post();json(200,resetChatTurn(workspace,resetMatch[1]));}catch{json(400,{error:"Unable to reset chat"});}return;
+    }
     const runMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/run$"));
     if(runMatch && req.method==="GET"){
       try{json(200,runInspectorForChat(workspace,runMatch[1]));}catch{json(404,{error:"Chat not found"});}return;
@@ -201,13 +210,13 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const source=sourceFromApiBody(body.source);
         const turnStart=new Date().toISOString();
         const receipt=enqueueChatMessage(workspace,{chatId:id,content:body.content,source});
-        if(body.wait!==true){json(202,{status:receipt.status,id:receipt.id,...(receipt.effect?{effect:receipt.effect}:{})});return;}
+        if(body.wait!==true){json(202,{status:receipt.status,id:receipt.id,...(receipt.effect?{effect:receipt.effect}:{}),...(receipt.reply?{reply:receipt.reply}:{})});return;}
         let timedOut=false;
         try{await awaitChatQueue(workspace,id,10*60*1000);}catch{timedOut=true;}
         if(timedOut){json(202,{status:"queued",id:receipt.id});return;}
         const settled=listChatQueue(workspace,id,20).find(q=>q.id===receipt.id);
         if(settled?.status==="failed"){json(400,{error:"Message failed. Check model configuration and server logs."});return;}
-        if(receipt.status==="consumed"){json(200,{reply:{role:"assistant",content:"",id:null,citation:null,sources:null},userReaction:null,actions:[]});return;}
+        if(receipt.status==="consumed"){json(200,{reply:{role:"assistant",content:receipt.reply??"",id:null,citation:null,sources:null},userReaction:null,actions:[]});return;}
         let userReaction:string|null=null;let replyId:string|null=null;let replyText="";let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;replyText=msgs[i].content;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
         let turnArtifacts:ArtifactSummary[]=[];try{turnArtifacts=artifactsForChat(workspace,id).filter(a=>a.updatedAt>=turnStart);}catch{/* the artifact card is garnish: a dead artifact store never takes the reply down */}
         json(200,{reply:{role:"assistant",content:replyText,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart),artifacts:turnArtifacts});

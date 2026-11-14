@@ -23,6 +23,7 @@ import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } fro
 import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
+import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, type TurnControl } from "./turn-control.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
 import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
@@ -84,19 +85,30 @@ export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,erro
   }catch{/* best effort: the line lands under the core actor */}
   recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
 }
-export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl}):Promise<string>{
   try{
     return await runChatTurnInner(root,chatId,content,opts);
   }catch(error){
+    // A turn the owner stopped with Reset is not a failure and
+    // saves nothing: the reset already ledgered its line and
+    // posted its status message. The turn closes silently, the
+    // same shape as the rate-limit episode's quiet return.
+    if(error instanceof TurnInvalidatedError)return "";
     try{recordTurnFailure(root,chatId,opts?.route??"chat",error);}catch{/* the ledger never breaks a turn, even a dead one */}
     throw error;
   }
 }
-async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider}):Promise<string>{
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl}):Promise<string>{
   const route=opts?.route??"chat";
   const source=opts?.source;
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
   try{const found=look.list().find(c=>c.id===chatId);chatAgent=found?.agent_name??null;visitor=found?.visitor===1;profiles=look.agents();}finally{look.close();}
+  // Turn control (turn-control.ts): interactive owner chat turns
+  // carry the deadline and the reset invalidation checks; machine
+  // routes and visitor turns carry invalidation only. A caller
+  // that already scoped a control (the chat queue, riding its
+  // claim token) hands it in; everyone else gets one here.
+  const control=opts?.control??createTurnControl(root,chatId,{deadlineMs:route==="chat"&&!visitor?OWNER_TURN_DEADLINE_MS:null});
   // Owner-turn budgets (Dip ruling 2026-11-14): a chat-route turn
   // on the owner's own surfaces rides the deep owner budget with
   // its continuation ceiling; visitor chats and turns that arrive
@@ -287,7 +299,8 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       if(conn.unavailable)throw Error(conn.unavailable);
       if(!conn.endpoint||!conn.model)throw Error("Model not configured");
       const model=conn.model;
-      const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",60000);
+      const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",MODEL_REQUEST_TIMEOUT_MS);
+      provider.abortSignal=control.signal;
       const tier=conn.tier;
       provider.onPartial=(accumulated)=>{
         const visible=stripModelMarkup(accumulated);
@@ -299,17 +312,23 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
-        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
+        reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer,control);
       }else if(chatAgent){
-        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
+        reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer,control);
       }else{
         const useConnectors=connectors(root).some(c=>c.enabled&&connectorCredentialPresent(root,c));
-        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer);
-        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer);
+        if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard,ceiling,opts?.steer,control);
+        else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard,undefined,ceiling,opts?.steer,control);
       }
       answered=true;
       break;
     }catch(error){
+      // A reset outranks failover and grace alike: the turn is
+      // stopped, its reply is discarded, and no other route may
+      // replay it. (An abort cut by the reset surfaces as a
+      // provider timeout error, so the check is the control's
+      // state, not the error's shape.)
+      if(control.invalidated())throw new TurnInvalidatedError(chatId);
       const next=routes[i+1];
       if(next&&failoverEligible(error,guard)){
         const reason=error instanceof Error?error.message:String(error);
@@ -352,6 +371,14 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     }
   }
   if(!answered)throw Error("Model not configured");
+  // The final save verifies the turn is still current: a reset
+  // that landed while the last synthesis composed discards the
+  // reply here, before any of it can reach the transcript.
+  if(control.invalidated()){
+    if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
+    recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+    return "";
+  }
   // The first successful model call closes a rate-limit episode:
   // the cap has reset, so the next capped failure speaks again.
   // The grace reply itself is not a model success and never

@@ -9,6 +9,7 @@ import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
+import { TurnInvalidatedError, deadlineCloseNote, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import type { SpawnPoolContext } from "./subagents.js";
 import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
 import { verificationStatus } from "./verification.js";
@@ -619,7 +620,7 @@ export function ownToolsFor(root:string):Array<Record<string,unknown>>{
   return {type:"function",function:{...fn,description:(fn.description??"")+" For kind heartbeat, detail.profile MUST be exactly one of these profile names: "+names+". A connector's display name (for example \"Second Shift\") is NOT a profile name; use the profile name from this list."}};
  });
 }
-async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider,poolCtx?:SpawnPoolContext):Promise<string>{
+async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider,poolCtx?:SpawnPoolContext,control?:TurnControl):Promise<string>{
  // Deferred tool loading (harness item 4): the full set is partitioned
  // per round - below the threshold everything rides upfront exactly as
  // before; above it, only the upfront tier plus the loader are sent,
@@ -643,6 +644,11 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  // turn into the honest fallback below. steerStopped is Defect 2's
  // owner stop, folded in at a round boundary.
  let prepStreak=0;let loaderLoop=false;let loaderDisabled=false;let steerStopped=false;let trimLogged=false;
+ // Turn control (turn-control.ts): a reset throws out of the loop
+ // at the next round boundary (the reply is discarded upstream);
+ // the interactive deadline stops new rounds and closes the turn
+ // with the status synthesis in the endings section below.
+ let deadlineHit=false;
  const trimTurnHistory=()=>{ if(messages.length>REQUEST_MESSAGE_CAP){ const dropped=trimRoundBlocks(messages); if(dropped&&!trimLogged){ trimLogged=true; try{ recordActivity(root,actor,"turn-history-trimmed","Folded "+dropped+" older completed round(s) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger"); }catch{ /* the ledger never breaks a turn */ } } } };
 
  // Owner-turn ceiling (budgets.ts): when a ceiling rides, the soft
@@ -699,6 +705,8 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  };
  for(let round=0;round<effRounds&&!exhausted&&!guardrailed&&!loaderLoop;round++){
   roundsUsed=round+1;
+  if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);
+  if(control&&!deadlineHit&&control.deadlineExceeded()){deadlineHit=true;try{recordActivity(root,actor,"turn-deadline",turnDeadlineLedgerSummary(executed,roundsUsed,control.deadlineAt!==null?control.deadlineAt-control.startedAt:0));}catch{/* the ledger never breaks a turn */}break;}
   // Owner steering (Defect 2): at each tool-round boundary after the
   // first, fold in whatever the owner sent while the turn ran. The
   // provider has already persisted those messages to the chat; here
@@ -719,6 +727,11 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   let turn;
   try { trimTurnHistory(); turn = await provider.completeConnectorTurn(model, messages, sendTools); }
   catch (e) {
+    // Turn control outranks the retry below: a reset discards the
+    // turn, and a request the deadline's abort cut short closes
+    // the turn instead of surfacing as a timeout failure.
+    if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);
+    if(control&&!deadlineHit&&control.deadlineExceeded()){deadlineHit=true;try{recordActivity(root,actor,"turn-deadline",turnDeadlineLedgerSummary(executed,roundsUsed,control.deadlineAt!==null?control.deadlineAt-control.startedAt:0));}catch{/* the ledger never breaks a turn */}break;}
     // Context-reset retry (owner defect 2026-11-10): a long or
     // failure-poisoned history can make the model emit nothing but
     // markup or empties for EVERY completion in a turn - the chat
@@ -882,6 +895,16 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  flushEndLines();
  if(guardrailed)recordActivity(root,actor,"budget-guardrail",guardrailLedgerSummary(executed,skipped,ceiling as ToolBudget,guardrailReason));
  else if(exhausted)recordActivity(root,actor,"tool-budget",budgetLedgerSummary(executed,skipped,budget.maxCalls));
+ if(deadlineHit){
+  // The deadline close: one tool-free synthesis under the
+  // deadline note; if even that cannot compose (the request
+  // itself was the hang), the deterministic checkpoint lands.
+  messages.push({role:"system",content:deadlineCloseNote()});
+  let closed:string|null=null;
+  try{const f=await provider.completeConnectorTurn(model,messages,[]);closed=f.content;}catch{if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);closed=null;}
+  if(closed)return finish(closed);
+  return finish(turnDeadlineFallbackAnswer(executed));
+ }
  const final=await provider.completeConnectorTurn(model,messages,[]);
  if(final.content)return finish(final.content);
  if(steerStopped)return finish(stopFallbackAnswer(executed));
@@ -910,15 +933,15 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  *  other turn hires from the small pool scoped to this invocation -
  *  so no turn ever inherits a previous turn's spent carves, and no
  *  profile's history can starve a fresh turn again. */
-export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider):Promise<string>{
+export async function ownToolsChat(root:string,actor:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,budget:ToolBudget=toolBudget("chat"),userMessageId?:string,guard?:{toolsStarted:boolean},onlyTools?:readonly string[],ceiling:ToolBudget|null=null,steer?:SteerProvider,control?:TurnControl):Promise<string>{
  const { ownerSpawnPool, smallSpawnPool, withSpawnPool, currentSpawnPool } = await import("./subagents.js");
  const { randomUUID } = await import("node:crypto");
  // A context already in force was scoped deliberately by the caller
  // (a sub-agent's drive wraps its turn in its own carved budget):
  // ride it, never shadow it.
  const existing=currentSpawnPool();
- if(existing)return ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,existing);
+ if(existing)return ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,existing,control);
  const turnKey="turn:"+(chatId??"ephemeral")+":"+(userMessageId??randomUUID());
  const poolCtx=ceiling?ownerSpawnPool(turnKey):smallSpawnPool(turnKey);
- return withSpawnPool(poolCtx,()=>ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,poolCtx));
+ return withSpawnPool(poolCtx,()=>ownToolsChatLoop(root,actor,provider,model,history,runTurn,chatId,budget,userMessageId,guard,onlyTools,ceiling,steer,poolCtx,control));
 }
