@@ -37,7 +37,7 @@ button:hover{background:transparent}
 .top strong{font-size:15px;font-weight:600;letter-spacing:-.01em}.topbrand{display:flex;align-items:center;gap:9px}.brandlock{display:flex;flex-direction:column;line-height:1.2}.top .brandlock small{color:var(--faint);font-size:11px;letter-spacing:.05em}#title:empty{display:none}.brand .brandsub{display:block;font-size:11px;font-weight:500;letter-spacing:.1em;color:var(--faint);margin-top:4px}.agentsub{text-align:center;color:var(--faint);font-size:12px;margin-top:3px}
 .top small,.online{color:var(--ok);font-size:12px}
 .main{position:relative;background:transparent}
-.thread{gap:20px;padding:32px max(28px,calc((100% - 720px)/2)) 158px;font-size:15px}
+.thread{gap:20px;padding:32px max(28px,calc((100% - 720px)/2)) 158px;font-size:15px}.thread:has(> .empty){padding-bottom:32px}
 .bubble{font-size:15px;line-height:1.6;border-radius:16px}
 .bubble.assistant{background:var(--card);border:1px solid var(--line)}
 .bubble.user{color:var(--text);border-radius:16px 16px 6px 16px}
@@ -74,7 +74,7 @@ button:hover{background:transparent}
 .tabbar button.active{background:rgba(198,181,154,.12);color:var(--text)}
 @media(max-width:820px){
 .composer{position:absolute;left:0;right:0;bottom:70px;padding:18px 12px 8px;background:linear-gradient(to top,var(--bg) 68%,rgba(14,15,17,0))}
-.thread{padding:16px 16px 132px}
+.thread{padding:16px 16px 132px}.thread:has(> .empty){padding-bottom:16px}
 .bubble{max-width:92%}
 .toBottom{bottom:178px}
 }
@@ -182,7 +182,7 @@ async function connectorMenu(){
  try{await safe(await fetch(api+'/connectors',{method:'POST',headers:{'Content-Type':'application/json','X-SAM-Request':'dashboard'},body:JSON.stringify({name,url,tokenEnv})}));await refresh();alert('Connector saved. Set '+tokenEnv+' locally and restart SAM, then open Connectors, Cancel, and Test.');}catch(e){alert(e.message);}
 }
 async function syncReactions(){if(!selected)return;try{const data=await safe(await fetch(api+'/chats/'+selected));for(const m of (data.messages||[])){const h=bubbleById.get(m.id);if(h)h.setReaction(m.reaction||null);}}catch(e){}}
-async function send(){if(busy)return;const content=el('message').value.trim();if(!content)return;if(!selected){alert('Create a chat first');return;}busy=true;el('send').disabled=true;el('message').value='';const userBubble=bubble('user',content,null,'dashboard');const pending=bubble('assistant','');pending.beginWork();try{const d=await safe(await fetch(api+'/chats/'+selected+'/messages',{method:'POST',headers:{'Content-Type':'application/json','X-SAM-Request':'dashboard'},body:JSON.stringify({content,source:'dashboard'})}));pending.setText(d.reply.content);if(d.reply.id)bubbleById.set(d.reply.id,pending);if(d.reply.citation)pending.setCitation(d.reply.citation);if(d.userReaction)userBubble.setReaction(d.userReaction);for(const a of (d.actions||[]))actionCard(a);await refresh();await syncReactions();}catch(e){pending.setText('Error: '+e.message);pending.el.classList.add('error');}finally{busy=false;el('send').disabled=false;}}
+async function send(){if(busy)return;const content=el('message').value.trim();if(!content)return;busy=true;el('send').disabled=true;if(!selected){try{const c=await safe(await fetch(api+'/chats',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:content.slice(0,48)||'New conversation'})}));selected=c.id;el('title').textContent=c.title;el('thread').replaceChildren();}catch(e){busy=false;el('send').disabled=false;return;}}el('message').value='';const userBubble=bubble('user',content,null,'dashboard');const pending=bubble('assistant','');pending.beginWork();try{const d=await safe(await fetch(api+'/chats/'+selected+'/messages',{method:'POST',headers:{'Content-Type':'application/json','X-SAM-Request':'dashboard'},body:JSON.stringify({content,source:'dashboard'})}));pending.setText(d.reply.content);if(d.reply.id)bubbleById.set(d.reply.id,pending);if(d.reply.citation)pending.setCitation(d.reply.citation);if(d.userReaction)userBubble.setReaction(d.userReaction);for(const a of (d.actions||[]))actionCard(a);await refresh();await syncReactions();}catch(e){pending.setText('Error: '+e.message);pending.el.classList.add('error');}finally{busy=false;el('send').disabled=false;}}
 let manageOn=false;
 function showManage(){manageOn=true;el('manageView').hidden=false;el('thread').style.display='none';document.querySelector('.composer').style.display='none';el('toBottom').style.display='none';el('title').textContent='Manage';el('navManage').classList.add('active');el('navChats').classList.remove('active');refresh();}
 function showChat(){if(!manageOn)return;manageOn=false;el('manageView').hidden=true;el('thread').style.display='';document.querySelector('.composer').style.display='';el('toBottom').style.display='';el('navChats').classList.add('active');el('navManage').classList.remove('active');const sc=(lastChatItems||[]).find(x=>x.id===selected);el('title').textContent=sc?sc.title:'SAM';}
