@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
+import { recordActivity } from "./activity.js";
 
 /**
  * Cheap session caps (Harness Implementation Order item 3, Dip
@@ -56,11 +57,38 @@ function ledgerPath(root: string): string {
   return join(dir, "session-caps.jsonl");
 }
 
-function readEvents(root: string): CapsEvent[] {
-  const path = ledgerPath(root);
-  if (!existsSync(path)) return [];
+// The read seam follows the house contract fail-closed (gap
+// found 2026-11-13, hourly run 18:04): this ledger is a spend
+// BOUND, not a work record - a dead read folded to [] would
+// read as "no turns, no tokens spent today", the gate would
+// never trip, and a runaway chat would spend unbounded while
+// every surface reported zero usage as truth. So a failed read
+// ledgers ONE session-caps-failed line (what named "ledger
+// read", the chat named when the reader knows it) and rethrows
+// exactly: sessionCapStatus keeps failing the turn closed -
+// never an unbounded spend on a dead gate - now with the true
+// cause countable under its own kind instead of a raw
+// filesystem error dressed as a generic turn failure, and
+// sessionUsageToday's status readers surface the error instead
+// of a false zero. The error is tagged so a caller whose own
+// catch ledgers (noteCapTrip) can tell a read failure - already
+// ledgered here, under the seam that actually died - from a
+// failure of its own write, and never records it twice.
+function readEvents(root: string, chatId = ""): CapsEvent[] {
+  let raw: string | null;
+  try {
+    const path = ledgerPath(root);
+    raw = existsSync(path) ? readFileSync(path, "utf8") : null;
+  } catch (error) {
+    recordSessionCapsFailure(root, "ledger read", chatId, error);
+    if (error !== null && (typeof error === "object" || typeof error === "function")) {
+      (error as { sessionCapsReadLedgered?: boolean }).sessionCapsReadLedgered = true;
+    }
+    throw error;
+  }
+  if (raw === null) return [];
   const events: CapsEvent[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as CapsEvent;
@@ -72,9 +100,39 @@ function readEvents(root: string): CapsEvent[] {
 
 const dayOf = (iso: string): string => iso.slice(0, 10);
 
+// One ledger line per failed caps-ledger touch (gap found
+// 2026-11-13): this ledger is accounting, and accounting never
+// breaks a turn - recordSessionTurn runs at the very end of a
+// completed turn (and on the error path, right before the real
+// error rethrows, where an accounting throw would mask it), and
+// noteCapTrip runs inside the graceful cap reply itself. Each
+// failed write ledgers one session-caps-failed activity line
+// (which write, the chat prefix, the verbatim reason capped)
+// and the caller proceeds exactly as if the write had landed.
+// A failed READ is the one touch that does not proceed: it
+// ledgers the same one line (what named "ledger read" - see
+// readEvents above for why the gate fails closed) and rethrows.
+// The chat segment is omitted when the reader has no single
+// chat (sessionUsageToday reads for every chat at once); write
+// summaries, which always carry a chat, are unchanged.
+export function sessionCapsFailureSummary(what: string, chatId: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  const chat = chatId ? " for chat " + chatId.slice(0, 8) : "";
+  return ("Session caps " + what + " failed" + chat + ": " + clean).slice(0, 200);
+}
+
+export function recordSessionCapsFailure(root: string, what: string, chatId: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "session-caps-failed", sessionCapsFailureSummary(what, chatId, reason));
+}
+
 export function recordSessionTurn(root: string, turn: { chatId: string; route: TurnRoute; tokens: number; at?: string }): void {
   const event: TurnEvent = { type: "turn", at: turn.at ?? new Date().toISOString(), chatId: turn.chatId, route: turn.route, tokens: Math.max(0, Math.floor(turn.tokens) || 0) };
-  appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
+  try {
+    appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
+  } catch (error) {
+    recordSessionCapsFailure(root, "turn record", turn.chatId, error);
+  }
 }
 
 export interface SessionCapStatus {
@@ -91,7 +149,7 @@ export function sessionCapStatus(root: string, chatId: string, now: Date = new D
   const day = dayOf(now.toISOString());
   let turnsUsed = 0;
   let tokensUsed = 0;
-  for (const event of readEvents(root)) {
+  for (const event of readEvents(root, chatId)) {
     if (event.type !== "turn" || event.chatId !== chatId || dayOf(event.at) !== day) continue;
     turnsUsed++;
     tokensUsed += event.tokens;
@@ -105,12 +163,27 @@ export function sessionCapStatus(root: string, chatId: string, now: Date = new D
  *  first trip of the day, so the activity ledger gets one line per
  *  capped session per day instead of one per refused tick. */
 export function noteCapTrip(root: string, chatId: string, route: TurnRoute, reason: "turns" | "tokens", now: Date = new Date()): boolean {
-  const day = dayOf(now.toISOString());
-  const already = readEvents(root).some(e => e.type === "cap" && e.chatId === chatId && dayOf(e.at) === day);
-  if (already) return false;
-  const event: CapEvent = { type: "cap", at: now.toISOString(), chatId, route, reason };
-  appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
-  return true;
+  try {
+    const day = dayOf(now.toISOString());
+    const already = readEvents(root, chatId).some(e => e.type === "cap" && e.chatId === chatId && dayOf(e.at) === day);
+    if (already) return false;
+    const event: CapEvent = { type: "cap", at: now.toISOString(), chatId, route, reason };
+    appendFileSync(ledgerPath(root), JSON.stringify(event) + "\n", { encoding: "utf8", flag: "a" });
+    return true;
+  } catch (error) {
+    // A trip that could not be recorded reads as not-noted: the
+    // caller's own session-cap line does not ride it, the failure
+    // line above stands instead, and the graceful cap reply the
+    // caller is holding still returns. A READ failure arrives
+    // already ledgered by readEvents under the seam that died
+    // (and tagged) - recording it again here would count one
+    // touch twice and mislabel it as this write, so it stands
+    // on the read seam's line alone.
+    if (!(error !== null && typeof error === "object" && (error as { sessionCapsReadLedgered?: boolean }).sessionCapsReadLedgered)) {
+      recordSessionCapsFailure(root, "cap trip", chatId, error);
+    }
+    return false;
+  }
 }
 
 export function sessionCapReply(status: SessionCapStatus): string {

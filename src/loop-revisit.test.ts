@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatStore } from "./chats.js";
 import { listLoops, openLoop, updateOpenLoop, type OpenLoop } from "./loops.js";
-import { parseRevisitReply, revisitDueLoops, revisitPrompt } from "./loop-revisit.js";
+import { loopDeliveryFailureSummary, parseRevisitReply, revisitDueLoops, revisitPrompt } from "./loop-revisit.js";
+import { classifyDefect } from "./self-work.js";
 import { runHeartbeat } from "./heartbeat.js";
 import { addChannel } from "./channels.js";
 import { saveBridgeState } from "./telegram.js";
@@ -188,6 +189,59 @@ test("second answers: the channel leg rides the outbox and the worthiness gate",
     assert.equal(readDeliveries(root).filter(d => d.status === "suppressed").length, 1);
     const msgs = messages(root, chatId);
     assert.ok(msgs.some(m => /stack counts moved/.test(m.content)), "the chat record carries the held update");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("second answers: loopDeliveryFailureSummary names the attempt, and the terminal settle when capped", () => {
+  const mid = loopDeliveryFailureSummary("channel down", 2, false);
+  assert.match(mid, /Delivery for second answer failed \(attempt 2 of 5\): channel down/);
+  assert.doesNotMatch(mid, /gave up/);
+  const end = loopDeliveryFailureSummary("channel down", 5, true);
+  assert.match(end, /attempt 5 of 5/);
+  assert.match(end, /gave up after 5 attempts; the update will not be retried/);
+  // Whitespace collapses and the line is capped, like its sibling seams.
+  const messy = loopDeliveryFailureSummary("a\n\n  b\t c " + "x".repeat(400), 1, false);
+  assert.ok(messy.length <= 200);
+  assert.doesNotMatch(messy, /\n/);
+});
+
+test("second answers: a failed channel delivery ledgers one delivery-failed line and stays pending", async () => {
+  const root = scratch();
+  try {
+    const channel = addChannel(root, "telegram", "Dip Telegram", "sam", "SAM_CHANNEL_TELEGRAM_TOKEN", [123]);
+    const chatId = makeChat(root, "Telegram - sam");
+    saveBridgeState(root, { offset: 0, chats: { "123": chatId } });
+    const loop = openLoop(root, { profile: "sam", chatId, question: "Is the stack restarted?", answer: "Not yet.", watchFor: "candidates advancing", dueInHours: 1 });
+    makeDue(root, loop.id);
+    const r = await revisitDueLoops(root, { runTurn: async () => "UPDATE: It restarted; candidates are advancing again.", deliver: async () => { throw new Error("channel down"); } });
+    assert.deepEqual(r.changed, [loop.id], "the loop's own state still advances - the chat record carries the update");
+    const msgs = messages(root, chatId);
+    assert.ok(msgs.some(m => /It restarted/.test(m.content)), "the update landed in the chat record despite the failed push");
+    const deliveries = readDeliveries(root);
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveries[0].status, "pending");
+    assert.equal(deliveries[0].attempts, 1);
+    assert.equal(deliveries[0].reason, "channel down");
+    const failures = readActivity(root, 50).filter(a => a.kind === "delivery-failed");
+    assert.equal(failures.length, 1, "exactly one delivery-failed activity line for the failed attempt");
+    assert.equal(failures[0].actor, "sam");
+    assert.match(failures[0].summary, /Delivery for second answer failed \(attempt 1 of 5\): channel down/);
+    assert.equal(failures[0].summary.includes("It restarted"), false, "the delivery text never enters the failure line");
+    assert.deepEqual(classifyDefect(failures[0]), { key: "delivery-failed", label: "heartbeat delivery failures" }, "self-work counts the line with the delivery-failed class");
+    assert.equal(channel.id.length > 0, true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("second answers: a delivered channel update writes no delivery-failed line", async () => {
+  const root = scratch();
+  try {
+    addChannel(root, "telegram", "Dip Telegram", "sam", "SAM_CHANNEL_TELEGRAM_TOKEN", [123]);
+    const chatId = makeChat(root, "Telegram - sam");
+    saveBridgeState(root, { offset: 0, chats: { "123": chatId } });
+    const loop = openLoop(root, { profile: "sam", chatId, question: "Is the stack restarted?", answer: "Not yet.", watchFor: "candidates advancing", dueInHours: 1 });
+    makeDue(root, loop.id);
+    await revisitDueLoops(root, { runTurn: async () => "UPDATE: It restarted.", deliver: async () => {} });
+    assert.equal(readActivity(root, 50).filter(a => a.kind === "delivery-failed").length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

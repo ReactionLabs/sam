@@ -86,7 +86,15 @@ test("cancel stops the child, and a restarted process keeps the checkpoint as in
     });
     const ended = await child;
     assert.equal(ended.status, "cancelled");
-    const journal = new AgentLoopJournal(join(root, ".sam", "subagents.db"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+  // The orphan scenario runs in its own root: a legacy
+  // subagents.json is a migration fixture, imported once - the
+  // registry is SQLite now, so the pre-restart state is seeded
+  // as the legacy file in a fresh install, exactly as a real
+  // pre-migration install would carry it.
+  const root2 = scratch();
+  try {
+    const journal = new AgentLoopJournal(join(root2, ".sam", "subagents.db"));
     const loop = journal.create("orphan task");
     journal.event(loop.id, "tool_call", "sam_memory_list ran before the crash");
     journal.close();
@@ -95,19 +103,19 @@ test("cancel stops the child, and a restarted process keeps the checkpoint as in
       budget: { rounds: 1, maxCalls: 1 }, status: "running", result: null, loopId: loop.id,
       createdAt: new Date().toISOString(), finishedAt: null, chatId: null,
     };
-    writeFileSync(join(root, ".sam", "subagents.json"), JSON.stringify([ended, orphan], null, 2));
-    const listed = listSubagents(root);
+    writeFileSync(join(root2, ".sam", "subagents.json"), JSON.stringify([orphan], null, 2));
+    const listed = listSubagents(root2);
     const found = listed.find(s => s.id === loop.id);
     assert.equal(found?.status, "interrupted");
     assert.match(found?.result ?? "", /inspect evidence before resuming/);
-    const reopened = new AgentLoopJournal(join(root, ".sam", "subagents.db"));
+    const reopened = new AgentLoopJournal(join(root2, ".sam", "subagents.db"));
     const saved = reopened.get(loop.id);
     const events = reopened.events(loop.id);
     reopened.close();
     assert.equal(saved?.state, "interrupted");
     assert.equal(events.some(e => e.event === "tool_call"), true);
-    assert.equal(getSubagent(root, loop.id)?.status, "interrupted");
-  } finally { rmSync(root, { recursive: true, force: true }); }
+    assert.equal(getSubagent(root2, loop.id)?.status, "interrupted");
+  } finally { rmSync(root2, { recursive: true, force: true }); }
 });
 
 test("CLI spawn talks to a fake provider, then list and cancel work", async () => {

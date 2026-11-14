@@ -168,11 +168,11 @@ export class ChatStore {
   // FTS around the actual match. The chat-id list is the fence - the
   // caller (chat-manage) computes it from the acting profile, the
   // store never widens it.
-  searchMessagesFts(query:string,chatIds:string[],limit=20):Array<{chat_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>{
+  searchMessagesFts(query:string,chatIds:string[],limit=20):Array<{chat_id:string;message_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>{
     const match=ftsChatMatch(query);
     if(!match||!chatIds.length)return [];
     const capped=Number.isInteger(limit)?Math.min(50,Math.max(1,limit)):20;
-    return this.db.prepare("SELECT m.chat_id,m.role,m.content,m.created_at,snippet(chat_messages_fts,0,'','',char(8230),24) AS snippet,bm25(chat_messages_fts) AS rank FROM chat_messages_fts JOIN chat_messages m ON m.rowid=chat_messages_fts.rowid WHERE chat_messages_fts MATCH ? AND m.chat_id IN ("+chatIds.map(()=>"?").join(",")+") ORDER BY rank,m.created_at DESC LIMIT ?").all(match,...chatIds,capped) as Array<{chat_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>;
+    return this.db.prepare("SELECT m.chat_id,m.id AS message_id,m.role,m.content,m.created_at,snippet(chat_messages_fts,0,'','',char(8230),24) AS snippet,bm25(chat_messages_fts) AS rank FROM chat_messages_fts JOIN chat_messages m ON m.rowid=chat_messages_fts.rowid WHERE chat_messages_fts MATCH ? AND m.chat_id IN ("+chatIds.map(()=>"?").join(",")+") ORDER BY rank,m.created_at DESC LIMIT ?").all(match,...chatIds,capped) as Array<{chat_id:string;message_id:string;role:string;content:string;created_at:string;snippet:string;rank:number}>;
   }
   messages(id:string):ChatMessage[]{
     if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");

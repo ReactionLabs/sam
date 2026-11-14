@@ -198,7 +198,7 @@ export function scanNeverList(text: string): NeverHit | null {
 // flagged skill holds for the owner instead of executing.
 // Unknown kinds classify consequential (fail-closed).
 export type ProposalRisk = "internal" | "consequential";
-const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "draft", "skill-author", "git-push", "engine", "spawn", "delegate"]);
+const CONSEQUENTIAL_KINDS = new Set(["law", "heartbeat", "say", "draft", "skill-author", "git-push", "engine", "spawn", "delegate", "pair"]);
 export function classifyProposal(kind: string, supersedes: string | null | undefined): { risk: ProposalRisk; reason: string } {
   if (CONSEQUENTIAL_KINDS.has(kind)) return { risk: "consequential", reason: "kind \"" + kind + "\" has owner-facing effects and always needs the owner's decision in manual and smart modes" };
   if (kind === "skill") return { risk: "internal", reason: "a registry skill install: validated, provenance-logged, curator-watched and removable untrusted reference; content-scanned on the auto path, where a flagged skill holds for the owner" };
@@ -217,6 +217,9 @@ export function approvalAutoVia(policy: ApprovalPolicy, kind: string, supersedes
   // when the install's mode is off. The process must not start on a
   // policy setting alone.
   if (kind === "delegate") return null;
+  // Self-pairing always cards the owner too, in every mode:
+  // pairing widens SAM's reach, and no policy setting grants it.
+  if (kind === "pair") return null;
   const { risk } = classifyProposal(kind, supersedes);
   if (policy.mode === "off") return { via: "auto:off", risk };
   if (policy.mode === "smart" && risk === "internal" && policy.autoKinds.includes(kind)) return { via: "auto:smart", risk };

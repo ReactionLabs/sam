@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { recentExecutionAuditLogs } from "./approved-test-runner.js";
 import { MissionStore } from "./storage.js";
 import { ChatStore, type ChatRecord } from "./chats.js";
 import { recentSkillUse, lastSkillByChat } from "./skill-use.js";
@@ -23,7 +23,7 @@ import { doorEnabled, listDoors } from "./mini-door.js";
 import { listDrafts } from "./drafts.js";
 import { listContacts } from "./contacts.js";
 import type { DoorGuardStats } from "./door-guard.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { channels } from "./channels.js";
 import { installedSkills } from "./skill-registry.js";
 import { listSubagents } from "./subagents.js";
@@ -42,9 +42,17 @@ import { standingSummary } from "./standing-files.js";
 import { verificationStatus } from "./verification.js";
 import { goldfishStatus } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
+import { rateLimitStatus } from "./rate-limit.js";
 import { dueLoops, openLoopCount } from "./loops.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { stackWatchStatus } from "./stack-watch.js";
+import { readSelfAudit } from "./self-audit.js";
+import { readPromptAudit } from "./prompt-audit.js";
+import { readContextAudit } from "./context-audit.js";
+import { readLoopAudit } from "./loop-audit.js";
+import { readEvalBattery } from "./eval-battery.js";
+import { vaultStatus } from "./vault.js";
+import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 // One status payload (fix-list item 3). The dashboard route /api/status
 // and the CLI overview used to build two objects: the route carried
@@ -84,12 +92,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     chats = chatStore.list().map(enrich);
     archivedChats = chatStore.list({ includeArchived: true }).filter(c => c.archived === 1).map(enrich);
   } finally { chatStore.close(); }
-  const audit = join(root, ".sam", "execution-audit.jsonl");
-  let logs: string[] = [];
-  if (existsSync(audit)) {
-    const raw = readFileSync(audit, "utf8");
-    logs = raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line => line.slice(0, 800));
-  }
+  const logs = recentExecutionAuditLogs(root);
   const prefStore = new PreferenceStore(root);
   let preferences: unknown;
   try { preferences = prefStore.list(); }
@@ -111,7 +114,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     skillUse: recentSkillUse(root, 10),
     agents: agents(root),
     config: readDashboardConfig(root),
-    connectors: connectors(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
+    connectors: connectors(root).map(c => ({ ...c, credentialPresent: connectorCredentialPresent(root, c) })),
     channels: channels(root).map(c => ({ ...c, credentialPresent: !!process.env[c.tokenEnv] })),
     preferences,
     heartbeatJobs: jobs,
@@ -151,9 +154,17 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     approvals: loadApprovalPolicy(root),
     code: codeSummary(root),
     coding: codingSummary(root),
-    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, connected: c.connected, stale: c.stale, record: c.connection } }; })(),
+    engine: (() => { const s = engineStatus(root); const c = engineConnectStatus(root); return { ...s, connection: { route: c.route, provider: c.provider, connected: c.connected, stale: c.stale, record: c.connection, providers: c.providers } }; })(),
     senses: sensesStatus(),
     brief: briefStatus(root),
+    selfAudit: readSelfAudit(root),
+    promptAudit: readPromptAudit(root),
+    contextAudit: readContextAudit(root),
+    loopAudit: readLoopAudit(root),
+    evalBattery: readEvalBattery(root),
+    vault: vaultStatus(root),
+    selfWork: readSelfWork(root),
+    selfWorkFixes: selfWorkFixViews(root),
     setup: readSetupRecord(root),
     auth: authStatus(root),
     stackWatch: stackWatchStatus(root),
@@ -169,6 +180,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     verification: verificationStatus(root),
     goldfish: (() => { const g = goldfishStatus(root); return { state: g.state, verdict: g.latest?.verdict ?? null, uncoveredChanges: g.uncoveredChanges }; })(),
     sessionCaps: (() => { const caps = sessionCaps(); return { maxTurns: caps.maxTurns, maxTokens: caps.maxTokens, cappedToday: sessionUsageToday(root).filter(s => s.capped).map(s => s.chatId) }; })(),
+    rateLimit: rateLimitStatus(root),
     loops: { open: openLoopCount(root), due: dueLoops(root).length },
     deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
   };

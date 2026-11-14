@@ -4,7 +4,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
+import { backupFailureSummary, createBackup, listBackups, restoreBackup, runRestoreDrill, verifyBackup } from "./backup.js";
+import { readActivity } from "./activity.js";
+import { classifyDefect } from "./self-work.js";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore } from "./preferences.js";
 import { MissionStore } from "./storage.js";
@@ -42,6 +44,48 @@ test("createBackup writes a manifest-verified tarball with consistent DB snapsho
     const ledger = readFileSync(join(root, ".sam", "activity.jsonl"), "utf8");
     assert.match(ledger, /"kind":"backup"/);
   } finally { rmSync(root, { recursive: true, force: true }); rmSync(dest, { recursive: true, force: true }); }
+});
+
+test("backupFailureSummary names the failure with the verbatim reason, collapsed", () => {
+  assert.equal(backupFailureSummary(new Error("file is not\na  database")), "Backup failed: file is not a database");
+  assert.equal(backupFailureSummary("disk full"), "Backup failed: disk full");
+  assert.equal(backupFailureSummary(new Error("   ")), "Backup failed: unknown error");
+});
+
+test("a failed backup ledgers exactly one backup-failed line and rethrows, with no archive and no success line", () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-bkf-"));
+  const dest = mkdtempSync(join(tmpdir(), "sam-bkdestf-"));
+  try {
+    seedState(root);
+    // The persistent-failure shape: one corrupt state DB makes the
+    // snapshot throw inside the backup work, every night, forever.
+    writeFileSync(join(root, ".sam", "broken.db"), "this is not a database at all");
+    assert.throws(() => createBackup(root, dest), /not a database|file is not/i);
+    const failed = readActivity(root, 50, { kind: "backup-failed" });
+    assert.equal(failed.length, 1);
+    assert.equal(failed[0].actor, "sam");
+    assert.match(failed[0].summary, /^Backup failed: /);
+    assert.equal(classifyDefect(failed[0])?.key, "backup-failed");
+    assert.equal(readActivity(root, 50, { kind: "backup" }).length, 0);
+    assert.equal(listBackups(dest).length, 0);
+    // A second failed run ledgers a second line: the class stays countable.
+    assert.throws(() => createBackup(root, dest));
+    assert.equal(readActivity(root, 50, { kind: "backup-failed" }).length, 2);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(dest, { recursive: true, force: true }); }
+});
+
+test("a stateless refusal is a usage error and ledgers nothing; a good backup writes no failure line", () => {
+  const root = mkdtempSync(join(tmpdir(), "sam-bkg-"));
+  const dest = mkdtempSync(join(tmpdir(), "sam-bkdestg-"));
+  const empty = mkdtempSync(join(tmpdir(), "sam-bkge-"));
+  try {
+    assert.throws(() => createBackup(empty, dest), /No \.sam state/);
+    assert.equal(existsSync(join(empty, ".sam", "activity.jsonl")), false);
+    seedState(root);
+    createBackup(root, dest);
+    assert.equal(readActivity(root, 50, { kind: "backup-failed" }).length, 0);
+    assert.equal(readActivity(root, 50, { kind: "backup" }).length, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); rmSync(dest, { recursive: true, force: true }); rmSync(empty, { recursive: true, force: true }); }
 });
 
 test("restore drill boots the copy: the real stores open and count what was seeded", () => {

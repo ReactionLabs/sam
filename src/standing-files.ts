@@ -65,22 +65,83 @@ function standingPath(root: string, profile: string, name: string): string {
 export interface StandingFileEntry extends StandingFileDef {
   present: boolean; chars: number; updatedAt: string | null;
 }
+
+// One ledger line per failed standing-file READ (gap found
+// 2026-11-14): standingPromptParts used to swallow every read
+// failure in one whole-loop catch - a broken persona silently
+// vanished from every system prompt (and took the healthy
+// files after it with it), indistinguishable from the owner
+// clearing the files, and listStandingFiles / readStandingFile
+// threw raw out of status and the CLI with no line anywhere.
+// The line names the profile and the file and carries the
+// verbatim reason collapsed + capped; the file's CONTENT
+// never enters it (owner-written briefs are private context).
+export function standingFileFailureSummary(profile: string, name: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Standing file read failed for profile " + profile + " (" + name + "): " + clean).slice(0, 200);
+}
+
+export function recordStandingFileFailure(root: string, profile: string, name: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, profile, "standing-file-failed", standingFileFailureSummary(profile, name, reason));
+}
+
+function tagStandingFileReadLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { standingFileReadLedgered?: boolean }).standingFileReadLedgered = true;
+  }
+}
+
+export function isStandingFileReadLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { standingFileReadLedgered?: boolean }).standingFileReadLedgered === true;
+}
+
 export function listStandingFiles(root: string, profile: string): StandingFileEntry[] {
   assertKnownProfile(root, profile);
   return STANDING_FILES.map(def => {
     const path = standingPath(root, profile, def.name);
-    if (!existsSync(path)) return { ...def, present: false, chars: 0, updatedAt: null };
-    const st = statSync(path);
-    return { ...def, present: true, chars: readFileSync(path, "utf8").length, updatedAt: st.mtime.toISOString() };
+    // The list seam fails closed (the house read precedent):
+    // standingSummary folds this list as truth into the status
+    // payload, so a dead file's touch ledgers ONE
+    // standing-file-failed line and rethrows exactly instead
+    // of dying raw or folding the file as absent.
+    try {
+      if (!existsSync(path)) return { ...def, present: false, chars: 0, updatedAt: null };
+      const st = statSync(path);
+      return { ...def, present: true, chars: readFileSync(path, "utf8").length, updatedAt: st.mtime.toISOString() };
+    } catch (error) {
+      recordStandingFileFailure(root, profile, def.name, error);
+      throw error;
+    }
   });
 }
 
 export function readStandingFile(root: string, profile: string, name: string): string | null {
   assertKnownProfile(root, profile);
   const path = standingPath(root, profile, name);
-  if (!existsSync(path)) return null;
-  const content = readFileSync(path, "utf8");
-  if (content.length > STANDING_FILE_MAX_CHARS * 2) throw new Error("Standing file " + name + " for " + profile + " is oversized (" + content.length + " chars); trim it with: sam agents files set");
+  // The read seam owns its failure (gap found 2026-11-14): a
+  // failed filesystem touch - and the oversize refusal, which
+  // is this file's own broken state - ledgers ONE
+  // standing-file-failed line, tags the error (the
+  // session-caps precedent, so standingPromptParts records
+  // nothing more for the same touch), and rethrows exactly.
+  // An absent file still reads null and ledgers nothing.
+  let content: string;
+  try {
+    if (!existsSync(path)) return null;
+    content = readFileSync(path, "utf8");
+  } catch (error) {
+    recordStandingFileFailure(root, profile, name, error);
+    tagStandingFileReadLedgered(error);
+    throw error;
+  }
+  if (content.length > STANDING_FILE_MAX_CHARS * 2) {
+    const error = new Error("Standing file " + name + " for " + profile + " is oversized (" + content.length + " chars); trim it with: sam agents files set");
+    recordStandingFileFailure(root, profile, name, error);
+    tagStandingFileReadLedgered(error);
+    throw error;
+  }
   return content;
 }
 
@@ -125,14 +186,25 @@ export function standingPromptParts(root: string, profile: string): { stable: st
   const section = (def: StandingFileDef, content: string) =>
     "Standing file \"" + def.title + "\" for this profile (owner-written, part of the " + def.tier + " tier):\n" + content.trim();
   let stable = "", context = "";
-  try {
-    for (const def of STANDING_FILES) {
-      const content = readStandingFile(root, profile, def.name);
-      if (!content || !content.trim()) continue;
-      if (def.tier === "stable") stable = stable ? stable + "\n\n" + section(def, content) : section(def, content);
-      else context = context ? context + "\n\n" + section(def, content) : section(def, content);
+  // Per-file guard (gap found 2026-11-14): a broken standing
+  // file still never breaks a turn, but it no longer vanishes
+  // silently or takes its siblings with it - the failed read
+  // ledgers exactly ONE standing-file-failed line (inside
+  // readStandingFile for its own touches, here for any other
+  // per-file failure), that file is skipped, and the remaining
+  // files still assemble.
+  for (const def of STANDING_FILES) {
+    let content: string | null;
+    try {
+      content = readStandingFile(root, profile, def.name);
+    } catch (error) {
+      if (!isStandingFileReadLedgered(error)) recordStandingFileFailure(root, profile, def.name, error);
+      continue;
     }
-  } catch { /* a broken standing file never breaks a turn; the CLI surfaces it */ }
+    if (!content || !content.trim()) continue;
+    if (def.tier === "stable") stable = stable ? stable + "\n\n" + section(def, content) : section(def, content);
+    else context = context ? context + "\n\n" + section(def, content) : section(def, content);
+  }
   return { stable, context };
 }
 

@@ -1,0 +1,192 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readActivity, recordActivity } from "./activity.js";
+import { readUsage, recordUsage, usageFailureSummary, usageReadFailureSummary, usageSummary, usageToday } from "./usage.js";
+import { noteCapTrip, recordSessionTurn, sessionCapStatus, sessionCapsFailureSummary, sessionUsageToday } from "./session-caps.js";
+import { classifyDefect, rankDefects } from "./self-work.js";
+
+// Turn accounting failure visibility (gap found 2026-11-13, hourly
+// run 12:04): the two accounting ledgers every turn writes had
+// opposite, both-wrong failure disciplines - recordUsage swallowed
+// its write failures whole (spend silently froze while the
+// summaries kept reporting it as truth), and recordSessionTurn /
+// noteCapTrip appended unguarded (a dead caps ledger threw at the
+// end of a completed turn, masked the real error on the failure
+// path, and could kill the graceful cap reply). Both now follow
+// the house contract: accounting never breaks a turn, and each
+// failed write ledgers exactly one failure line. The caps READ
+// seam joined later the same day (hourly run 18:04): readEvents
+// was the one unguarded touch left - a dead read threw raw out
+// of the turn-path gate with no line under its own kind, and
+// noteCapTrip's catch mislabeled it a cap-trip write failure.
+// The read now fail-closes (this ledger is a spend bound, so a
+// folded [] would read as zero spent and the gate would never
+// trip): one ledger-read line, the error tagged so the trip's
+// catch never counts it twice, then the rethrow.
+// The usage READ seam joined later the same day (hourly run
+// 19:04): readUsage was the one silent touch left in the
+// accounting pair - its catch folded a dead read to [] with no
+// line anywhere, so every summary reported zero spend for all
+// time, indistinguishable from a fresh install. That read now
+// fail-closes the same way (a spend record's zero is the unsafe
+// lie): one usage-failed line naming the read, then the rethrow.
+const ENTRY = { actor: "dip", route: "chat" as const, tier: "main" as const, model: "MiniMax-M2.5", promptTokens: 987654, completionTokens: 5 };
+
+function scratch() {
+  return mkdtempSync(join(tmpdir(), "sam-accounting-fail-"));
+}
+
+// Plant a directory where a ledger file belongs: every append to
+// that path throws EISDIR, the dead-ledger shape.
+function plantDir(root: string, name: string) {
+  mkdirSync(join(root, ".sam"), { recursive: true });
+  mkdirSync(join(root, ".sam", name));
+}
+
+test("usage-failed: a dead usage ledger ledgers one line per failed write and still returns null", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "usage.jsonl"); // every append throws
+    assert.equal(recordUsage(root, ENTRY), null, "accounting never breaks the caller");
+    assert.equal(recordUsage(root, ENTRY), null, "a persistent failure recurs per write - that recurrence is the countable signal");
+    const lines = readActivity(root, 100, { kind: "usage-failed" });
+    assert.equal(lines.length, 2, "exactly one line per failed write");
+    assert.equal(lines[0].actor, "dip");
+    assert.ok(lines[0].summary.startsWith("Usage record failed for model MiniMax-M2.5: "), lines[0].summary);
+    assert.ok(!lines[0].summary.includes("987654"), "the entry's token counts never enter the line");
+    assert.throws(() => usageSummary(root), /EISDIR/,
+      "nothing was recorded, and the dead read no longer folds to a false zero to say so - it fails closed (19:04)");
+    const after = readActivity(root, 100, { kind: "usage-failed" });
+    assert.equal(after.length, 3, "the summary's failed read adds exactly one read line to the two write lines");
+    assert.ok(after[2].summary.startsWith("Usage ledger read failed: "), after[2].summary);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("usage-failed: a dead usage read fails closed with one ledger-read line, never a folded zero", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "usage.jsonl"); // every read throws EISDIR
+    assert.throws(() => readUsage(root), /EISDIR/,
+      "a spend record folded to [] would report zero spend for all time as truth");
+    const lines = readActivity(root, 100, { kind: "usage-failed" });
+    assert.equal(lines.length, 1, "exactly one line for the failed read");
+    assert.equal(lines[0].actor, "sam", "the reader is the system, not a profile");
+    assert.ok(lines[0].summary.startsWith("Usage ledger read failed: "), lines[0].summary);
+    assert.throws(() => usageToday(root), /EISDIR/, "the today fold surfaces the same failure instead of a false zero");
+    assert.equal(readActivity(root, 100, { kind: "usage-failed" }).length, 2, "one line per failed touch - the recurrence is the countable signal");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const ok = scratch();
+  try {
+    assert.deepEqual(readUsage(ok), [], "an absent ledger still reads empty - a fresh install has genuinely spent nothing");
+    recordUsage(ok, ENTRY);
+    assert.equal(readUsage(ok).length, 1, "the healthy read returns its record");
+    assert.equal(readActivity(ok, 100, { kind: "usage-failed" }).length, 0, "no failure line on the healthy or absent read path");
+  } finally { rmSync(ok, { recursive: true, force: true }); }
+});
+
+test("usage-failed: a healthy write records and ledgers nothing; malformed usage stays silent by design", () => {
+  const root = scratch();
+  try {
+    const line = recordUsage(root, ENTRY);
+    assert.ok(line && line.totalTokens === 987659);
+    assert.equal(recordUsage(root, { ...ENTRY, promptTokens: -1 }), null, "a malformed report records nothing");
+    assert.equal(readActivity(root, 100, { kind: "usage-failed" }).length, 0, "no failure line for a healthy write or a validation refusal");
+    assert.equal(usageSummary(root).calls, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("session-caps-failed: a dead caps ledger never throws out of a turn record, and ledgers one line", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "session-caps.jsonl");
+    assert.doesNotThrow(() => recordSessionTurn(root, { chatId: "abcd1234-0000-4000-8000-000000000000", route: "chat", tokens: 987654 }),
+      "a completed turn must survive its own accounting");
+    const lines = readActivity(root, 100, { kind: "session-caps-failed" });
+    assert.equal(lines.length, 1, "exactly one line for the failed write");
+    assert.ok(lines[0].summary.startsWith("Session caps turn record failed for chat abcd1234: "), lines[0].summary);
+    assert.ok(!lines[0].summary.includes("987654"), "the turn's token count never enters the line");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("session-caps-failed: a failed cap trip returns not-noted and never throws; a healthy trip records once", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "session-caps.jsonl");
+    let noted: boolean | undefined;
+    assert.doesNotThrow(() => { noted = noteCapTrip(root, "abcd1234-0000-4000-8000-000000000000", "chat", "turns"); },
+      "the graceful cap reply must survive its own trip record");
+    assert.equal(noted, false, "an unrecorded trip reads as not-noted, so no session-cap line rides it");
+    const lines = readActivity(root, 100, { kind: "session-caps-failed" });
+    assert.equal(lines.length, 1, "exactly one line: the read seam ledgers its own failure and the trip's catch does not count it twice");
+    assert.ok(lines[0].summary.startsWith("Session caps ledger read failed for chat abcd1234: "), lines[0].summary);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const ok = scratch();
+  try {
+    recordSessionTurn(ok, { chatId: "abcd1234-0000-4000-8000-000000000000", route: "chat", tokens: 7 });
+    assert.equal(noteCapTrip(ok, "abcd1234-0000-4000-8000-000000000000", "chat", "turns"), true, "the first trip of the day records");
+    assert.equal(noteCapTrip(ok, "abcd1234-0000-4000-8000-000000000000", "chat", "turns"), false, "the second trip of the day is already noted");
+    assert.equal(readActivity(ok, 100, { kind: "session-caps-failed" }).length, 0, "no failure line on the healthy path");
+    assert.equal(sessionUsageToday(ok)[0].turns, 1, "the healthy turn record landed");
+  } finally { rmSync(ok, { recursive: true, force: true }); }
+});
+
+test("session-caps-failed: a dead caps read fails the gate closed with one ledger-read line, never a folded zero", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "session-caps.jsonl"); // every read throws EISDIR
+    assert.throws(() => sessionCapStatus(root, "abcd1234-0000-4000-8000-000000000000"), /EISDIR/,
+      "the gate fails closed: a dead ledger must never read as no turns spent");
+    const lines = readActivity(root, 100, { kind: "session-caps-failed" });
+    assert.equal(lines.length, 1, "exactly one line for the failed read");
+    assert.ok(lines[0].summary.startsWith("Session caps ledger read failed for chat abcd1234: "), lines[0].summary);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("session-caps-failed: the all-chats usage read ledgers one line with no chat named, then rethrows", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "session-caps.jsonl");
+    assert.throws(() => sessionUsageToday(root), /EISDIR/,
+      "a status folded from an unreadable ledger would report zero usage as truth");
+    const lines = readActivity(root, 100, { kind: "session-caps-failed" });
+    assert.equal(lines.length, 1, "exactly one line for the failed read");
+    assert.ok(lines[0].summary.startsWith("Session caps ledger read failed: "), lines[0].summary);
+    assert.ok(!lines[0].summary.includes("for chat"), "no single chat is named for an all-chats read");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const ok = scratch();
+  try {
+    recordSessionTurn(ok, { chatId: "abcd1234-0000-4000-8000-000000000000", route: "chat", tokens: 7 });
+    assert.equal(sessionCapStatus(ok, "abcd1234-0000-4000-8000-000000000000").turnsUsed, 1, "the healthy gate reads its ledger");
+    assert.equal(readActivity(ok, 100, { kind: "session-caps-failed" }).length, 0, "no failure line on the healthy read path");
+  } finally { rmSync(ok, { recursive: true, force: true }); }
+});
+
+test("accounting failure summaries collapse and cap the verbatim reason", () => {
+  const usage = usageFailureSummary("mock", "EISDIR: illegal operation\n  on a directory");
+  assert.ok(!usage.includes("\n"), "the reason is one line");
+  const usageRead = usageReadFailureSummary("EISDIR: illegal operation\n  on a directory");
+  assert.ok(usageRead.startsWith("Usage ledger read failed: ") && !usageRead.includes("\n") && usageRead.length <= 200,
+    "the read summary names the seam, collapses, and caps");
+  const caps = sessionCapsFailureSummary("turn record", "abcd1234-0000-4000-8000-000000000000", "x".repeat(500));
+  assert.ok(caps.length <= 200, "the summary is capped at 200");
+});
+
+test("accounting failure kinds classify to their own defect classes and rank", () => {
+  const line = (kind: string) => ({ at: "2026-11-13T17:00:00.000Z", actor: "sam", kind, summary: "boom" });
+  assert.deepEqual(classifyDefect(line("usage-failed")), { key: "usage-failed", label: "usage accounting failures" });
+  assert.deepEqual(classifyDefect(line("session-caps-failed")), { key: "session-caps-failed", label: "session-cap ledger failures" });
+  const root = scratch();
+  try {
+    recordActivity(root, "dip", "usage-failed", "Usage record failed for model MiniMax-M2.5: EISDIR");
+    recordActivity(root, "sam", "session-caps-failed", "Session caps turn record failed for chat abcd1234: EISDIR");
+    const ranked = rankDefects(root);
+    assert.equal(ranked.find(r => r.key === "usage-failed")?.count, 1);
+    assert.equal(ranked.find(r => r.key === "session-caps-failed")?.count, 1);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

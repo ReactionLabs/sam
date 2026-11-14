@@ -360,16 +360,60 @@ function saveState(root:string,state:HeartbeatState){
   writeAll();
  }finally{db.close();}
 }
-export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
- if(!existsSync(logPath(root)))return [];
- return readFileSync(logPath(root),"utf8").split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
+export function heartbeatLogFailureSummary(phase:string,entryType:string,name:string|null,reason:string):string{
+ const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+ if(phase==="read")return ("Heartbeat log read failed for ledger: "+clean).slice(0,300);
+ return ("Heartbeat log append failed for "+entryType+(name?" job '"+name+"'":"")+": "+clean).slice(0,300);
 }
-function appendLog(root:string,entry:Record<string,unknown>){mkdirSync(join(resolve(root),".sam"),{recursive:true});appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");}
-export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[]}{
+export function recordHeartbeatLogFailure(root:string,phase:string,entryType:string,name:string|null,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,"sam","heartbeat-log-failed",heartbeatLogFailureSummary(phase,entryType,name,reason));
+}
+export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
+ // Read seam (gap found 2026-11-13, hourly run 21:04): this log is
+ // folded as truth by status and the daily brief (failed-job counts,
+ // last-tick state), so a dead read fails closed - one
+ // heartbeat-log-failed line, then the rethrow - instead of folding
+ // to [] and reporting no failed jobs and no ticks ever. An absent
+ // log still reads [] and torn-line parsing stays forgiving.
+ let raw:string;
+ try{
+  if(!existsSync(logPath(root)))return [];
+  raw=readFileSync(logPath(root),"utf8");
+ }catch(e){recordHeartbeatLogFailure(root,"read","ledger",null,e);throw e;}
+ return raw.split("\n").filter(Boolean).slice(-limit).map(line=>{try{return JSON.parse(line) as Record<string,unknown>;}catch{return {raw:line};}});
+}
+function appendLog(root:string,entry:Record<string,unknown>):boolean{
+ // Append seam (same gap): the heartbeat log must never break the
+ // work it records - above all the tick guard, whose tick-failed
+ // line rides this append BEFORE its activity line. A dead append
+ // ledgers ONE heartbeat-log-failed activity line (the entry's type
+ // and job name only, never any other payload - job lines carry
+ // reply previews) and returns whether the line landed.
+ try{
+  mkdirSync(join(resolve(root),".sam"),{recursive:true});
+  appendFileSync(logPath(root),JSON.stringify({at:new Date().toISOString(),...entry})+"\n");
+  return true;
+ }catch(e){
+  const name=typeof entry.name==="string"?entry.name:null;
+  recordHeartbeatLogFailure(root,"append",typeof entry.type==="string"?entry.type:"entry",name,e);
+  return false;
+ }
+}
+export function consolidatePreferences(root:string):{scanned:number;noted:number;promoted:string[];episodes:string[];corrections:number;visitorSkipped:number;curator:string[];correctionFailures:number;curatorFailed:boolean}{
  const state=loadState(root);
  const config=readDashboardConfig(root);
  const db=new ChatStore(root);const prefs=new PreferenceStore(root);
  let scanned=0,noted=0,corrections=0,visitorSkipped=0;
+ // Sub-step failure tallies (gap found 2026-11-13, hourly run
+ // 10:04): the correction routing and curator catches below
+ // used to swallow their throws outright, so a failing
+ // sub-step read exactly like a healthy one in every record.
+ // The failures are counted here and ledgered ONCE per run
+ // through recordConsolidationFailure after the scan - the
+ // guards still never break the tick.
+ let correctionFailures=0;let correctionFailureError:unknown=null;
+ let curatorFailed=false;let curatorFailureError:unknown=null;
  // Episodic evidence (P4): every new message, both roles, grouped by
  // profile and by the message's own date, on the same watermark scan.
  const evidence=new Map<string,Map<string,Map<string,EpisodeChat>>>();
@@ -398,7 +442,7 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     // corrections to the same P1 gate (deduped against the turn path) and
     // never lets a corrected rule slip in here as instant law.
     let correction=null as ReturnType<typeof detectCorrection>;
-    try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch{/* the gate never breaks a tick */}
+    try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch(e){/* the gate never breaks a tick - but its failure is counted and ledgered once per run below, never silent: this scan is the last capture path and the watermark advances past the message either way */correctionFailures++;if(correctionFailureError===null)correctionFailureError=e;}
     for(const found of withoutCorrectedRules(extractPreferences(msg.content),correction)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
@@ -418,31 +462,141 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
   // patch each, and ledgers only when the finding set changes. A
   // curator failure never breaks a tick.
   let curator:string[]=[];
-  try{curator=runSkillCurator(root).findings.map(f=>f.kind+":"+f.skills.join("+"));}catch{/* the curator never breaks a tick */}
+  try{curator=runSkillCurator(root).findings.map(f=>f.kind+":"+f.skills.join("+"));}catch(e){/* the curator never breaks a tick - but its failure is ledgered once below, never silent: a dead curator otherwise reads curator:[] forever */curatorFailed=true;curatorFailureError=e;}
+  // One ledger line per failed sub-step per run (the seam in
+  // recordConsolidationFailure): the tick guard around this
+  // whole stage can only see a throw that escapes, and these
+  // two catches are inside it by design.
+  if(correctionFailures>0)recordConsolidationFailure(root,"corrections",correctionFailures,correctionFailureError);
+  if(curatorFailed)recordConsolidationFailure(root,"curator",1,curatorFailureError);
   state.lastTick=new Date().toISOString();saveState(root,state);
-  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped,curator});
-  return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator};
+  appendLog(root,{type:"consolidate",scanned,noted,promoted,episodes,corrections,visitorSkipped,curator,correctionFailures,curatorFailed});
+  return {scanned,noted,promoted,episodes,corrections,visitorSkipped,curator,correctionFailures,curatorFailed};
  }finally{db.close();prefs.close();}
 }
-export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
+export interface HeartbeatDeps { runTurn:(chatId:string,content:string)=>Promise<string>; runBackgroundTurn?:(chatId:string,content:string)=>Promise<string>; ensureChat:(title:string,profile:string)=>Promise<string>; deliver?:(channelId:string,text:string)=>Promise<void>; runScript?:(name:string)=>Promise<{stdout:string;code:number;stderr?:string}>; reviewCoding?:(task:CodingTask)=>Promise<GoldfishRecord>; reviewEngine?:(task:EngineTask)=>Promise<GoldfishRecord> }
+// Script-failure reason (gap found 2026-11-13): a script job that
+// exits non-zero used to record ONLY its exit code - the journal,
+// heartbeats.jsonl, and the activity ledger all said "script
+// exited 1" while the script's actual diagnostic sat on stderr,
+// which defaultRunScript discarded. Every sibling failure path
+// in the tick (a thrown script run, a thrown agent turn) records
+// a reason; this is the non-zero path's. The reason is the
+// stderr tail's last non-empty line, whitespace-collapsed and
+// capped - a CLI report's error line, not its whole output -
+// and an empty stderr reads "no error output" so the record
+// says plainly there was nothing more to know.
+export function scriptFailureReason(stderr:string|undefined):string{
+ const lines=String(stderr??"").split(/\r?\n/).map(l=>l.replace(/\s+/g," ").trim()).filter(l=>l.length>0);
+ if(!lines.length)return "no error output";
+ const last=lines[lines.length-1];
+ return last.length>300?last.slice(0,297)+"...":last;
+}
 // Default no-agent script runner: execFile on the allowlist argv -
 // no shell, a 60s timeout, a bounded buffer. A non-zero exit is a
 // result the caller logs, not a throw; an unknown script name or a
 // spawn failure throws (the allowlist check happens at job creation
 // too, so this is a belt-and-braces refusal).
-export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:string;code:number}>{
+export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:string;code:number;stderr:string}>{
  return (name:string)=>new Promise((resolvePromise,reject)=>{
   let argv:string[];
   try{argv=scriptArgv(root,name);}catch(e){reject(e as Error);return;}
-  execFile(argv[0],argv.slice(1),{timeout:60000,maxBuffer:256*1024,windowsHide:true},(err,stdout)=>{
+  execFile(argv[0],argv.slice(1),{timeout:60000,maxBuffer:256*1024,windowsHide:true},(err,stdout,stderr)=>{
    const code=(err as (NodeJS.ErrnoException&{code?:number|string})|null)?.code;
    if(err&&typeof code!=="number"){reject(err);return;}
-   resolvePromise({stdout:String(stdout??""),code:typeof code==="number"?code:0});
+   resolvePromise({stdout:String(stdout??""),code:typeof code==="number"?code:0,stderr:String(stderr??"")});
   });
  });
 }
-export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
- const consolidation=consolidatePreferences(root);
+// Tick-stage isolation (gap found 2026-11-13): the per-job isolation
+// keeps one job's failure from wedging a tick, but the tick's own
+// stages ran bare - a throw out of consolidation (which runs FIRST)
+// or out of any drain leg propagated out of runHeartbeat, killed
+// every later stage, and left no trace in SAM's own ledgers (only
+// the caller's stderr), so a persistent stage failure silently
+// stopped the whole heartbeat on every tick. Each stage now runs
+// through this guard: a throw writes ONE tick-failed line to
+// heartbeats.jsonl and ONE tick-failed activity line (stage +
+// verbatim reason, capped; never message content), the stage's
+// empty result stands in, and the tick continues.
+// Follow-on (gap found 2026-11-13, 04:04 run): the guard's first
+// pass covered consolidate and the four drains, but the tick's
+// other two sections still ran bare - the delivery-recovery leg
+// (a throw in the pending read or in a mark append killed the
+// tick before any job ran) and the jobs section's own
+// infrastructure (the registry load, the state load, the outbox
+// queue / worthiness / mark calls around a changed reply, and
+// the closing row / state saves - a throw there also lost the
+// ran jobs' lastRun advances, so those jobs refired and
+// re-delivered next tick). Both sections now run as guarded
+// stages too ("deliveries" and "jobs"); the jobs stage fills a
+// shared result object incrementally, so progress made before a
+// throw stays reported instead of being discarded.
+// Delivery failures ledger in the activity record (gap found
+// 2026-11-13, hourly run 06:04): a failed channel delivery used
+// to exist only in the outbox's own event fold - the fresh-send
+// path wrote a reason-less heartbeats line, the recovery leg
+// wrote nothing outside the outbox, and the terminal settle at
+// the attempt cap was announced nowhere - while a delivery
+// SUPPRESSED by the worthiness gate (a deliberate hold) did
+// write an activity line. Both send paths now write ONE
+// delivery-failed activity line per failed attempt through this
+// seam (actor = the delivery's profile, the verbatim reason
+// capped, the attempt count, the terminal settle named; never
+// the delivery text), so the owner console, the brief, and
+// self-work's defect queue can count the class.
+export function deliveryFailureSummary(jobName:string,reason:string,attempts:number,settled:boolean):string{
+ const base="Delivery for heartbeat '"+jobName+"' failed (attempt "+attempts+" of 5): "+reason.replace(/\s+/g," ").trim();
+ return (settled?base+" - gave up after 5 attempts; the update will not be retried":base).slice(0,200);
+}
+export function recordDeliveryFailure(root:string,profile:string,jobName:string,error:unknown,failure:{attempts:number;settled:boolean}):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,profile,"delivery-failed",deliveryFailureSummary(jobName,reason,failure.attempts,failure.settled));
+}
+// Consolidation sub-step failures ledger in the activity
+// record (gap found 2026-11-13, hourly run 10:04): inside
+// consolidatePreferences, two sub-steps swallowed their throws
+// entirely - the scan's correction routing ("the gate never
+// breaks a tick") and the skill curator pass ("the curator
+// never breaks a tick") - so the tick-stage guard around the
+// whole consolidation stage never saw them, and the
+// consolidate line read corrections:0 / curator:[] exactly as
+// a healthy run's does. The correction step is the LAST
+// capture path for an owner's correction (the live turn
+// path's identical swallow is backstopped by this scan,
+// deduped through the gate), and the scan's watermark
+// advances past a failed message in the same run, so a
+// correction whose routing threw was lost for good, not
+// delayed; a curator whose store throws on open read as a
+// clean library on every tick while curation was dead. Each
+// failed sub-step now writes ONE consolidate-failed activity
+// line per consolidation run through this seam: the
+// corrections step aggregates the run's failures (a count
+// plus the first verbatim reason, capped; never a message's
+// content), the curator step names its reason, and self-work
+// classifyDefect keys the class by step. The guards do not
+// move: a failing sub-step still never breaks the tick.
+export function consolidationFailureSummary(step:string,count:number,reason:string):string{
+ const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
+ if(step==="curator")return ("Consolidation skill curator failed: "+clean).slice(0,200);
+ return ("Consolidation correction routing failed for "+count+(count===1?" message":" messages")+": "+clean).slice(0,200);
+}
+export function recordConsolidationFailure(root:string,step:string,count:number,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ recordActivity(root,"sam","consolidate-failed",consolidationFailureSummary(step,count,reason));
+}
+export function tickStageFailure(root:string,stage:string,error:unknown):void{
+ const reason=error instanceof Error?error.message:String(error);
+ appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
+ recordActivity(root,"sam","tick-failed",("Heartbeat tick stage '"+stage+"' failed: "+reason).slice(0,200));
+}
+async function guardTickStage<T>(root:string,stage:string,fallback:T,stageFailures:string[],run:()=>T|Promise<T>):Promise<T>{
+ try{return await run();}
+ catch(e){tickStageFailure(root,stage,e);stageFailures.push(stage);return fallback;}
+}
+export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{consolidation:ReturnType<typeof consolidatePreferences>;ran:string[];changed:string[];unchanged:string[];failed:string[];stageFailures:string[];deliveries:{delivered:string[];recovered:string[];pending:number};background:{ran:string[];failed:string[];recovered:string[]};coding:{ran:string[];blocked:string[];failed:string[];recovered:string[]};engine:{ran:string[];blocked:string[];failed:string[];recovered:string[]};loops:LoopRevisitResult}>{
+ const stageFailures:string[]=[];
+ const consolidation=await guardTickStage(root,"consolidate",{scanned:0,noted:0,promoted:[],episodes:[],corrections:0,visitorSkipped:0,curator:[],correctionFailures:0,curatorFailed:false},stageFailures,()=>consolidatePreferences(root));
  const tickStart=new Date();
  const deliveryResult:{delivered:string[];recovered:string[];pending:number}={delivered:[],recovered:[],pending:0};
  // Durable delivery outbox (Phase C item 1): deliveries a previous
@@ -452,18 +606,24 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  // at-least-once leg of the ledger. Without a deliver door the
  // pending records simply stay pending, untouched.
  if(deps.deliver){
+  const deliverPending=deps.deliver;
+  await guardTickStage(root,"deliveries",undefined,stageFailures,async()=>{
   for(const pending of pendingDeliveries(root)){
    const recovered=pending.attempts>0||Date.parse(pending.queuedAt)<tickStart.getTime();
    try{
-    await deps.deliver(pending.channelId,pending.text);
+    await deliverPending(pending.channelId,pending.text);
     markDelivered(root,pending.id,recovered);
     deliveryResult.delivered.push(pending.jobName);
     if(recovered)deliveryResult.recovered.push(pending.jobName);
     appendLog(root,{type:"delivery-recovered",name:pending.jobName,profile:pending.profile,recovered});
-   }catch(e){markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));}
+   }catch(e){const failure=markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:pending.jobName,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,pending.profile,pending.jobName,e,failure);}
   }
+  });
  }
- const jobs=heartbeatJobs(root);const now=new Date();const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];const failed:string[]=[];
+ const ran:string[]=[];const changed:string[]=[];const unchanged:string[]=[];const failed:string[]=[];
+ const jobsResult={ran,changed,unchanged,failed};
+ const runJobsStage=async()=>{
+ const jobs=heartbeatJobs(root);const now=new Date();
  // Loaded after consolidation, which saves this same state file for its
  // watermarks; the outputs map below is this tick's addition to it.
  const state=loadState(root);
@@ -491,7 +651,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   let reply:string;
   if(isScript){
    const runScript=deps.runScript??defaultRunScript(root);
-   let outcome:{stdout:string;code:number};
+   let outcome:{stdout:string;code:number;stderr?:string};
    try{outcome=await runScript(job.script??"");}
    catch(e){
     job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
@@ -503,8 +663,9 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);
    if(outcome.code!==0){
     failed.push(job.name);
-    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code});
-    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script exited "+outcome.code);
+    const reason=scriptFailureReason(outcome.stderr);
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,code:outcome.code,reason});
+    recordActivity(root,job.profile,"heartbeat-failed",("Heartbeat '"+job.name+"' script exited "+outcome.code+": "+reason).slice(0,200));
     retireIfOnce(job);
     continue;
    }
@@ -570,7 +731,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
    }else if(deps.deliver){
     try{await deps.deliver(job.channelId,queued.text);markDelivered(root,queued.id,false);deliveryResult.delivered.push(job.name);}
-    catch(e){markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name});}
+    catch(e){const failure=markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,job.profile,job.name,e,failure);}
    }
   }
   retireIfOnce(job);
@@ -579,42 +740,58 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
  for(const id of retired)deleteJobRow(root,id);
  if(stateDirty)saveState(root,state);
  deliveryResult.pending=pendingDeliveries(root).length;
+ return jobsResult;
+ };
+ await guardTickStage(root,"jobs",jobsResult,stageFailures,runJobsStage);
  // Legs (P5): every tick also drains the background queue, so a task a chat
  // handed off runs within one tick on the deep background budget tier and
  // posts its result back into its chat. Drained after due jobs so a poll's
  // cheap tier never competes with the deep work.
- const background=await drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn});
+ const background=await guardTickStage(root,"background",{ran:[],failed:[],recovered:[]},stageFailures,()=>drainBackgroundTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn}));
  if(background.ran.length||background.failed.length||background.recovered.length)appendLog(root,{type:"background",ran:background.ran.length,failed:background.failed.length,recovered:background.recovered.length});
  // Coder C3: the same tick drains the coding loop, after background
  // work, on the same deep tier - a queued coding task plans, edits,
  // verifies, and iterates without the owner watching it happen.
- const coding=await drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn,review:deps.reviewCoding});
+ const coding=await guardTickStage(root,"coding",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainCodingTasks(root,{runTurn:deps.runBackgroundTurn??deps.runTurn,review:deps.reviewCoding}));
  if(coding.ran.length||coding.blocked.length||coding.failed.length||coding.recovered.length)appendLog(root,{type:"coding",ran:coding.ran.length,blocked:coding.blocked.length,failed:coding.failed.length,recovered:coding.recovered.length});
  // Coder C6: the same tick drains the managed engine queue, after
  // the coding loop - one owner-approved engine run per tick inside
  // its branch sandbox, with SAM verifying and reviewing its work.
- const engine=await drainEngineTasks(root,{review:deps.reviewEngine});
+ const engine=await guardTickStage(root,"engine",{ran:[],blocked:[],failed:[],recovered:[]},stageFailures,()=>drainEngineTasks(root,{review:deps.reviewEngine}));
  if(engine.ran.length||engine.blocked.length||engine.failed.length||engine.recovered.length)appendLog(root,{type:"engine",ran:engine.ran.length,blocked:engine.blocked.length,failed:engine.failed.length,recovered:engine.recovered.length});
  // SECOND ANSWERS: the same tick revisits due open loops, last -
  // a loop's re-check is a cheap-tier turn in its own check chat,
  // and only a proven change crosses into the owner's conversation
  // (plus its channel, through the outbox and the S5 gate, inside
  // the revisit engine itself).
- const loops=await revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver});
+ const loops=await guardTickStage(root,"loops",{checked:[],changed:[],resolved:[],failed:[],held:[]},stageFailures,()=>revisitDueLoops(root,{runTurn:deps.runTurn,deliver:deps.deliver}));
  if(loops.checked.length)appendLog(root,{type:"loops",checked:loops.checked.length,changed:loops.changed.length,resolved:loops.resolved.length,failed:loops.failed.length,held:loops.held.length});
- return {consolidation,ran,changed,unchanged,failed,deliveries:deliveryResult,background,coding,engine,loops};
+ return {consolidation,ran,changed,unchanged,failed,stageFailures,deliveries:deliveryResult,background,coding,engine,loops};
 }
 // Default delivery: Telegram channels send to their known owner chats, Discord
-// channels post via webhook. Anything else is a no-op for this tick.
+// channels post via webhook. Delivered must mean at least one real send was
+// handed to the channel's transport (gap found 2026-11-13): this door used to
+// no-op silently for a missing or disabled channel, for a telegram channel
+// with zero bridged chats, and for a webhook channel (an inbound trigger
+// door with no outbound handler), and every caller then marked the outbox
+// record DELIVERED - a false success record the brief's stuck-deliveries
+// item trusts. Each undeliverable shape now throws a named refusal, so the
+// failure rides the delivery-failed seam (ledgered with the reason, the
+// record stays pending, retries settle it failed at the attempt cap).
 export async function deliverToChannel(root:string,channelId:string,text:string,sendTelegram:(chatId:number,text:string)=>Promise<void>,postDiscordFn:(channel:ReturnType<typeof channels>[number],text:string)=>Promise<number>):Promise<void>{
- const channel=channels(root).find(c=>c.id===channelId&&c.enabled);
- if(!channel)return;
+ const channel=channels(root).find(c=>c.id===channelId);
+ if(!channel)throw Error("Delivery channel not found: "+channelId);
+ if(!channel.enabled)throw Error("Delivery channel disabled: "+channel.name);
  if(channel.kind==="discord"){await postDiscordFn(channel,text);return;}
  if(channel.kind==="telegram"){
   const state=loadBridgeState(root);
+  const keys=Object.keys(state.chats);
+  if(keys.length===0)throw Error("Telegram channel '"+channel.name+"' has no bridged chats to deliver to");
   // Chat keys are telegram chat ids, optionally suffixed ":<profile>"
   // when a binding routed that chat to another profile (Phase C item 3);
   // the numeric id is always the part before the suffix.
-  for(const key of Object.keys(state.chats))await sendTelegram(Number(key.split(":")[0]),text);
+  for(const key of keys)await sendTelegram(Number(key.split(":")[0]),text);
+  return;
  }
+ throw Error("Channel '"+channel.name+"' ("+channel.kind+") cannot deliver messages");
 }

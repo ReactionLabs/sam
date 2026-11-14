@@ -2,12 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile, execFileSync } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import { channels } from "./channels.js";
 import { connectors } from "./connectors.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { readFileProviders } from "./providers.js";
 import { recordChange, recordVerification } from "./verification.js";
+import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
 
 /**
  * Coder hands (Phase D item 2, Dip's coder program 2026-11-09: C1 write
@@ -16,7 +19,7 @@ import { recordChange, recordVerification } from "./verification.js";
  *
  * C1: write/edit tools scoped to ONE designated code root. The root is
  * set only by the operator via the CLI (`code set-root`) and stored in
- * .sam/code.json; the model can use the hands but can never move the
+ * .sam/code.db; the model can use the hands but can never move the
  * root. The root is never the SAM home, never inside it, and never an
  * ancestor of it, so a code write cannot reach SAM's own state (.sam),
  * its keys, or its install. Inside the root the read tools' refusals
@@ -67,28 +70,92 @@ const sha = (s: string | Buffer) => createHash("sha256").update(s).digest("hex")
 
 interface CodeConfig { version: 1; root: string | null }
 
-function configPath(root: string): string {
+function configPath(root: string): string { return join(resolve(root), ".sam", "code.json"); }
+function configDbPath(root: string): string { return join(resolve(root), ".sam", "code.db"); }
+
+// State convergence (UNIFICATION item 4, thirty-second store):
+// the designated code root is SQLite (.sam/code.db, the
+// dashboard-config / setup singleton pattern), ONE row holding
+// the config's full JSON so the singleton keeps its exact shape.
+// The old code.json was rewritten whole (temp + rename) by every
+// setCodeRoot / clearCodeRoot, while codeRoot readers run in
+// every process that touches the coder hands (every sam_code
+// call, the coding loop, the C6 engine validation, the status
+// builds) - two writers holding the same snapshot could lose
+// the second one's change, and the designation IS the C1 fence:
+// the one record that decides which tree SAM may write in at
+// all. Its read path also created the .sam directory on every
+// call, so even a pure read was a write. Here a save is a
+// single-row UPSERT and connections carry a busy_timeout. First
+// open imports a legacy code.json (validated through the old
+// read shape: a plain object whose root is a string or null)
+// and renames it code.json.migrated - imported, never deleted;
+// a malformed file or a payload failing that shape imports
+// nothing and is left in place (the migrated shape reads it as
+// unset, exactly the old forgiving contract). A pure read on an
+// install with neither file creates nothing, not even the .sam
+// directory. The old configPath's .sam symlink refusal moves
+// into the store open, so it binds writes and migrated reads
+// exactly as before. The P9 backup snapshots every .sam/*.db
+// generically, so the migrated store is carried with no backup
+// change.
+function parseCodeConfig(data: unknown): CodeConfig | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const value = data as Partial<CodeConfig>;
+  if (typeof value.root !== "string" && value.root !== null) return null;
+  return { version: 1, root: value.root };
+}
+
+function openCodeStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
-  return join(dir, "code.json");
+  const db = openDatabase(configDbPath(root));
+  db.exec("CREATE TABLE IF NOT EXISTS code_config (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL)");
+  migrateLegacyConfig(db, root);
+  return db;
+}
+
+function migrateLegacyConfig(db: Database.Database, root: string): void {
+  const row = db.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
+  if (row) return;
+  const file = configPath(root);
+  if (!existsSync(file)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(file, "utf8")); } catch { return; }
+  const record = parseCodeConfig(data);
+  if (!record) return;
+  db.prepare("INSERT OR IGNORE INTO code_config (id, data) VALUES (1, ?)").run(JSON.stringify(record));
+  renameSync(file, file + ".migrated");
+}
+
+function codeStoreExists(root: string): boolean {
+  return existsSync(configDbPath(root)) || existsSync(configPath(root));
+}
+
+/** The store's read door: the recorded designation through the
+ *  store's own shape, or null when none has ever been recorded -
+ *  and a read on an install with no store at all creates
+ *  nothing. */
+export function readCodeStore(root: string): CodeConfig | null {
+  if (!codeStoreExists(root)) return null;
+  const db = openCodeStore(root);
+  try {
+    const row = db.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
+    if (!row) return null;
+    try { return parseCodeConfig(JSON.parse(row.data)); } catch { return null; }
+  } finally { db.close(); }
 }
 
 function readConfig(root: string): CodeConfig {
-  const path = configPath(root);
-  if (!existsSync(path)) return { version: 1, root: null };
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as CodeConfig;
-    if (parsed && typeof parsed === "object" && (typeof parsed.root === "string" || parsed.root === null)) return { version: 1, root: parsed.root };
-  } catch { /* corrupt state reads as unset, never fatal */ }
-  return { version: 1, root: null };
+  return readCodeStore(root) ?? { version: 1, root: null };
 }
 
 function writeConfig(root: string, cfg: CodeConfig): void {
-  const path = configPath(root);
-  const temp = path + ".tmp";
-  writeFileSync(temp, JSON.stringify(cfg, null, 2), { mode: 0o600 });
-  renameSync(temp, path);
+  const db = openCodeStore(root);
+  try {
+    db.prepare("INSERT INTO code_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(cfg));
+  } finally { db.close(); }
 }
 
 /** The designated code root (absolute, realpath'd), or null when the
@@ -196,11 +263,60 @@ export interface CodeWriteRecord {
 
 function writesPath(root: string): string { return join(resolve(root), ".sam", "code-writes.jsonl"); }
 
+// The writes ledger follows the house contract, with the
+// split the work's shape demands (gap found 2026-11-13).
+// The APPEND is verification-shaped: the file is already on
+// disk in the code root when persistCodeWrite runs, so a
+// failed append never throws and never blocks the remaining
+// records (goldfish artifact, activity line, verify-on-stop
+// entry still land, binding the change exactly as a recorded
+// write binds it) - it ledgers one code-write-failed line
+// and reports whether the record landed, instead of the old
+// shape where a dead ledger threw the already-landed write's
+// whole record set away and the caller reported failure for
+// work that was real. The READ is goldfish-shaped
+// (fail-closed): one line, then the rethrow exactly, because
+// counts and close summaries folded from an unreadable
+// writes ledger would understate the hands' work - the
+// coding loop counts a task's new writes by slicing this
+// ledger, so a folded-empty read would close it "no changes"
+// over work it actually wrote.
+export function codeWriteFailureSummary(phase: "read" | "append", eventLabel: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Code write " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
+}
+
+export function recordCodeWriteFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "code-write-failed", codeWriteFailureSummary(phase, eventLabel, reason));
+}
+
+function writeLabel(record: CodeWriteRecord): string {
+  return "write " + record.path + " (" + (record.created ? "created" : "edited") + ", +" + record.addedLines + "/-" + record.removedLines + " lines)";
+}
+
+function appendCodeWrite(root: string, record: CodeWriteRecord): boolean {
+  try {
+    appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
+    return true;
+  } catch (error) {
+    recordCodeWriteFailure(root, "append", writeLabel(record), error);
+    return false;
+  }
+}
+
 export function codeWrites(root: string, limit = 20): CodeWriteRecord[] {
   const file = writesPath(root);
-  if (!existsSync(file)) return [];
+  let raw: string;
+  try {
+    if (!existsSync(file)) return [];
+    raw = readFileSync(file, "utf8");
+  } catch (error) {
+    recordCodeWriteFailure(root, "read", "ledger", error);
+    throw error;
+  }
   const records: CodeWriteRecord[] = [];
-  for (const line of readFileSync(file, "utf8").split("\n")) {
+  for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try { const parsed = JSON.parse(line) as CodeWriteRecord; if (parsed && typeof parsed.path === "string") records.push(parsed); } catch { /* torn line ignored */ }
   }
@@ -264,10 +380,15 @@ function writeCodeFileInternal(root: string, actor: string, rel: string, content
  *  ledger line, the goldfish change artifact, the activity line, and
  *  the verify-on-stop change entry - the exact four records
  *  writeCodeFileInternal writes for its own writes. */
-function persistCodeWrite(root: string, record: CodeWriteRecord, before: string, after: string): void {
+function persistCodeWrite(root: string, record: CodeWriteRecord, before: string, after: string): boolean {
   const rel = record.path;
   mkdirSync(join(resolve(root), ".sam"), { recursive: true, mode: 0o700 });
-  appendFileSync(writesPath(root), JSON.stringify(record) + "\n");
+  // The writes-ledger append never breaks the write it records
+  // and never blocks the records below (see appendCodeWrite):
+  // the file is already on disk, so the artifact, the activity
+  // line, and the verify-on-stop entry land regardless. The
+  // return says whether the writes-ledger record itself landed.
+  const ledgered = appendCodeWrite(root, record);
   // Change artifact for the goldfish verifier (Phase D item 4, C5):
   // the before/after pair keyed by the after-hash, the file-edits
   // shape, so a fresh-context reviewer can reconstruct exactly what
@@ -287,6 +408,7 @@ function persistCodeWrite(root: string, record: CodeWriteRecord, before: string,
   // Verify-on-stop: the write enters the ledger as an unverified change;
   // only a fresh C2 build/test verdict can settle it.
   recordChange(root, { path: rel, replacementHash: record.afterHash, source: "code-write" });
+  return ledgered;
 }
 
 /** Record a change an EXTERNAL writer already made in the code root
@@ -411,6 +533,9 @@ export interface CodeRunResult {
   command: string; description: string; ok: boolean; exitCode: number | null;
   timedOut: boolean; output: string; truncated: boolean; durationMs: number; error?: string;
   url?: string; destination?: string;
+  /** The vault credential's NAME when one was injected into this
+   *  run's child env (git-clone only). The value never appears. */
+  vaultCredential?: string;
 }
 
 export async function runCodeCommand(root: string, actor: string, name: string, opts: { timeoutMs?: number; runner?: CodeRunner; url?: string; destination?: string } = {}): Promise<CodeRunResult> {
@@ -543,6 +668,27 @@ function gitCloneEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/** The clone child's environment, with the SAM VAULT injection
+ *  (Dip ruling 2026-11-12): when a vault credential's declared
+ *  hosts cover this URL's hostname, the child - and only the
+ *  child - gains GIT_ASKPASS (a static script holding no secret)
+ *  and the credential's value in one env var. The value never
+ *  enters argv, this result's other fields, or any ledger line;
+ *  credentialName is the NAME, which is all any surface may say. */
+export function cloneCredentialEnv(root: string, canonicalUrl: string): { env: NodeJS.ProcessEnv; credentialName: string | null } {
+  const env = gitCloneEnv();
+  let credentialName: string | null = null;
+  try {
+    const cred = vaultCredentialForUrl(root, canonicalUrl);
+    if (cred) {
+      env.GIT_ASKPASS = vaultAskpassPath(root);
+      env[VAULT_CREDENTIAL_ENV] = cred.value;
+      credentialName = cred.name;
+    }
+  } catch { /* a vault read failure never breaks a public clone */ }
+  return { env, credentialName };
+}
+
 /** Clone one URL into a directory inside the designated code root.
  *  The URL and the relative destination are written to the activity
  *  ledger. The argv is built here. There is no shell and no push. */
@@ -560,7 +706,8 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     throw e;
   }
   const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
-  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, gitCloneEnv()));
+  const injected = cloneCredentialEnv(root, canonical);
+  const runner = opts.runner ?? ((file, args, cwd, timeout) => execFileCapped(file, args, cwd, timeout, injected.env));
   const start = Date.now();
   let raw: { exitCode: number | null; output: string; timedOut?: boolean };
   try { raw = await runner(spec.file, spec.args, spec.cwd, timeoutMs); }
@@ -571,10 +718,20 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     ok: raw.exitCode === 0 && !raw.timedOut,
     exitCode: raw.exitCode, timedOut: !!raw.timedOut,
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
+    ...(injected.credentialName ? { vaultCredential: injected.credentialName } : {}),
     ...(raw.exitCode === null && !raw.output && !raw.timedOut ? { error: "git is not installed on this machine - git-clone cannot run until it is installed (installing it is the operator's act)" } : {}),
   };
   const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
-  recordActivity(root, actor, "git-clone", boundedLedger("Cloned " + canonical + " into " + destination + ": " + status, destination));
+  // The ledger verb follows the outcome: a failed clone is never
+  // ledgered as "Cloned" - the ledger is the surface the owner and
+  // the self-audit read, so its wording must not claim success.
+  recordActivity(root, actor, "git-clone", boundedLedger((result.ok ? "Cloned " : "Clone failed for ") + canonical + " into " + destination + ": " + status, destination));
+  if (injected.credentialName) {
+    let host = "";
+    try { host = new URL(canonical).hostname; } catch { /* the URL was canonicalized above */ }
+    recordActivity(root, actor, "vault-use", boundedLedger(
+      "Vault credential " + injected.credentialName + " injected for git-clone of " + host + ": " + status, destination));
+  }
   return result;
 }
 
@@ -886,6 +1043,7 @@ export async function installSandboxPackage(root: string, actor: string, name: s
     exitCode: raw.exitCode, timedOut: !!raw.timedOut,
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
   };
-  recordActivity(root, actor, "sandbox-pip", "Installed " + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
+  // Same honesty rule as git-clone: the verb follows the outcome.
+  recordActivity(root, actor, "sandbox-pip", (result.ok ? "Installed " : "Install failed for ") + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
   return result;
 }

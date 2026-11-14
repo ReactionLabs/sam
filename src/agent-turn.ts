@@ -2,9 +2,9 @@ import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider, stripModelMarkup } from "./openai-compatible.js";
 import { connectorChat } from "./connector-chat.js";
 import { ownToolsChat } from "./own-tools.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
-import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
+import { detectCorrection, tryRouteCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
@@ -17,8 +17,11 @@ import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
+import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { buildRecallBlock } from "./recall.js";
-import { withMessageProvenance } from "./message-provenance.js";
+import { assembleTurnMessages } from "./prompt-assembly.js";
+import { attachCitation, processReplyCitations } from "./chat-citations.js";
+import type { ChatSearchHit } from "./chat-manage.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -169,10 +172,14 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       let correctionNote="";
       const correction=detectCorrection(content);
       if(!resuming&&correction&&(opts?.route??"chat")==="chat"){
-        try{
-          const routed=proposeCorrection(root,{actor:profileName,chatId,text:content});
-          if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
-        }catch{/* correction plumbing never breaks a turn */}
+        // Correction plumbing never breaks a turn - and a failed
+        // routing is no longer silent either: tryRouteCorrection
+        // ledgers one correction-failed line on a throw and
+        // returns null, so the turn continues without the note
+        // exactly as the old bare catch did, but the lost
+        // in-turn application is countable (corrections.ts).
+        const routed=tryRouteCorrection(root,{actor:profileName,chatId,text:content});
+        if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
       }
       if(!resuming)for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
@@ -209,19 +216,25 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // replaced here by their summary; the newest exchanges stay
   // verbatim. Compaction never breaks a turn - on any error the raw
   // tail rides, exactly the pre-compaction behavior.
-  let contextSummary:string|null=null;let keptHistory:Array<{role:"user"|"assistant";content:string;source?:string}>=history.slice(-24).map(m=>({role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content,source:m.source}));
+  let contextSummary:string|null=null;let keptHistory:Array<{id?:string;role:"user"|"assistant";content:string;source?:string}>=history.slice(-24).map(m=>({id:m.id,role:m.role,content:m.partial===1?"[partial, incomplete reply]\n"+m.content:m.content,source:m.source}));
   try{
     const ctx=buildChatContext(root,{chatId,profile:profileName,visitor,history});
     contextSummary=ctx.summary;keptHistory=ctx.kept;
     const partialText=new Set(history.filter(m=>m.partial===1).map(m=>m.content));
-    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{role:m.role,content:"[partial, incomplete reply]\n"+m.content,source:m.source}:m);
+    keptHistory=keptHistory.map(m=>partialText.has(m.content)?{...m,content:"[partial, incomplete reply]\n"+m.content}:m);
   }catch{/* fail open to the raw tail */}
+  // Prompt assembly dedupes by message id (prompt-assembly.ts):
+  // history already ends with the message stored at this turn's
+  // start, so appending it again doubled every message in the
+  // prompt - the history copy wins and the final user entry is
+  // added only when the kept tail does not already carry it.
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
-    ...keptHistory.map(m=>({role:m.role,content:m.role==="user"?withMessageProvenance(m.content,m.source):m.content})),{role:"user" as const,content:resuming?"Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.":withMessageProvenance(content,source)}];
+    ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming})];
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;
+  let graceSpoke=false;
   for(let i=0;i<routes.length;i++){
     const conn=routes[i];
     const guard:TurnToolGuard={toolsStarted:false};
@@ -240,12 +253,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
-        if(!pinned||!pinned.enabled||!process.env[pinned.tokenEnv])throw Error("Profile connector unavailable");
+        if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
         reply=await connectorChat(root,provider,model,messages,active.connector_id,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
       }else if(chatAgent){
         reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
       }else{
-        const useConnectors=connectors(root).some(c=>c.enabled&&!!process.env[c.tokenEnv]);
+        const useConnectors=connectors(root).some(c=>c.enabled&&connectorCredentialPresent(root,c));
         if(useConnectors)reply=await connectorChat(root,provider,model,messages,undefined,{actor:profileName,runTurn:(cid,content)=>runChatTurn(root,cid,content),chatId,userMessageId:userMessageId??undefined},budget,guard);
         else reply=await ownToolsChat(root,profileName,provider,model,messages,(cid,content)=>runChatTurn(root,cid,content),chatId,budget,userMessageId??undefined,guard);
       }
@@ -253,24 +266,79 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       break;
     }catch(error){
       const next=routes[i+1];
-      if(!next||!failoverEligible(error,guard)){
-        // A turn that dies mid-flight still spent what it spent; the
-        // session ledger records it so the caps see the true total.
+      if(next&&failoverEligible(error,guard)){
+        const reason=error instanceof Error?error.message:String(error);
+        recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+        continue;
+      }
+      // Rate-limit grace (Dip, 2026-11-12): on the chat route, for
+      // a non-visitor turn, a rate-limit / quota failure on the
+      // LAST route never reaches the person as a raw platform
+      // error. The first capped failure opens the episode and the
+      // turn answers with the one plain grace message; a capped
+      // failure while the episode is open stays silent - the
+      // person's message is already stored above, no assistant
+      // row is written, and delivering surfaces send nothing for
+      // an empty reply. Machine routes keep the throw: a
+      // heartbeat job's failure isolation (job-failed) is its
+      // contract, and its output must never become the grace
+      // text. A visitor hears the door's plain failure instead -
+      // the owner's token state is not a customer's business.
+      if(!visitor&&route==="chat"&&isRateLimitError(error)){
+        let opened=false;
+        try{opened=openRateLimitEpisode(root,chatId);}catch{opened=true;/* the store never breaks a turn: speak once-ish rather than raw - the failed open already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
+        if(opened){
+          recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode opened, grace message sent (the raw provider error never reaches the owner)");
+          reply=RATE_LIMIT_GRACE_MESSAGE;
+          graceSpoke=true;
+          answered=true;
+          break;
+        }
+        recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode already open, staying silent");
         if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
         recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-        throw error;
+        return "";
       }
-      const reason=error instanceof Error?error.message:String(error);
-      recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+      // A turn that dies mid-flight still spent what it spent; the
+      // session ledger records it so the caps see the true total.
+      if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
+      recordSessionTurn(root,{chatId,route,tokens:turnTokens});
+      throw error;
     }
   }
   if(!answered)throw Error("Model not configured");
-  const finalText=resuming?joinPartial(resuming.content,reply):reply;
-  const saved=new ChatStore(root);
+  // The first successful model call closes a rate-limit episode:
+  // the cap has reset, so the next capped failure speaks again.
+  // The grace reply itself is not a model success and never
+  // closes the episode it just opened.
+  if(!graceSpoke){
+    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
+  }
+  let finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
+  // Chat-history citations (issue #92): the citation pass runs
+  // BEFORE the save, so a cite marker never reaches the stored
+  // text. The model's selection is validated against the hits this
+  // run's own chat searches returned (recorded at the dispatch
+  // seam in own-tools.ts); a source outside them attaches nothing
+  // and the rejection is ledgered by the pass itself. A reply that
+  // ran a search but names no source gets no citation. Citation
+  // plumbing never breaks a turn.
+  let citationHit:ChatSearchHit|null=null;
   try{
-    if(partialId){if(!saved.finishPartial(chatId,partialId,finalText))saved.add(chatId,"assistant",finalText);}
-    else saved.add(chatId,"assistant",finalText);
+    const processed=processReplyCitations(root,{chatId,userMessageId,actor:profileName,text:finalText});
+    finalText=processed.text;
+    citationHit=processed.hit;
+  }catch{/* the citation pass never breaks a turn */}
+  const saved=new ChatStore(root);
+  let savedId:string|null=null;
+  try{
+    if(partialId){if(saved.finishPartial(chatId,partialId,finalText))savedId=partialId;else savedId=saved.add(chatId,"assistant",finalText).id;}
+    else savedId=saved.add(chatId,"assistant",finalText).id;
   }finally{saved.close();}
+  if(citationHit&&savedId){
+    if(attachCitation(root,{messageId:savedId,chatId,actor:profileName,hit:citationHit}))
+      recordActivity(root,profileName,"chat-citation","Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citationHit.chatId.slice(0,8)+", message "+citationHit.messageId.slice(0,8));
+  }
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is
   // SAM's/the owner's choice and is never overwritten by the

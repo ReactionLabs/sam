@@ -6,6 +6,7 @@ import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { loadPatternCatalog, type PatternCatalog } from "./pattern-catalog.js";
 import { listChanges, verificationGate, verificationStatus, type PendingChange } from "./verification.js";
 import { codeRoot } from "./code.js";
+import { recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
 
@@ -53,11 +54,57 @@ function samDir(root: string): string {
 
 function recordsPath(root: string): string { return join(samDir(root), "goldfish.jsonl"); }
 
+// The records ledger follows the house contract, with the
+// goldfish's fail-closed twist on BOTH seams (gap found
+// 2026-11-13). A goldfish verdict is a PERMISSION, not a fact
+// of work already landed: the coding / engine closes spend a
+// returned PASS as reviewed-and-done, so an append failure
+// must never return a success-shaped record - it ledgers one
+// goldfish-failed line and rethrows exactly, and every caller
+// keeps its current fail-closed behavior (the drains close
+// blocked as review-unavailable, the CLI surfaces the error),
+// now with the true cause countable instead of dressed as a
+// generic "review could not run". A read failure is the
+// mirror (the verification / compaction precedent): one line,
+// then the rethrow, because a status folded from an
+// unreadable records ledger would misstate the reviewer's
+// coverage in either direction - and the reviewer's record
+// exists to fail closed.
+export function goldfishFailureSummary(phase: "read" | "append", eventLabel: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Goldfish " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
+}
+
+export function recordGoldfishFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "goldfish-failed", goldfishFailureSummary(phase, eventLabel, reason));
+}
+
+function reviewLabel(record: GoldfishRecord): string {
+  return "review " + record.verdict + " over " + record.changeCount + " change(s)";
+}
+
+function appendRecord(root: string, record: GoldfishRecord): void {
+  try {
+    appendFileSync(recordsPath(root), JSON.stringify(record) + "\n", { encoding: "utf8", flag: "a" });
+  } catch (error) {
+    recordGoldfishFailure(root, "append", reviewLabel(record), error);
+    throw error;
+  }
+}
+
 function readRecords(root: string): GoldfishRecord[] {
   const path = recordsPath(root);
   if (!existsSync(path)) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    recordGoldfishFailure(root, "read", "ledger", error);
+    throw error;
+  }
   const records: GoldfishRecord[] = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const parsed = JSON.parse(line) as GoldfishRecord;
@@ -194,7 +241,7 @@ export async function runGoldfishReview(root: string, spec: string, model: strin
     changeCount: changes.length, changeHashes: changes.map(c => c.replacementHash),
     verdict: review.verdict, summary: review.summary, findings: review.findings, malformed,
   };
-  appendFileSync(recordsPath(root), JSON.stringify(record) + "\n", { encoding: "utf8", flag: "a" });
+  appendRecord(root, record);
   return record;
 }
 

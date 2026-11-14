@@ -5,6 +5,7 @@ import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
+import { recordActivity } from "./activity.js";
 import type { MessageSource } from "./message-provenance.js";
 
 // Telegram bridge: long-polls the bot API (no public webhook needed, so it works
@@ -170,6 +171,10 @@ export async function handleTelegramUpdate(deps:{channel:Channel;sam:SamClient;s
   deps.state.chats[key]=chatId;
  }
  const reply=await deps.sam.postMessage(chatId,msg.text.trim());
+ // Silence is a reply shape, not an error: an empty reply (the
+ // rate-limit grace episode already spoke for this cap) sends
+ // nothing at all - never an empty Telegram message.
+ if(!reply.trim())return;
  for(const part of chunkText(reply))await deps.send(msg.chat.id,part);
 }
 export class TelegramApi {
@@ -214,8 +219,19 @@ export class DashboardSamClient implements SamClient {
   return created.id;
  }
  async postMessage(chatId:string,content:string):Promise<string>{
-  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string}};
-  return result.reply?.content??"No response.";
+  const result=await this.api("/chats/"+chatId+"/messages",{method:"POST",body:JSON.stringify({content,source:this.source})}) as {reply?:{content?:string;citation?:{available?:boolean;sourceTitle?:string;sourceChatId?:string;sourceMessageId?:string}|null}};
+  const text=result.reply?.content??"No response.";
+  // Issue #92: a cited reply carries its "Found in chat history"
+  // line onto Telegram too - the chat title always, and a deep
+  // link to the dashboard when a public base URL is configured
+  // (the stable door), so the owner can land on the exact message.
+  const citation=result.reply?.citation;
+  if(citation?.available&&citation.sourceChatId&&citation.sourceMessageId){
+   const base=(process.env.SAM_PUBLIC_URL??"").replace(/\/+$/,"");
+   const link=base?base+"#chat="+citation.sourceChatId+"&msg="+citation.sourceMessageId:"";
+   return text+"\n\nFound in chat history: "+(citation.sourceTitle||"an earlier chat")+(link?"\n"+link:"");
+  }
+  return text;
  }
 }
 export function dashboardTokenFromLog(logPath:string):string{
@@ -224,14 +240,54 @@ export function dashboardTokenFromLog(logPath:string):string{
  if(!matches.length)throw Error("Dashboard token not found in log");
  return matches[matches.length-1][1];
 }
-export async function runTelegramBridge(opts:{root:string;channel:Channel;sam:SamClient;api:TelegramApi;pollTimeoutSec?:number;stop?:()=>boolean}):Promise<void>{
+// Bridge failures are ledgered (hourly run 2026-11-12 22:04 EST):
+// the run loop below used to swallow every failure - a thrown
+// update handler and a thrown poll both vanished with no line
+// anywhere, while the update's offset had already been consumed
+// (handleTelegramUpdate advances it first, and the loop saves
+// state after the catch), so a lost owner message was lost
+// silently and the class was uncountable. The turn-failed seam
+// is the precedent: one ledger line per failure, carrying the
+// channel, the update id, and the error's own message - never
+// the person's message text, never any token. Poll failures
+// are once per outage streak (the rate-limit episode
+// discipline): a dead token polling every few seconds must not
+// flood the ledger, and the next successful poll re-arms it.
+// The offset consumption itself does NOT change: redelivering
+// an update whose postMessage may already have stored a turn
+// would duplicate the owner's message and double-spend a model
+// turn, and a poison update retried forever would wedge every
+// later update behind it (the heartbeat-isolation lesson). The
+// update stays consumed; the line makes the loss countable.
+export function bridgeFailureSummary(channelName:string,updateId:number,error:unknown):string{
+ const message=error instanceof Error?error.message:String(error);
+ return "Telegram bridge failed on update "+updateId+" for channel "+channelName+": "+message;
+}
+export function bridgePollFailureSummary(channelName:string,error:unknown):string{
+ const message=error instanceof Error?error.message:String(error);
+ return "Telegram bridge poll failed for channel "+channelName+": "+message;
+}
+export function recordBridgeFailure(root:string,channel:Channel,updateId:number,error:unknown):void{
+ recordActivity(root,channel.profile,"bridge-failed",bridgeFailureSummary(channel.name,updateId,error));
+}
+export function recordBridgePollFailure(root:string,channel:Channel,error:unknown):void{
+ recordActivity(root,channel.profile,"bridge-poll-failed",bridgePollFailureSummary(channel.name,error));
+}
+export async function runTelegramBridge(opts:{root:string;channel:Channel;sam:SamClient;api:TelegramApi;pollTimeoutSec?:number;pollRetryDelayMs?:number;stop?:()=>boolean}):Promise<void>{
  const state=loadBridgeState(opts.root);
  const timeout=opts.pollTimeoutSec??30;
+ const retryDelayMs=opts.pollRetryDelayMs??3000;
+ let pollFailureOpen=false;
  while(!opts.stop?.()){
   let updates:TelegramUpdate[]=[];
-  try{updates=await opts.api.getUpdates(state.offset,timeout);}catch{await new Promise(r=>setTimeout(r,3000));continue;}
+  try{updates=await opts.api.getUpdates(state.offset,timeout);pollFailureOpen=false;}catch(error){
+   if(!pollFailureOpen){try{recordBridgePollFailure(opts.root,opts.channel,error);}catch{/* the ledger never breaks the bridge */}pollFailureOpen=true;}
+   await new Promise(r=>setTimeout(r,retryDelayMs));continue;
+  }
   for(const update of updates){
-   try{await handleTelegramUpdate({channel:opts.channel,sam:opts.sam,send:(id,text)=>opts.api.sendMessage(id,text),state,root:opts.root},update);}catch{/* one bad update never kills the bridge */}
+   try{await handleTelegramUpdate({channel:opts.channel,sam:opts.sam,send:(id,text)=>opts.api.sendMessage(id,text),state,root:opts.root},update);}catch(error){/* one bad update never kills the bridge - and it is ledgered, never silent */
+    try{recordBridgeFailure(opts.root,opts.channel,update.update_id,error);}catch{/* the ledger never breaks the bridge */}
+   }
    saveBridgeState(opts.root,state);
   }
  }

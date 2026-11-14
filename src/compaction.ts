@@ -41,6 +41,22 @@ import { recordActivity } from "./activity.js";
 // - FAIL OPEN. Any compaction error leaves the caller with the raw
 //   tail, exactly the pre-compaction behavior; a broken summary must
 //   never break a turn.
+// - FAILURES LEDGER (gap found 2026-11-13, hourly run 11:04). The
+//   fail-open above used to be the whole story: a throw at any of
+//   the fold's three durable steps (the stored-compaction read,
+//   the memory flush, the summary save) left no trace anywhere, so
+//   a wedged fold - a locked or corrupt store is all it takes -
+//   silently degraded every later turn on the chat (a flush
+//   failure means the chat never compacts at all), and a save
+//   failure after a landed flush re-wrote the same segment's
+//   flush on every retry. Each failed step now writes ONE
+//   "compaction-failed" activity line (phase + verbatim reason,
+//   never message content or the digest) and rethrows exactly, so
+//   the caller's fail-open and the CLI's error surface are
+//   unchanged and the class is countable. The flush is retry-safe
+//   in the same change: a live record already carrying the fold's
+//   source IS the flush (its text is deterministic per segment),
+//   so a retry after a save failure adds nothing.
 export const COMPACT_KEEP_MESSAGES = 12;
 export const COMPACT_TRIGGER_MESSAGES = 24;
 export const COMPACT_TRIGGER_CHARS = 16000;
@@ -90,10 +106,25 @@ export function foldBoundary(history: Array<{ role: string }>, covered: number, 
 
 export interface ChatContext {
   summary: string | null;
-  kept: Array<{ role: "user" | "assistant"; content: string; source: string }>;
+  kept: Array<{ id: string; role: "user" | "assistant"; content: string; source: string }>;
   covered: number;
   compactedNow: boolean;
   foldedCount: number;
+}
+
+// One ledger line per failed durable step per fold attempt (the
+// seam described in the header): the phase names which of the
+// fold's writes died, the reason is the error's own words
+// (collapsed, capped), and no message content or digest text ever
+// enters the line - counts and the chat prefix only.
+export function compactionFailureSummary(chatId: string, phase: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Compaction " + phase + " failed for chat " + chatId.slice(0, 8) + ": " + clean).slice(0, 200);
+}
+
+export function recordCompactionFailure(root: string, actor: string, chatId: string, phase: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, actor, "compaction-failed", compactionFailureSummary(chatId, phase, reason));
 }
 
 // Build the prompt context for one turn: the stored summary (if any)
@@ -105,9 +136,11 @@ export function buildChatContext(
   opts: { chatId: string; profile: string; visitor: boolean; history: ChatMessage[]; force?: boolean },
 ): ChatContext {
   const { chatId, profile, visitor, history } = opts;
-  const store = new ChatStore(root);
   let existing: ChatCompaction | null = null;
-  try { existing = store.getCompaction(chatId); } finally { store.close(); }
+  try {
+    const store = new ChatStore(root);
+    try { existing = store.getCompaction(chatId); } finally { store.close(); }
+  } catch (error) { recordCompactionFailure(root, profile, chatId, "read", error); throw error; }
   // A stored record past the end of this history cannot belong to it
   // (branch/copy mismatch): ignore it rather than hide live turns.
   let covered = existing && existing.covered <= history.length ? existing.covered : 0;
@@ -121,22 +154,32 @@ export function buildChatContext(
       const segment = history.slice(covered, boundary);
       const digest = digestSegment(segment);
       // FLUSH FIRST: the durable memory record exists before the
-      // summary replaces these turns in any prompt.
+      // summary replaces these turns in any prompt. Retry-safe: a
+      // live record already carrying this fold's source is the
+      // flush (the digest for a given segment never changes), so a
+      // fold retried after a save failure adds no duplicate.
       if (!visitor) {
-        const mem = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
+        const flushSource = "compaction:" + chatId + ":" + boundary;
+        const scope = episodeScope(profile);
         try {
-          mem.add({
-            kind: "observation",
-            content: "Chat compaction flush · chat " + chatId.slice(0, 8) + " · profile " + profile +
-              " · messages " + (covered + 1) + "-" + boundary + "\n" + digest,
-            source: "compaction:" + chatId + ":" + boundary,
-            scope: episodeScope(profile),
-          });
-        } finally { mem.close(); }
+          const mem = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
+          try {
+            const alreadyFlushed = mem.list(undefined, [scope]).some(r => r.source === flushSource);
+            if (!alreadyFlushed) mem.add({
+              kind: "observation",
+              content: "Chat compaction flush · chat " + chatId.slice(0, 8) + " · profile " + profile +
+                " · messages " + (covered + 1) + "-" + boundary + "\n" + digest,
+              source: flushSource,
+              scope,
+            });
+          } finally { mem.close(); }
+        } catch (error) { recordCompactionFailure(root, profile, chatId, "flush", error); throw error; }
       }
       summary = mergeSummary(summary, digest, boundary);
-      const saved = new ChatStore(root);
-      try { saved.setCompaction(chatId, boundary, summary); } finally { saved.close(); }
+      try {
+        const saved = new ChatStore(root);
+        try { saved.setCompaction(chatId, boundary, summary); } finally { saved.close(); }
+      } catch (error) { recordCompactionFailure(root, profile, chatId, "save", error); throw error; }
       foldedCount = boundary - covered;
       covered = boundary;
       compactedNow = true;
@@ -149,7 +192,7 @@ export function buildChatContext(
   // Safety bound: if no safe boundary existed, never hand the model an
   // unbounded tail - fall back to the pre-compaction window.
   if (kept.length > COMPACT_TRIGGER_MESSAGES + COMPACT_KEEP_MESSAGES) kept = kept.slice(-COMPACT_TRIGGER_MESSAGES);
-  return { summary, kept: kept.map(m => ({ role: m.role, content: m.content, source: m.source ?? "unknown" })), covered, compactedNow, foldedCount };
+  return { summary, kept: kept.map(m => ({ id: m.id, role: m.role, content: m.content, source: m.source ?? "unknown" })), covered, compactedNow, foldedCount };
 }
 
 // CLI/manual door onto the same fold: force a compaction of a stored

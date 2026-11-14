@@ -4,11 +4,10 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { channels, addChannel, type Channel } from "./channels.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { modelRoutingTable } from "./model-routing.js";
-import { engineBinary } from "./engine.js";
-import { connectEngine, engineConnectStatus, type EngineAuthRunner, type EngineConnection } from "./engine-connect.js";
+import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider, setEngineProvider, ENGINE_PROVIDERS, type EngineAuthRunner, type EngineConnection, type EngineProvider, type EngineProviderStatus } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { recordActivity } from "./activity.js";
@@ -48,7 +47,7 @@ export interface SetupDetection {
   channels: Array<{ name: string; kind: string; profile: string; tokenEnv: string; credential: "present" | "absent"; owners: number; enabled: boolean }>;
   connectors: Array<{ name: string; enabled: boolean; credential: "present" | "absent" }>;
   keys: KeyState[];
-  engine: { installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null };
+  engine: { provider: EngineProvider; installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null; providers: EngineProviderStatus[] };
   senses: { installed: boolean; binary: string | null };
   nextSteps: string[];
 }
@@ -97,7 +96,8 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
   key("SAM_MODEL_ENDPOINT", "model endpoint override");
   for (const c of chans) key(c.tokenEnv, "channel credential: " + c.name);
   for (const c of conns) key(c.tokenEnv, "connector credential: " + c.name);
-  const engineBin = engineBinary(env);
+  const engineStatus0 = engineConnectStatus(root, env);
+  const engineBin = engineStatus0.binary;
   const senses = sensesStatus(env);
   // First-run means the live turn cannot run at all - judged by the
   // turn's own requirements (a resolved model, an endpoint, and a key
@@ -109,8 +109,8 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
   if (!modelApiKey(env)) nextSteps.push("Set the model API key in the environment (SAM_MODEL_API_KEY, or MINIMAX_API_KEY for the minimax provider) - SAM never stores key values, only their names.");
   if (!modelEndpoint(env)) nextSteps.push("Set SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT so SAM knows where the model lives.");
   if (model && modelApiKey(env) && modelEndpoint(env)) nextSteps.push("Run `sam config setup --live` to verify the model with one real completion and record the verified setup.");
-  if (!engineBin) nextSteps.push("Optional: install Claude Code on this machine to enable the managed coding engine (an operator install; SAM only detects it).");
-  else if (!engineConnectStatus(root, env).connected) nextSteps.push("Optional: connect Claude Code as the coding-engine route with `sam engine connect` (CLI reuse - SAM verifies the CLI's login and stores only a route marker, never its tokens).");
+  if (!engineBin) nextSteps.push("Optional: install " + engineProviderDef(engineStatus0.provider).label + " on this machine to enable the managed coding engine (an operator install; SAM only detects it). The engine provider is a config choice: `sam engine provider claude-code|codex`.");
+  else if (!engineStatus0.connected) nextSteps.push("Optional: connect " + engineProviderDef(engineStatus0.provider).label + " as the coding-engine route with `sam engine connect` (CLI reuse - SAM verifies the CLI's own login and stores only a route marker, never its tokens). If it is not signed in, `sam engine login` runs the provider's own login in your terminal.");
   if (!senses.installed) nextSteps.push("Optional: install and authorize the senses reader (gog) to give the core profile its Gmail and Calendar senses.");
   return {
     firstRun: !turnReady,
@@ -123,9 +123,9 @@ export function detectSetup(root: string, env: NodeJS.ProcessEnv = process.env):
     apiKey: modelApiKey(env) ? "present" : "absent",
     profiles,
     channels: chans.map(c => ({ name: c.name, kind: c.kind, profile: c.profile, tokenEnv: c.tokenEnv, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const, owners: c.ownerIds.length, enabled: c.enabled })),
-    connectors: conns.map(c => ({ name: c.name, enabled: c.enabled, credential: clean(env[c.tokenEnv]) ? "present" as const : "absent" as const })),
+    connectors: conns.map(c => ({ name: c.name, enabled: c.enabled, credential: (c.vaultKey ? connectorCredentialPresent(root, c) : !!clean(env[c.tokenEnv])) ? "present" as const : "absent" as const })),
     keys,
-    engine: (() => { const c = engineConnectStatus(root, env); return { installed: !!engineBin, binary: engineBin, connected: c.connected, stale: c.stale, connection: c.connection }; })(),
+    engine: (() => { const c = engineStatus0; return { provider: c.provider, installed: c.installed, binary: c.binary, connected: c.connected, stale: c.stale, connection: c.connection, providers: c.providers }; })(),
     senses: { installed: senses.installed, binary: senses.binary },
     nextSteps,
   };
@@ -147,14 +147,15 @@ export function configSections(root: string, env: NodeJS.ProcessEnv = process.en
   const keyLines = d.keys.map(k => k.name + ": " + k.state + " (" + k.purpose + ")");
   keyLines.push("SAM stores only env-var names, never key values; set a missing key in the install's environment, then re-run verify.");
   const engineLines = [
-    "coding engine (Claude Code): " + (d.engine.installed ? "installed (" + d.engine.binary + ")" : "not installed - installing it is the operator's act"),
+    "engine provider (config choice): " + engineProviderDef(d.engine.provider).label + " - switch with `sam engine provider claude-code|codex` or in this section",
+    ...d.engine.providers.map(p => "provider " + p.label + ": " + (p.installed ? "installed (" + p.binary + ")" : "not installed - installing it is the operator's act") + (p.connected ? " · connected" : "")),
     "engine connection (CLI reuse): " + (d.engine.connected
       ? "connected" + (d.engine.connection ? " since " + d.engine.connection.connectedAt + (d.engine.connection.authMethod ? " via " + d.engine.connection.authMethod : "") : "") + " - SAM stores only a route marker, never the CLI's tokens"
       : d.engine.stale
-        ? "a connection is recorded but its binary is no longer the one detected - re-run `sam engine connect` to re-verify it"
+        ? "a connection is recorded but it no longer matches the selected provider or its binary - re-run `sam engine connect` to re-verify it"
         : d.engine.installed
-          ? "not connected - run `sam engine connect` (or this section) to verify the CLI's login and record the route"
-          : "not connected - no engine to connect yet"),
+          ? "not connected - run `sam engine connect` (or this section) to verify the CLI's login and record the route; if it is not signed in, `sam engine login` runs the provider's own login in your terminal"
+          : "not connected - the selected provider is not installed yet"),
     "senses reader (gog): " + (d.senses.installed ? "installed (" + d.senses.binary + ")" : "not installed - the core profile's Gmail/Calendar senses stay dark until it is installed and authorized"),
   ];
   return [
@@ -380,19 +381,29 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
   // has a connect step (CLI dressing item 3): verify the host CLI's
   // login and record the route marker. SAM never takes custody of
   // the login itself.
-  const status = engineConnectStatus(root, env);
+  let status = engineConnectStatus(root, env);
+  // The provider is a config choice, settable here first: the owner's
+  // pick rides the same store the CLI's `engine provider` verb uses.
+  const pick = (await io.ask("Engine provider [" + ENGINE_PROVIDERS.map(p => p.id).join("/") + ", or Enter to keep " + status.provider + "]: ")).trim().toLowerCase();
+  if (pick) {
+    if (!isEngineProvider(pick)) { io.print("Refused: \"" + pick + "\" is not an engine provider (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + "). The selection is unchanged."); return; }
+    try { setEngineProvider(root, pick); } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); return; }
+    io.print("Saved: " + engineProviderDef(pick).label + " is now the coding-engine provider (a config choice only - nothing was connected or removed).");
+    status = engineConnectStatus(root, env);
+  }
+  const def = engineProviderDef(status.provider);
   if (!status.installed) {
-    io.print("Claude Code is not installed on this machine, so there is no engine to connect. Installing it (and signing in with `claude auth login`) is the operator's act; SAM picks it up automatically once present. The gog senses reader is likewise detected, not configured here.");
+    io.print(def.label + " is not installed on this machine, so there is no engine to connect. Installing it (and signing in with " + def.loginHint + ", or `sam engine login` once it exists) is the operator's act; SAM picks it up automatically once present. The gog senses reader is likewise detected, not configured here.");
     return;
   }
   if (status.connected) {
-    io.print("Claude Code is already connected as the coding-engine route (CLI reuse, connected " + (status.connection?.connectedAt ?? "") + "). To re-verify it, run `sam engine connect`; to disconnect SAM's route marker, run `sam engine disconnect` (that never touches the CLI's own login).");
+    io.print(def.label + " is already connected as the coding-engine route (CLI reuse, connected " + (status.connection?.connectedAt ?? "") + "). To re-verify it, run `sam engine connect`; to disconnect SAM's route marker, run `sam engine disconnect` (that never touches the CLI's own login).");
     return;
   }
-  const go = (await io.ask("Connect Claude Code as the coding-engine route now? This runs `claude auth status` and, only if the CLI reports a signed-in login, records a route marker - SAM never reads or stores the CLI's tokens. [y/N]: ")).trim().toLowerCase();
+  const go = (await io.ask("Connect " + def.label + " as the coding-engine route now? This runs `" + def.command + " " + def.authArgv.join(" ") + "` and, only if the CLI reports a signed-in login, records a route marker - SAM never reads or stores the CLI's tokens. [y/N]: ")).trim().toLowerCase();
   if (go !== "y" && go !== "yes") return;
   try {
     const result = engineAuthRunner ? await connectEngine(root, env, engineAuthRunner) : await connectEngine(root, env);
-    io.print(result.connected ? "Connected: Claude Code is the coding-engine route via CLI reuse (marker recorded; no credentials held by SAM)." : "Not connected: " + result.probe.reason);
+    io.print(result.connected ? "Connected: " + def.label + " is the coding-engine route via CLI reuse (marker recorded; no credentials held by SAM)." : "Not connected: " + result.probe.reason + (result.probe.state === "signed-out" ? " Run `sam engine login` in this terminal to sign in with the provider's own login flow, then connect again." : ""));
   } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); }
 }

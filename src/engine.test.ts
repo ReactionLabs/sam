@@ -89,7 +89,7 @@ test("proposal validation refuses what cannot execute: non-git root and no engin
     assert.throws(() => validateEngineDetail(g.sam, JSON.stringify({ task: "do it" }), { PATH: "/nonexistent-dir" }), /not installed/);
     assert.throws(() => validateEngineDetail(g.sam, JSON.stringify({ task: "" })), /Invalid engine task/);
     assert.throws(() => validateEngineDetail(g.sam, "not json"), /expected JSON/);
-    assert.deepEqual(validateEngineDetail(g.sam, JSON.stringify({ task: "do it" })), { task: "do it", chatId: null });
+    assert.deepEqual(validateEngineDetail(g.sam, JSON.stringify({ task: "do it" })), { task: "do it", chatId: null, provider: "claude-code" });
   } finally { g.cleanup(); }
 });
 

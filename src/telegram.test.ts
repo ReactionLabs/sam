@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addChannel, channels, setChannelOwners } from "./channels.js";
-import { handleTelegramUpdate, chunkText, loadBridgeState, type SamClient } from "./telegram.js";
+import { handleTelegramUpdate, runTelegramBridge, chunkText, loadBridgeState, type SamClient, type TelegramApi } from "./telegram.js";
+import { readActivity } from "./activity.js";
 import { issuePairingCode } from "./pairing.js";
 
 test("channel registry stores env reference only and validates owners",()=>{
@@ -89,5 +90,49 @@ test("telegram bridge pairs via the pair command form too",async()=>{
   await handleTelegramUpdate({channel,sam,send:async(_chat:number,text:string)=>{sent.push(text);},state,root},{update_id:1,message:{chat:{id:777},from:{id:4242},text:"pair "+issued.code.toLowerCase()}});
   assert.equal(sent.length,1);
   assert.deepEqual(channels(root)[0].ownerIds,[4242]);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("telegram bridge run loop ledgers a failed update once, consumes its offset, and keeps relaying",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-tg-fail-"));
+ try{
+  const channel=addChannel(root,"telegram","Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[111]);
+  const sent:Array<{chat:number;text:string}>=[];
+  const sam:SamClient={ensureChat:async()=>"sam-chat-1",postMessage:async(_id,content)=>{if(content==="first")throw new Error("SAM dashboard request failed (HTTP 500)");return "Reply to: "+content;}};
+  let polls=0;
+  const api={getUpdates:async()=>{polls++;return [
+   {update_id:10,message:{chat:{id:555},from:{id:111},text:"first"}},
+   {update_id:11,message:{chat:{id:555},from:{id:111},text:"second"}},
+  ];},sendMessage:async(chat:number,text:string)=>{sent.push({chat,text});}};
+  await runTelegramBridge({root,channel,sam,api:api as unknown as TelegramApi,pollRetryDelayMs:0,stop:()=>polls>=1});
+  // The good update after the failed one still relays - one bad update
+  // never kills the bridge - and the failed one's offset is consumed
+  // and saved, so Telegram never redelivers it (redelivery could
+  // duplicate a turn its postMessage already stored).
+  assert.deepEqual(sent,[{chat:555,text:"Reply to: second"}]);
+  assert.equal(loadBridgeState(root).offset,12);
+  const failures=readActivity(root,50).filter(l=>l.kind==="bridge-failed");
+  assert.equal(failures.length,1);
+  assert.equal(failures[0].actor,"trading");
+  assert.match(failures[0].summary,/update 10/);
+  assert.match(failures[0].summary,/HTTP 500/);
+  // The ledger line carries the error, never the owner's message text.
+  assert.equal(failures[0].summary.includes("first"),false);
+ }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("telegram bridge run loop ledgers a poll outage once per streak, re-armed by a successful poll",async()=>{
+ const root=mkdtempSync(join(tmpdir(),"sam-tg-poll-"));
+ try{
+  const channel=addChannel(root,"telegram","Dip Telegram","trading","SAM_CHANNEL_TG_MAIN",[111]);
+  const sam:SamClient={ensureChat:async()=>"sam-chat-1",postMessage:async()=>"unused"};
+  const script:Array<"throw"|"ok">=["throw","throw","ok","throw","ok"];
+  let polls=0;
+  const api={getUpdates:async()=>{const step=script[polls]??"ok";polls++;if(step==="throw")throw new Error("Telegram request failed (HTTP 502)");return [];},sendMessage:async()=>{}};
+  await runTelegramBridge({root,channel,sam,api:api as unknown as TelegramApi,pollRetryDelayMs:0,stop:()=>polls>=script.length});
+  assert.equal(polls,script.length);
+  const failures=readActivity(root,50).filter(l=>l.kind==="bridge-poll-failed");
+  assert.equal(failures.length,2);
+  assert.match(failures[0].summary,/HTTP 502/);
  }finally{rmSync(root,{recursive:true,force:true});}
 });

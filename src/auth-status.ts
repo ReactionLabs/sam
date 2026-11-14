@@ -6,7 +6,6 @@ import { ChatStore } from "./chats.js";
 import { modelRoutingTable, type ModelSource, type ModelTier } from "./model-routing.js";
 import { parseSamConfig } from "./config.js";
 import { modelEndpoint, modelApiKey, readSetupRecord, defaultCompleter, type Completer } from "./config-wizard.js";
-import { engineBinary } from "./engine.js";
 import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { recordActivity } from "./activity.js";
@@ -73,7 +72,7 @@ export interface AuthStatus {
   routes: AuthTarget[];
   profiles: AuthTarget[];
   providers: ProviderHealth[];
-  engine: { route: "cli-reuse"; installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null };
+  engine: { route: "cli-reuse"; provider: string; installed: boolean; binary: string | null; connected: boolean; stale: boolean; connection: EngineConnection | null; providers: Array<{ provider: string; label: string; installed: boolean; binary: string | null; connected: boolean }> };
   senses: { installed: boolean; binary: string | null };
   lastProbeAt: string | null;
   healthy: boolean;
@@ -206,7 +205,7 @@ export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): 
     routes: routeRows,
     profiles: profileRows,
     providers: listProviders(root, env).map(p => ({ ...p, lastProbe: byTarget.get("provider:" + p.id) ?? null })),
-    engine: (() => { const c = engineConnectStatus(root, env); return { route: "cli-reuse" as const, installed: !!engineBinary(env), binary: engineBinary(env), connected: c.connected, stale: c.stale, connection: c.connection }; })(),
+    engine: (() => { const c = engineConnectStatus(root, env); return { route: "cli-reuse" as const, provider: c.provider, installed: c.installed, binary: c.binary, connected: c.connected, stale: c.stale, connection: c.connection, providers: c.providers }; })(),
     senses: sensesStatus(env),
     lastProbeAt: store?.at ?? null,
     healthy: authCheckOk({ routes: routeRows }),

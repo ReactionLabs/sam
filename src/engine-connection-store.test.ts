@@ -32,7 +32,7 @@ const SIGNED_IN_JSON = JSON.stringify({ loggedIn: true, authMethod: "claude.ai",
 const SIGNED_OUT_JSON = JSON.stringify({ loggedIn: false });
 const runnerReturning = (output: string, exitCode: number | null = 0): EngineAuthRunner => async () => ({ exitCode, output });
 
-const LEGACY: EngineConnection = { route: "cli-reuse", binary: "/opt/fake/claude", connectedAt: "2026-11-10T21:19:00.000Z", authState: "signed-in", authMethod: "claude.ai" };
+const LEGACY: EngineConnection = { route: "cli-reuse", provider: "claude-code", binary: "/opt/fake/claude", connectedAt: "2026-11-10T21:19:00.000Z", authState: "signed-in", authMethod: "claude.ai" };
 
 test("engine connection store: a legacy engine-connection.json imports intact, file renamed not deleted", async () => {
   const root = fresh();

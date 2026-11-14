@@ -4,7 +4,9 @@ import { searchWeb } from "./web-search.js";
 import { converse, type ModelProvider } from "./model-conversation.js";
 import { runMemoryToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 import { join, resolve } from "node:path";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import type Database from "better-sqlite3";
+import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
 import { OperativeRegistry } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
@@ -123,44 +125,200 @@ function runsPath(root: string) { return join(resolve(root), ".sam", "team-runs.
 function messagesPath(root: string) { return join(resolve(root), ".sam", "team-messages.jsonl"); }
 function registryPath(root: string) { return join(resolve(root), ".sam", "missions.db"); }
 
-function readMembers(root: string): StandingMember[] {
-  if (!existsSync(membersPath(root))) return [];
-  try {
-    const data = JSON.parse(readFileSync(membersPath(root), "utf8")) as unknown;
-    return Array.isArray(data) ? data as StandingMember[] : [];
-  } catch { return []; }
+// State convergence (UNIFICATION item 4, thirty-fifth store):
+// the standing-team runtime's two registries are SQLite
+// (.sam/team.db, the delegations pattern: better-sqlite3 via
+// the shared openDatabase, WAL, busy_timeout 5000, one row per
+// member in team_members keyed by name and one row per run in
+// team_runs keyed by id, each holding the record's full JSON,
+// rowid order = the old file order). The old team-members.json
+// and team-runs.json were each rewritten whole on every
+// mutation (member add / remove, run create / finish), and
+// their writers span the dashboard/chat process, the CLI, and
+// any process running a standing team, so two writers holding
+// the same snapshot silently lost the second one's record: a
+// member could vanish under a run's finishing rewrite, a run
+// created during another run could vanish under the first
+// run's finishing rewrite, and a removed member could
+// reappear. Here each mutation is a single-row INSERT,
+// UPDATE, or DELETE. First open imports each legacy file
+// independently (a table that already holds rows skips its
+// file) in file order and renames it .migrated - imported,
+// never deleted; a malformed file or a non-array payload
+// imports nothing and is left in place (reading as empty,
+// exactly the old forgiving contract). A pure read on an
+// install with neither file creates nothing. The P9 backup
+// snapshots every .sam/*.db generically, so the migrated
+// store is carried with no backup change. team-messages.jsonl
+// is an append-only ledger, a different store, and stays.
+function teamDbFile(root: string): string { return join(resolve(root), ".sam", "team.db"); }
+function teamStoreExists(root: string): boolean {
+  return existsSync(teamDbFile(root)) || existsSync(membersPath(root)) || existsSync(runsPath(root));
 }
-function saveMembers(root: string, items: StandingMember[]): void {
+function migrateLegacyTeamFile(db: Database.Database, root: string, table: "team_members" | "team_runs", legacy: string, keyField: "name" | "id"): void {
+  const { n } = db.prepare("SELECT COUNT(*) AS n FROM " + table).get() as { n: number };
+  if (n > 0) return;
+  if (!existsSync(legacy)) return;
+  let data: unknown;
+  try { data = JSON.parse(readFileSync(legacy, "utf8")); } catch { return; }
+  if (!Array.isArray(data)) return;
+  const insert = db.prepare("INSERT OR IGNORE INTO " + table + " (id, data) VALUES (?, ?)");
+  const importAll = db.transaction((rows: unknown[]) => {
+    for (const raw of rows) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw as Record<string, unknown>;
+      const key = item[keyField];
+      if (typeof key !== "string" || !key) continue;
+      insert.run(key, JSON.stringify(item));
+    }
+  });
+  importAll(data);
+  renameSync(legacy, legacy + ".migrated");
+}
+function openTeamStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(membersPath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+  const db = openDatabase(teamDbFile(root));
+  db.exec("CREATE TABLE IF NOT EXISTS team_members (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS team_runs (id TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  migrateLegacyTeamFile(db, root, "team_members", membersPath(root), "name");
+  migrateLegacyTeamFile(db, root, "team_runs", runsPath(root), "id");
+  return db;
+}
+function rowToRecord<T>(data: string): T | null {
+  try { const value: unknown = JSON.parse(data); return value && typeof value === "object" ? value as T : null; }
+  catch { return null; }
+}
+function readMembers(root: string): StandingMember[] {
+  if (!teamStoreExists(root)) return [];
+  const db = openTeamStore(root);
+  try {
+    const rows = db.prepare("SELECT data FROM team_members ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: StandingMember[] = [];
+    for (const row of rows) { const item = rowToRecord<StandingMember>(row.data); if (item) items.push(item); }
+    return items;
+  } finally { db.close(); }
 }
 function readRuns(root: string): TeamRunRecord[] {
-  if (!existsSync(runsPath(root))) return [];
+  if (!teamStoreExists(root)) return [];
+  const db = openTeamStore(root);
   try {
-    const data = JSON.parse(readFileSync(runsPath(root), "utf8")) as unknown;
-    return Array.isArray(data) ? data as TeamRunRecord[] : [];
-  } catch { return []; }
+    const rows = db.prepare("SELECT data FROM team_runs ORDER BY rowid").all() as Array<{ data: string }>;
+    const items: TeamRunRecord[] = [];
+    for (const row of rows) { const item = rowToRecord<TeamRunRecord>(row.data); if (item) items.push(item); }
+    return items;
+  } finally { db.close(); }
 }
-function saveRuns(root: string, items: TeamRunRecord[]): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(runsPath(root), JSON.stringify(items, null, 2), { mode: 0o600 });
+function putMember(root: string, member: StandingMember): void {
+  const db = openTeamStore(root);
+  try {
+    db.prepare("INSERT INTO team_members (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+      .run(member.name, JSON.stringify(member));
+  } finally { db.close(); }
+}
+function deleteMember(root: string, name: string): boolean {
+  const db = openTeamStore(root);
+  try {
+    return db.prepare("DELETE FROM team_members WHERE id = ?").run(name).changes > 0;
+  } finally { db.close(); }
+}
+function putRun(root: string, run: TeamRunRecord): void {
+  const db = openTeamStore(root);
+  try {
+    db.prepare("INSERT INTO team_runs (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
+      .run(run.id, JSON.stringify(run));
+  } finally { db.close(); }
+}
+// The store's update doors (the updateDelegation precedent):
+// patch one record by key through the store's own shape.
+// Returns the updated record, or null when no such record
+// exists - and a miss on an install with no store at all
+// creates nothing.
+export function updateTeamMember(root: string, name: string, patch: Partial<StandingMember>): StandingMember | null {
+  if (!teamStoreExists(root)) return null;
+  const current = readMembers(root).find(m => m.name === name) ?? null;
+  if (!current) return null;
+  const next: StandingMember = { ...current, ...patch, name: current.name };
+  putMember(root, next);
+  return next;
+}
+export function updateTeamRun(root: string, id: string, patch: Partial<TeamRunRecord>): TeamRunRecord | null {
+  if (!teamStoreExists(root)) return null;
+  const current = readRuns(root).find(r => r.id === id) ?? null;
+  if (!current) return null;
+  const next: TeamRunRecord = { ...current, ...patch, id: current.id };
+  putRun(root, next);
+  return next;
 }
 
 export function listTeamMembers(root: string): StandingMember[] { return readMembers(root); }
 export function listTeamRuns(root: string): TeamRunRecord[] { return readRuns(root); }
-export function listTeamMessages(root: string, limit = 40): TeamMessage[] {
-  if (!existsSync(messagesPath(root))) return [];
+// The team-messages ledger follows the house contract, split
+// by what the append records (gap found 2026-11-14, hourly run
+// 00:04). APPENDING never breaks the work it records and never
+// fails silently: every team message already happened in the
+// world when its append runs - the worker produced the work,
+// the reviewer judged it - and the append sits inside
+// runStandingTeam's try, so a bare throw there marked the
+// whole run failed with the filesystem error as its result
+// and discarded the product, and the activity + chat
+// mirroring below the append never ran either. A dead append
+// therefore ledgers one team-messages-failed line and returns
+// whether the record landed, instead of throwing. READING is
+// the opposite call (the family fail-closed precedent):
+// teamStatus folds this ledger as the team's record, so a
+// dead read ledgers one line and rethrows exactly instead of
+// presenting a team that never said anything as truth; an
+// absent ledger still reads [], and parsing is per-line
+// forgiving (a torn line from a crash mid-append is skipped,
+// never the whole history - the old one-map parse lost every
+// healthy message to a single torn line).
+export function teamMessagesFailureSummary(phase: "read" | "append", label: string, reason: string): string {
+  const clean = String(reason ?? "").replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Team messages " + phase + " failed for " + label + ": " + clean).slice(0, 200);
+}
+export function recordTeamMessagesFailure(root: string, phase: "read" | "append", label: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "team-messages-failed", teamMessagesFailureSummary(phase, label, reason));
+}
+function teamMessageLabel(message: TeamMessage): string {
+  return message.kind + " " + message.from + " -> " + message.to;
+}
+function appendTeamMessage(root: string, message: TeamMessage): boolean {
   try {
-    return readFileSync(messagesPath(root), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as TeamMessage).slice(-limit);
-  } catch { return []; }
+    mkdirSync(join(resolve(root), ".sam"), { recursive: true });
+    appendFileSync(messagesPath(root), JSON.stringify(message) + "\n", { mode: 0o600 });
+    return true;
+  } catch (error) {
+    recordTeamMessagesFailure(root, "append", teamMessageLabel(message), error);
+    return false;
+  }
+}
+export function listTeamMessages(root: string, limit = 40): TeamMessage[] {
+  const path = messagesPath(root);
+  let raw: string;
+  try {
+    if (!existsSync(path)) return [];
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    recordTeamMessagesFailure(root, "read", "ledger", error);
+    throw error;
+  }
+  const messages: TeamMessage[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (value && typeof value === "object") messages.push(value as TeamMessage);
+    } catch { /* a torn line is skipped, never the whole history */ }
+  }
+  return messages.slice(-limit);
 }
 export function teamStatus(root: string): { members: StandingMember[]; runs: TeamRunRecord[]; messages: TeamMessage[] } {
   return { members: listTeamMembers(root), runs: listTeamRuns(root).slice(-10), messages: listTeamMessages(root) };
 }
 
 function ledger(root: string, message: TeamMessage, chatId: string | null): void {
-  mkdirSync(join(resolve(root), ".sam"), { recursive: true });
-  writeFileSync(messagesPath(root), JSON.stringify(message) + "\n", { flag: "a", mode: 0o600 });
+  appendTeamMessage(root, message);
   recordActivity(root, message.from, "team-" + message.kind, message.from + " -> " + message.to + ": " + message.text.replace(/\s+/g, " ").slice(0, 220));
   if (!chatId) return;
   try {
@@ -213,7 +371,7 @@ export function addTeamMember(root: string, input: { name: string; role: string;
     if (!reg.list().some(o => o.name === input.name)) reg.register({ name: input.name, adapter: "team", capabilities, maxConcurrency: 1 });
   } finally { reg.close(); }
   const member: StandingMember = { name: input.name, role, capabilities, tools, model: input.model ?? null, budget: { maxCalls } };
-  saveMembers(root, [...items, member]);
+  putMember(root, member);
   recordActivity(root, "sam", "team-member", "Added " + member.name + " as " + member.role + (member.model ? " on " + member.model : ""));
   return member;
 }
@@ -221,7 +379,7 @@ export function addTeamMember(root: string, input: { name: string; role: string;
 export function removeTeamMember(root: string, name: string): boolean {
   const items = readMembers(root);
   if (!items.some(m => m.name === name)) return false;
-  saveMembers(root, items.filter(m => m.name !== name));
+  deleteMember(root, name);
   const reg = new OperativeRegistry(registryPath(root));
   try {
     const found = reg.list().find(o => o.name === name);
@@ -266,7 +424,7 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
   const db = new ChatStore(root);
   try { run.chatId = db.create("Team · " + text.slice(0, 80), lead === "sam" ? null : lead).id; }
   finally { db.close(); }
-  saveRuns(root, [...readRuns(root), run]);
+  putRun(root, run);
   const reg = new OperativeRegistry(registryPath(root));
   let leaseId: string | null = null;
   let operativeId = "";
@@ -332,7 +490,9 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
   } catch (error) {
     run.status = "failed";
     run.result = error instanceof Error ? error.message : "Team run failed";
-    recordActivity(root, lead, "team-failed", run.result.slice(0, 220));
+    // No ledger line here: the terminal line below is the ONE
+    // team-failed line per failed run (it now carries this reason) -
+    // a second line in the catch double-counted the thrown shape.
   } finally {
     try { if (operativeId) reg.release(operativeId); } catch { /* capacity release is best-effort */ }
     reg.close();
@@ -342,7 +502,7 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
     }
   }
   run.finishedAt = new Date().toISOString();
-  saveRuns(root, readRuns(root).map(item => item.id === run.id ? run : item));
-  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")");
+  putRun(root, run);
+  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")" + (run.status === "failed" ? ": " + (run.result ?? "Team run failed").replace(/\s+/g, " ").slice(0, 160) : ""));
   return run;
 }
