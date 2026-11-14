@@ -8,7 +8,7 @@ import { MemoryStore } from "./memory.js";
 import { buildRecallBlock } from "./recall.js";
 import { saveNote, validatePatchTarget } from "./notes.js";
 import { detectCorrection, proposeCorrection } from "./corrections.js";
-import { listActions, proposeAction } from "./actions.js";
+import { decideAction, listActions, proposeAction } from "./actions.js";
 import { approvalAutoVia, classifyProposal, saveApprovalPolicy, scanNeverList } from "./approval-policy.js";
 import { countEnteredSetups, isFrozenStack, secondPrecision, FROZEN_CANDIDATE_NEWEST } from "./stack-watch.js";
 import { senseItemLines } from "./brief.js";
@@ -56,7 +56,7 @@ import { runRedTeamPack } from "./door-guard.js";
  */
 
 export const EVAL_BATTERY_SCRIPT = "sam-eval-battery";
-export const EVAL_TASK_TOTAL = 23;
+export const EVAL_TASK_TOTAL = 24;
 
 export interface EvalTaskResult { id: string; label: string; passed: boolean }
 export interface EvalCategory { id: string; label: string; passed: number; total: number; tasks: EvalTaskResult[] }
@@ -74,12 +74,17 @@ function scratch(fn: (root: string) => boolean): boolean {
   try { return fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
 }
 
+async function scratchAsync(fn: (root: string) => Promise<boolean>): Promise<boolean> {
+  const root = mkdtempSync(join(tmpdir(), "sam-eval-"));
+  try { return await fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
+}
+
 function seedMemory(root: string, scope: string, content: string): void {
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try { store.add({ kind: "observation", content, source: "eval-battery", scope }); } finally { store.close(); }
 }
 
-interface TaskSpec { id: string; label: string; missing: string; run: () => boolean }
+interface TaskSpec { id: string; label: string; missing: string; run: () => boolean | Promise<boolean> }
 
 const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
   { id: "inquiries", label: "Inquiry questions (the stack, counted honestly)", tasks: [
@@ -95,6 +100,7 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
     { id: "note-hard-gated", label: "\"from now on always brief me at 8\" routes to the gate instead of saving", missing: "the hard note tier (law-like content routes to the ONE gate)", run: () => scratch(root => { const r = saveNote(root, { actor: "dip", content: "From now on, always brief me at 8 in the morning." }); return r.status === "pending_owner_approval" && r.tier === "hard"; }) },
     { id: "correction-proposed", label: "\"don't call them leads, call them inquiries\" becomes one deduped law proposal", missing: "correction detection routed to the gate as a single deduped law proposal", run: () => scratch(root => { const found = detectCorrection("stop calling them leads"); if (!found) return false; const first = proposeCorrection(root, { actor: "dip", text: "stop calling them leads" }); const second = proposeCorrection(root, { actor: "dip", text: "stop calling them leads" }); return !!first && first.created && !!second && !second.created && second.proposal.id === first.proposal.id; }) },
     { id: "prompt-no-duplicates", label: "\"are u there?\" over Telegram reaches the model exactly once, not twice", missing: "prompt assembly that dedupes by message id (the current message appended after already riding in history doubled every message in the prompt)", run: () => { const kept = [{ id: "m1", role: "user" as const, content: "earlier question", source: "telegram" }, { id: "m2", role: "assistant" as const, content: "earlier answer" }, { id: "m3", role: "user" as const, content: "are u there?", source: "telegram" }]; const out = assembleTurnMessages({ kept, currentId: "m3", currentContent: "are u there?", currentSource: "telegram", resuming: false }); const missing = assembleTurnMessages({ kept: kept.slice(0, 2), currentId: "m3", currentContent: "are u there?", currentSource: "telegram", resuming: false }); return out.filter(m => m.content.includes("are u there?")).length === 1 && out[out.length - 1].content.includes("are u there?") && missing.filter(m => m.content.includes("are u there?")).length === 1; } },
+    { id: "consolidation-gated", label: "\"consolidate the duplicate CLI-is-the-foundation records\" waits on the gate, repeated reads create nothing, and approval leaves the canonical record (issue #93 part B)", missing: "the governed consolidation (a duplicate pair plus ONE owner-gated patch proposal: pending reads idempotent, approval saves the canonical record and archives the superseded duplicate, repeat reads after the decision create neither record nor proposal)", run: () => scratchAsync(async root => { const dbPath = join(resolve(root), ".sam", "missions.db"); const seed = new MemoryStore(dbPath); let aId = ""; let bId = ""; try { aId = seed.add({ kind: "observation", content: "SAM is CLI-first: the CLI is the foundation every other surface stands on.", source: "eval-battery", scope: "profile:eval" }).id; bId = seed.add({ kind: "observation", content: "The CLI is the foundation of SAM - every capability lands in the CLI first.", source: "eval-battery", scope: "profile:eval" }).id; } finally { seed.close(); } const proposal = proposeAction(root, { actor: "eval", kind: "note", title: "Consolidate duplicate: CLI is the foundation", detail: "The CLI is the foundation of SAM: every capability lands in the CLI first, and every other surface stands on the CLI.", supersedes: aId }); if (proposal.status !== "pending" || proposal.risk !== "consequential") return false; const liveCount = () => { const s = new MemoryStore(dbPath); try { return s.list(undefined, ["profile:eval"]).length; } finally { s.close(); } }; for (let round = 0; round < 2; round++) { if (listActions(root).length !== 1 || listActions(root)[0].id !== proposal.id || liveCount() !== 2) return false; } const decided = await decideAction(root, proposal.id, true); if (decided.status !== "done") return false; const m = /Memory note saved \(([0-9a-f-]{36})\)/.exec(decided.result ?? ""); if (!m) return false; const check = new MemoryStore(dbPath); try { const canonical = check.get(m[1]); if (!canonical || canonical.archived_at || !canonical.content.includes("every capability lands in the CLI first")) return false; if (!check.get(aId)?.archived_at) return false; if (check.get(bId)?.archived_at) return false; } finally { check.close(); } for (let round = 0; round < 2; round++) { const after = listActions(root); if (after.length !== 1 || after[0].status !== "done" || liveCount() !== 2) return false; } return true; }) },
   ] },
   { id: "gate", label: "Gated proposals", tasks: [
     { id: "proposal-pends", label: "a consequential proposal waits pending on the ONE gate, listed once", missing: "a proposal that pends on the gate and lists exactly once", run: () => scratch(root => { const p = proposeAction(root, { actor: "dip", kind: "say", title: "Send the update", detail: "Send the update to the group." }); const listed = listActions(root).filter(a => a.id === p.id); return p.status === "pending" && listed.length === 1; }) },
@@ -120,17 +126,18 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
 /** Run all tasks against the real machinery. Deterministic:
  *  the same tree always produces the same battery (apart from
  *  `at` and the previous-run comparison). */
-export function buildEvalBattery(previous: EvalBattery | null): EvalBattery {
+export async function buildEvalBattery(previous: EvalBattery | null): Promise<EvalBattery> {
   const categories: EvalCategory[] = [];
   const findings: EvalBattery["findings"] = [];
   let passed = 0; let total = 0;
   for (const cat of CATEGORIES) {
-    const tasks: EvalTaskResult[] = cat.tasks.map(spec => {
+    const tasks: EvalTaskResult[] = [];
+    for (const spec of cat.tasks) {
       let ok = false;
-      try { ok = spec.run(); } catch { ok = false; }
+      try { ok = await spec.run(); } catch { ok = false; }
       if (!ok) findings.push({ category: cat.id, task: spec.id, missing: spec.missing });
-      return { id: spec.id, label: spec.label, passed: ok };
-    });
+      tasks.push({ id: spec.id, label: spec.label, passed: ok });
+    }
     const p = tasks.filter(t => t.passed).length;
     passed += p; total += tasks.length;
     categories.push({ id: cat.id, label: cat.label, passed: p, total: tasks.length, tasks });
@@ -200,9 +207,9 @@ function saveEvalBattery(root: string, battery: EvalBattery): void {
 /** Run the battery, compare against the previous recorded run,
  *  record the new one (one UPSERT), and ledger one line
  *  carrying counts and the verdict only. */
-export function runEvalBattery(root: string): EvalBattery {
+export async function runEvalBattery(root: string): Promise<EvalBattery> {
   const previous = readEvalBattery(root);
-  const battery = buildEvalBattery(previous);
+  const battery = await buildEvalBattery(previous);
   saveEvalBattery(root, battery);
   recordActivity(root, "sam", "eval-battery", "Eval battery recorded: " + String(battery.overall.passed) + "/" + String(battery.overall.total) + " tasks, verdict " + battery.verdict + (battery.previous ? " (was " + String(battery.previous.passed) + "/" + String(battery.previous.total) + ")" : "") + ", " + String(battery.findings.length) + " finding(s)");
   return battery;
