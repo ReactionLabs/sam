@@ -355,6 +355,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one skill-catalog-failed ledger line still lands per genuinely failed assembly, naming the actor and the verbatim reason, so the class stays countable",
      "Catalog assembly still never breaks a turn: a failed discovery returns the empty catalog exactly as before, and an install with no skills returns it with no line, because nothing failed",
      "The full suite is green, including the skill catalog failure-ledger tests"]);
+  if (key.startsWith("binding-failed:")) return base(
+    ["bindings.ts", "telegram.ts", "webhook.ts", "status.ts"],
+    "Binding reads stop failing: '" + label + "' has ledgered " + n + " failures, and the deterministic channel bindings must load from .sam/bindings.db instead of dying at the read - while it is dead a person bound to their own scoped SAM silently lands on the channel's default profile (a routing / scoping failure dressed as an ordinary unbound message), and the status payload / CLI bindings view keep dying raw on the same touch.",
+    ["The next Telegram and webhook messages route per their bindings again instead of binding-failed lines, and the status / CLI bindings views read the registry back",
+     "Exactly one binding-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Routing still never breaks a message: a failed resolve returns the channel's default profile exactly as before, and a read already ledgered by the reader is never recorded twice",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) instead of folding the registry as empty, exactly as its readers expect",
+     "The full suite is green, including the binding failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -555,6 +563,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Correction ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "correction-failed:" + phase, label: "correction failures (" + phase + " step)" };
+    }
+    case "binding-failed": {
+      const m = summary.match(/^Binding ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "binding-failed:" + phase, label: "binding failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };

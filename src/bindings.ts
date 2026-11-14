@@ -87,14 +87,79 @@ function rowToBinding(data: string): Binding | null {
 function storeExists(root: string): boolean {
   return existsSync(bindingsDbFile(root)) || existsSync(storePath(root));
 }
-export function listBindings(root: string): Binding[] {
+// Binding failure visibility (hourly run 2026-11-14): the
+// routing seam was silent in both directions. The direct
+// readers (status, the CLI bindings view) rode listBindings
+// bare, so a dead bindings.db threw raw out of the whole
+// status payload / CLI view with no line anywhere; and
+// resolveBindingProfile swallowed the same throw and
+// returned the channel's default profile - the designed
+// answer for NO binding - so a person bound to their own
+// scoped SAM silently landed on the default profile, a
+// routing / scoping failure dressed as an ordinary unbound
+// message on every Telegram and webhook message. Now
+// listBindings owns its touch: a failed open/read ledgers
+// ONE binding-failed line and rethrows exactly (fail-closed
+// for direct readers), the error is tagged (the worthiness /
+// session-caps precedent) so a catching resolver records
+// nothing more for the same touch, and the line's shape
+// follows the caller - a direct reader's line is the generic
+// system shape (actor sam, "Binding read failed"), while the
+// resolver passes its channel as context and its line keeps
+// the resolve shape (actor the channel's default profile,
+// the channel named). Never any binding record (channel /
+// peer / profile mappings are routing data, not failure
+// data). An absent store still reads [] and ledgers nothing.
+export type BindingPhase = "read" | "resolve";
+
+export function bindingFailureSummary(phase: BindingPhase, reason: string, channelName?: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  if (phase === "resolve") return ("Binding resolve failed for channel " + (channelName ?? "unknown") + ": " + clean).slice(0, 200);
+  return ("Binding read failed: " + clean).slice(0, 200);
+}
+
+export function recordBindingReadFailure(root: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "binding-failed", bindingFailureSummary("read", reason));
+}
+
+export function recordBindingResolveFailure(root: string, channel: Channel, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, channel.profile, "binding-failed", bindingFailureSummary("resolve", reason, channel.name));
+}
+
+function tagBindingLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { bindingLedgered?: boolean }).bindingLedgered = true;
+  }
+}
+
+export function isBindingLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { bindingLedgered?: boolean }).bindingLedgered === true;
+}
+
+export function listBindings(root: string, ctx?: { channel: Channel }): Binding[] {
   if (!storeExists(root)) return [];
-  const db = openBindingsStore(root);
+  let db: Database.Database;
+  try {
+    db = openBindingsStore(root);
+  } catch (error) {
+    if (ctx) recordBindingResolveFailure(root, ctx.channel, error);
+    else recordBindingReadFailure(root, error);
+    tagBindingLedgered(error);
+    throw error;
+  }
   try {
     const rows = db.prepare("SELECT data FROM bindings ORDER BY rowid").all() as Array<{ data: string }>;
     const items: Binding[] = [];
     for (const row of rows) { const binding = rowToBinding(row.data); if (binding) items.push(binding); }
     return items;
+  } catch (error) {
+    if (ctx) recordBindingResolveFailure(root, ctx.channel, error);
+    else recordBindingReadFailure(root, error);
+    tagBindingLedgered(error);
+    throw error;
   } finally { db.close(); }
 }
 function findBindingRow(root: string, id: string): Binding | null {
@@ -190,7 +255,16 @@ export function removeBinding(root: string, id: string): boolean {
 // string form, exactly as setBinding stored it.
 export function resolveBindingProfile(root: string, channel: Channel, peer?: string | number | null): BindingResolution {
   let items: Binding[];
-  try { items = listBindings(root); } catch { return { profile: channel.profile, via: "default", binding: null }; }
+  // Routing never breaks a message: a failed read still
+  // resolves to the channel default exactly as before, but
+  // the reader ledgers ONE binding-failed resolve line for
+  // the touch (tagged, so this catch records nothing more),
+  // and the fallback is countable instead of
+  // indistinguishable from no binding existing.
+  try { items = listBindings(root, { channel }); } catch (error) {
+    if (!isBindingLedgered(error)) recordBindingResolveFailure(root, channel, error);
+    return { profile: channel.profile, via: "default", binding: null };
+  }
   const mine = items.filter(b => b.channelId === channel.id);
   if (peer !== undefined && peer !== null && String(peer).trim() !== "") {
     const peerBinding = mine.find(b => b.peer === String(peer).trim());
