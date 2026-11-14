@@ -244,8 +244,9 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["usage.ts"],
     "Usage accounting stops failing: " + n + " ledgered usage-record failures, and model spend must land in .sam/usage.jsonl instead of dying at the append - the usage summaries and the dashboard's usage-today number keep reporting the frozen totals as truth while the ledger is dead, so an unrecorded spend is also an understated one.",
     ["The next model responses record their usage lines in usage.jsonl again instead of usage-failed lines",
-     "Exactly one usage-failed ledger line still lands per genuinely failed write, with the model and verbatim reason, so the class stays countable",
+     "Exactly one usage-failed ledger line still lands per genuinely failed touch, with the model (on a write) and verbatim reason, so the class stays countable",
      "Accounting still never breaks a turn: a failed usage write returns null and the turn completes exactly as before",
+     "A failed usage read still fails closed (one ledger line, then the rethrow) instead of folding to a false zero, exactly as its readers expect",
      "The full suite is green, including the accounting failure-ledger tests"]);
   if (key === "session-caps-failed") return base(
     ["session-caps.ts"],

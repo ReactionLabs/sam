@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
-import { recordUsage, usageFailureSummary, usageSummary } from "./usage.js";
+import { readUsage, recordUsage, usageFailureSummary, usageReadFailureSummary, usageSummary, usageToday } from "./usage.js";
 import { noteCapTrip, recordSessionTurn, sessionCapStatus, sessionCapsFailureSummary, sessionUsageToday } from "./session-caps.js";
 import { classifyDefect, rankDefects } from "./self-work.js";
 
@@ -26,6 +26,13 @@ import { classifyDefect, rankDefects } from "./self-work.js";
 // folded [] would read as zero spent and the gate would never
 // trip): one ledger-read line, the error tagged so the trip's
 // catch never counts it twice, then the rethrow.
+// The usage READ seam joined later the same day (hourly run
+// 19:04): readUsage was the one silent touch left in the
+// accounting pair - its catch folded a dead read to [] with no
+// line anywhere, so every summary reported zero spend for all
+// time, indistinguishable from a fresh install. That read now
+// fail-closes the same way (a spend record's zero is the unsafe
+// lie): one usage-failed line naming the read, then the rethrow.
 const ENTRY = { actor: "dip", route: "chat" as const, tier: "main" as const, model: "MiniMax-M2.5", promptTokens: 987654, completionTokens: 5 };
 
 function scratch() {
@@ -50,8 +57,35 @@ test("usage-failed: a dead usage ledger ledgers one line per failed write and st
     assert.equal(lines[0].actor, "dip");
     assert.ok(lines[0].summary.startsWith("Usage record failed for model MiniMax-M2.5: "), lines[0].summary);
     assert.ok(!lines[0].summary.includes("987654"), "the entry's token counts never enter the line");
-    assert.equal(usageSummary(root).calls, 0, "nothing was recorded - the frozen total is exactly why the failure line matters");
+    assert.throws(() => usageSummary(root), /EISDIR/,
+      "nothing was recorded, and the dead read no longer folds to a false zero to say so - it fails closed (19:04)");
+    const after = readActivity(root, 100, { kind: "usage-failed" });
+    assert.equal(after.length, 3, "the summary's failed read adds exactly one read line to the two write lines");
+    assert.ok(after[2].summary.startsWith("Usage ledger read failed: "), after[2].summary);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("usage-failed: a dead usage read fails closed with one ledger-read line, never a folded zero", () => {
+  const root = scratch();
+  try {
+    plantDir(root, "usage.jsonl"); // every read throws EISDIR
+    assert.throws(() => readUsage(root), /EISDIR/,
+      "a spend record folded to [] would report zero spend for all time as truth");
+    const lines = readActivity(root, 100, { kind: "usage-failed" });
+    assert.equal(lines.length, 1, "exactly one line for the failed read");
+    assert.equal(lines[0].actor, "sam", "the reader is the system, not a profile");
+    assert.ok(lines[0].summary.startsWith("Usage ledger read failed: "), lines[0].summary);
+    assert.throws(() => usageToday(root), /EISDIR/, "the today fold surfaces the same failure instead of a false zero");
+    assert.equal(readActivity(root, 100, { kind: "usage-failed" }).length, 2, "one line per failed touch - the recurrence is the countable signal");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+
+  const ok = scratch();
+  try {
+    assert.deepEqual(readUsage(ok), [], "an absent ledger still reads empty - a fresh install has genuinely spent nothing");
+    recordUsage(ok, ENTRY);
+    assert.equal(readUsage(ok).length, 1, "the healthy read returns its record");
+    assert.equal(readActivity(ok, 100, { kind: "usage-failed" }).length, 0, "no failure line on the healthy or absent read path");
+  } finally { rmSync(ok, { recursive: true, force: true }); }
 });
 
 test("usage-failed: a healthy write records and ledgers nothing; malformed usage stays silent by design", () => {
@@ -136,6 +170,9 @@ test("session-caps-failed: the all-chats usage read ledgers one line with no cha
 test("accounting failure summaries collapse and cap the verbatim reason", () => {
   const usage = usageFailureSummary("mock", "EISDIR: illegal operation\n  on a directory");
   assert.ok(!usage.includes("\n"), "the reason is one line");
+  const usageRead = usageReadFailureSummary("EISDIR: illegal operation\n  on a directory");
+  assert.ok(usageRead.startsWith("Usage ledger read failed: ") && !usageRead.includes("\n") && usageRead.length <= 200,
+    "the read summary names the seam, collapses, and caps");
   const caps = sessionCapsFailureSummary("turn record", "abcd1234-0000-4000-8000-000000000000", "x".repeat(500));
   assert.ok(caps.length <= 200, "the summary is capped at 200");
 });

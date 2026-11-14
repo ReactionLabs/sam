@@ -14,6 +14,9 @@ import { recordActivity } from "./activity.js";
 // and a failed write ledgers one usage-failed activity line instead of
 // vanishing (the summaries keep reading the frozen totals as truth, so
 // the failure line is the only signal they have stopped moving).
+// Reading is the opposite discipline: a failed read ledgers the same
+// one line and rethrows, because a summary folded from an unreadable
+// ledger would report zero spend as truth (see readUsage).
 // A provider that reports no usage records nothing (never an invented 0).
 export interface UsageEntry {
   at: string;
@@ -51,6 +54,24 @@ export function recordUsageFailure(root: string, actor: string, model: string, e
   recordActivity(root, actor, "usage-failed", usageFailureSummary(model, reason));
 }
 
+// One ledger line per failed usage READ (gap found 2026-11-13,
+// hourly run 19:04): the read seam was the one silent touch left
+// in the accounting pair - readUsage folded a dead read to []
+// with no line anywhere, so every summary reported 0 calls /
+// 0 tokens for all time, indistinguishable from a fresh install
+// that has spent nothing. The reader is the system, so the line
+// carries actor "sam" (the session-caps read precedent) and no
+// model; token counts never enter it.
+export function usageReadFailureSummary(reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Usage ledger read failed: " + clean).slice(0, 200);
+}
+
+export function recordUsageReadFailure(root: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "usage-failed", usageReadFailureSummary(reason));
+}
+
 export function recordUsage(
   root: string,
   entry: Omit<UsageEntry, "at" | "totalTokens"> & { totalTokens?: number },
@@ -82,19 +103,36 @@ export function recordUsage(
 }
 
 export function readUsage(root: string): UsageEntry[] {
+  // The read seam follows the house contract fail-closed (gap
+  // found 2026-11-13, hourly run 19:04): this ledger is a spend
+  // RECORD whose summaries are quoted as truth, and a dead read
+  // folded to [] reads as zero spend for all time - the unsafe
+  // lie, understating spend to nothing while the class stayed
+  // uncountable. So a failed filesystem touch ledgers ONE
+  // usage-failed line (the read recorder above) and rethrows
+  // exactly: usageSummary / usageToday / the CLI list surface
+  // the error instead of a false zero, now with the true cause
+  // countable under its own kind (the session-caps /
+  // verification / goldfish read precedent). An absent ledger
+  // still reads [] - a fresh install has genuinely spent
+  // nothing - and per-line torn parsing stays forgiving; only
+  // the filesystem touch is guarded.
   const file = usagePath(root);
-  if (!existsSync(file)) return [];
+  let raw: string | null;
   try {
-    return readFileSync(file, "utf8")
-      .split("\n")
-      .filter(Boolean)
-      .map(raw => {
-        try { return JSON.parse(raw) as UsageEntry; } catch { return null; }
-      })
-      .filter((x): x is UsageEntry => x !== null && validCount(x.totalTokens));
-  } catch {
-    return [];
+    raw = existsSync(file) ? readFileSync(file, "utf8") : null;
+  } catch (error) {
+    recordUsageReadFailure(root, error);
+    throw error;
   }
+  if (raw === null) return [];
+  return raw
+    .split("\n")
+    .filter(Boolean)
+    .map(line => {
+      try { return JSON.parse(line) as UsageEntry; } catch { return null; }
+    })
+    .filter((x): x is UsageEntry => x !== null && validCount(x.totalTokens));
 }
 
 export interface UsageBucket {
