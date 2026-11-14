@@ -154,7 +154,7 @@ npm run build
 npm test
 ```
 
-The suite (997 tests, measured on main at the v0.2.0 landing) covers the turn, tools, gates, doors, heartbeats,
+The suite (1135 tests, measured on main at the v0.3.0 landing) covers the turn, tools, gates, doors, heartbeats,
 compaction, backups, and a guard that compiles the dashboard page's inline
 script, so a dead page cannot pass.
 
