@@ -4,7 +4,7 @@ import { connectorChat } from "./connector-chat.js";
 import { ownToolsChat } from "./own-tools.js";
 import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
-import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
+import { detectCorrection, tryRouteCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { recordActivity } from "./activity.js";
 import { toolBudget, type TurnRoute } from "./budgets.js";
@@ -170,10 +170,14 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       let correctionNote="";
       const correction=detectCorrection(content);
       if(!resuming&&correction&&(opts?.route??"chat")==="chat"){
-        try{
-          const routed=proposeCorrection(root,{actor:profileName,chatId,text:content});
-          if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
-        }catch{/* correction plumbing never breaks a turn */}
+        // Correction plumbing never breaks a turn - and a failed
+        // routing is no longer silent either: tryRouteCorrection
+        // ledgers one correction-failed line on a throw and
+        // returns null, so the turn continues without the note
+        // exactly as the old bare catch did, but the lost
+        // in-turn application is countable (corrections.ts).
+        const routed=tryRouteCorrection(root,{actor:profileName,chatId,text:content});
+        if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
       }
       if(!resuming)for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;

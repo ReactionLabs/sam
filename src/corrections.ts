@@ -98,6 +98,39 @@ export function proposeCorrection(root: string, input: { actor: string; chatId?:
   recordActivity(root, input.actor, "correction", "Correction proposed as law: " + found.statement);
   return { proposal, created: true };
 }
+// Correction routing failure visibility (hourly run 2026-11-14):
+// the LIVE TURN's correction catch was bare - proposeCorrection
+// throwing (a dead actions.db or preferences.db) was swallowed
+// under "correction plumbing never breaks a turn", the turn
+// continued with no correction note, and SAM neither followed
+// the correction in that reply nor acknowledged a proposal -
+// the P6 contract failing silently, with no correction-failed
+// kind anywhere to count it. (The consolidation scan ledgers
+// the same routing failure as consolidate-failed:corrections,
+// but it cannot restore the in-turn application the live path
+// lost.) The guarded wrapper below is the live turn's seam:
+// a throw ledgers ONE correction-failed line (phase propose;
+// the actor named; the verbatim reason collapsed + capped;
+// never the owner's message text or the correction statement)
+// and returns null exactly as the swallowed catch did, so the
+// turn still never breaks. proposeCorrection itself still
+// throws, so its direct callers are unchanged: the CLI
+// surfaces the error, and consolidation aggregates its own
+// failures into its one consolidate-failed line per run -
+// it calls proposeCorrection directly, never this wrapper,
+// so one failed touch never ledgers twice.
+export function correctionFailureSummary(actor: string, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Correction propose failed for " + actor + ": " + clean).slice(0, 200);
+}
+export function recordCorrectionFailure(root: string, actor: string, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, actor, "correction-failed", correctionFailureSummary(actor, reason));
+}
+export function tryRouteCorrection(root: string, input: { actor: string; chatId?: string | null; text: string }): { proposal: ActionProposal; created: boolean } | null {
+  try { return proposeCorrection(root, input); }
+  catch (error) { recordCorrectionFailure(root, input.actor, error); return null; }
+}
 // When a message is a correction, a preference rule extracted from the same
 // words must not slip in as instant law beside the gate: drop rule extractions
 // that restate the correction; likes and dislikes from the message still note.

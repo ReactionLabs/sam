@@ -355,6 +355,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Exactly one skill-catalog-failed ledger line still lands per genuinely failed assembly, naming the actor and the verbatim reason, so the class stays countable",
      "Catalog assembly still never breaks a turn: a failed discovery returns the empty catalog exactly as before, and an install with no skills returns it with no line, because nothing failed",
      "The full suite is green, including the skill catalog failure-ledger tests"]);
+  if (key.startsWith("correction-failed:")) return base(
+    ["corrections.ts", "agent-turn.ts"],
+    "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
+    ["The next live corrections produce their deduped law proposal on the gate again instead of correction-failed lines, and the correction note rides that turn's prompt",
+     "Exactly one correction-failed ledger line still lands per genuinely failed routing, naming the phase and the verbatim reason, so the class stays countable",
+     "Correction routing still never breaks a turn: a failed routing returns null and the turn completes without the note exactly as before, and proposeCorrection still throws for its direct callers (the CLI surfaces it; consolidation aggregates its own line, never a second correction-failed line for one touch)",
+     "The full suite is green, including the correction failure-ledger tests"]);
   if (key === "delivery-failed") return base(
     ["heartbeat.ts", "delivery-outbox.ts", "loop-revisit.ts"],
     "Heartbeat deliveries stop failing: " + n + " ledgered delivery failures, and a changed heartbeat update must reach its channel (or the channel's failure must be fixed at its cause) instead of retrying silently and giving up at the attempt cap.",
@@ -543,6 +550,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Skill catalog ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "skill-catalog-failed:" + phase, label: "skill catalog failures (" + phase + " step)" };
+    }
+    case "correction-failed": {
+      const m = summary.match(/^Correction ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "correction-failed:" + phase, label: "correction failures (" + phase + " step)" };
     }
     case "delivery-failed":
       return { key: "delivery-failed", label: "heartbeat delivery failures" };
