@@ -248,6 +248,28 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Accounting still never breaks a turn: a failed usage write returns null and the turn completes exactly as before",
      "A failed usage read still fails closed (one ledger line, then the rethrow) instead of folding to a false zero, exactly as its readers expect",
      "The full suite is green, including the accounting failure-ledger tests"]);
+  if (key.startsWith("context-failed:")) return base(
+    ["context-meter.ts", "agent-turn.ts"],
+    "Context metering stops failing: " + n + " ledgered context-meter failures, and a turn's injected-context size must land in .sam/context.jsonl instead of dying at the touch - while the meter is dead, per-turn context growth (the bloat class requirement 5 exists to catch) is invisible again, and a dead read folded into summaries would report zero context as truth.",
+    ["The next turns record their context lines in context.jsonl again instead of context-failed lines, and `sam usage context` returns the recorded turns",
+     "Exactly one context-failed ledger line still lands per genuinely failed touch, naming write or read and the verbatim reason, so the class stays countable",
+     "Metering still never breaks a turn: a failed context write returns null and the turn completes exactly as before",
+     "A failed context read still fails closed (one ledger line, then the rethrow) instead of folding to a false zero, exactly as its readers expect",
+     "The full suite is green, including the context-meter failure tests"]);
+  if (key === "fence-integrity-failed") return base(
+    ["fence-integrity.ts", "compaction.ts", "preferences.ts"],
+    "Fence integrity checks stop failing: " + n + " ledgered fence-integrity failures mean a compaction fold verified the profile's standing law against its before snapshot and found it MOVED - a changed law record or a lost identifier. Standing law is never the summarizer's to alter; a real movement means something outside compaction rewrote law mid-fold or the store is corrupt, and until the cause is found every fold on that profile refuses its compacted context.",
+    ["The next folds on the profile complete with the law snapshot byte-identical across the fold (same ids, same statements, every identifier present) instead of fence-integrity-failed lines",
+     "Exactly one fence-integrity-failed ledger line still lands per genuinely moved fence, naming the changed records and lost identifiers, so the class stays countable",
+     "The tamper control still fails the check: a deliberately altered after-read is refused by name in the tests, so the instrument is proven able to say no",
+     "The full suite is green, including the fence-integrity and compaction tests"]);
+  if (key.startsWith("episodes-failed:")) return base(
+    ["episodes.ts"],
+    "Episode evidence reads stop failing: " + n + " ledgered episodes-evidence failures mean a stored evidence row was not valid JSON when a consolidation write met it, and the row had to be rebuilt from the day's new messages alone - the day's earlier evidence was lost silently before this class existed, and a recurring cause (a writer producing torn rows) must be found rather than rebuilt around forever.",
+    ["The next consolidations read their stored evidence rows cleanly and merge the full day instead of episodes-failed lines",
+     "Exactly one episodes-failed ledger line still lands per genuinely corrupt row, naming the profile:date key and the verbatim reason, so the class stays countable",
+     "A corrupt row still never breaks the tick: the row rebuilds from the day's new messages and the episode for the day still lands",
+     "The full suite is green, including the episodes failure tests"]);
   if (key === "session-caps-failed") return base(
     ["session-caps.ts"],
     "The session-cap ledger stops failing: " + n + " ledgered session-caps failures, and a completed turn's spend record (or a cap trip) must land in .sam/session-caps.jsonl instead of dying at the append - while the write threw, a finished turn could be reported failed and a real model error masked by the accounting error in its place.",
@@ -579,6 +601,18 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Recall ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "recall-failed:" + phase, label: "recall failures (" + phase + " step)" };
+    }
+    case "context-failed": {
+      const m = summary.match(/^Context meter ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "context-failed:" + phase, label: "context meter failures (" + phase + " step)" };
+    }
+    case "fence-integrity-failed":
+      return { key: "fence-integrity-failed", label: "fence integrity failures (standing law moved across a compaction fold)" };
+    case "episodes-failed": {
+      const m = summary.match(/^Episodes evidence ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "episodes-failed:" + phase, label: "episode evidence failures (" + phase + " step)" };
     }
     case "skill-catalog-failed": {
       const m = summary.match(/^Skill catalog ([a-z]+) failed/);

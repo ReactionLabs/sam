@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { PreferenceStore, extractPreferences } from "./preferences.js";
+import { captureSuppressionsFromText, filterUnsuppressed } from "./capture-guard.js";
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
@@ -444,7 +445,12 @@ export function consolidatePreferences(root:string):{scanned:number;noted:number
     // never lets a corrected rule slip in here as instant law.
     let correction=null as ReturnType<typeof detectCorrection>;
     try{correction=detectCorrection(msg.content);if(correction){const routed=proposeCorrection(root,{actor:profile,chatId:chat.id,text:msg.content});if(routed?.created)corrections++;}}catch(e){/* the gate never breaks a tick - but its failure is counted and ledgered once per run below, never silent: this scan is the last capture path and the watermark advances past the message either way */correctionFailures++;if(correctionFailureError===null)correctionFailureError=e;}
-    for(const found of withoutCorrectedRules(extractPreferences(msg.content),correction)){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
+    // The capture guard (Program H item A): this scan is the
+    // second capture path, so do-not-store instructions are
+    // recorded here too, before the preference extraction they
+    // bind - a suppressed statement never reaches the store.
+    captureSuppressionsFromText(root,profile,msg.content,chat.id);
+    for(const found of filterUnsuppressed(root,profile,withoutCorrectedRules(extractPreferences(msg.content),correction))){prefs.note(profile,found.statement,found.kind,chat.id);noted++;}
    }
    state.chats[chat.id]=newest;
   }

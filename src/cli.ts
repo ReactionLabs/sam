@@ -114,6 +114,8 @@ import { modelRoutingTable } from "./model-routing.js";
 import { connectors } from "./connectors.js";
 import { recordActivity } from "./activity.js";
 import { usageSummary, readUsage } from "./usage.js";
+import { contextSummary, contextToday } from "./context-meter.js";
+import { CaptureGuardStore, addSuppression } from "./capture-guard.js";
 
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
@@ -385,7 +387,7 @@ contextAuditCmd.command("show").description("The last recorded context audit, or
 const loopAuditCmd=program.command("loop-audit").description("The loop audit (HARNESS INTELLIGENCE item 3): SAM's turn loop scored in code - no model call - with functional checks over the real loop machinery (the verification gate over a synthetic ledger, the chat-turn verification note, the repeated-failure repair guard's signature and stub, route-tiered budgets, the open-loop store coming due on schedule, and the honest budget / loader / retry endings) plus the live loop state (verification state, open and due loops); a run records in .sam/loop-audit.db so loop changes are measured before/after");
 loopAuditCmd.command("run").description("Run the audit now over the live loop machinery and stores, record it, and print the scorecard as plain text (this is the sam-loop-audit script job's stdout)").action(()=>output(loopAuditText(runLoopAudit(program.opts().workspace))));
 loopAuditCmd.command("show").description("The last recorded loop audit, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readLoopAudit(program.opts().workspace)));
-const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 23 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
+const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 25 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
 evalBatteryCmd.command("run").description("Run the battery now against the real machinery, record it with its verdict against the previous run, and print the scorecard as plain text (this is the sam-eval-battery script job's stdout)").action(async()=>output(evalBatteryText(await runEvalBattery(program.opts().workspace))));
 evalBatteryCmd.command("show").description("The last recorded eval battery, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readEvalBattery(program.opts().workspace)));
 const vaultCmd=program.command("vault").description("The SAM vault (Dip ruling 2026-11-12): an owner-only store for the few keys SAM's hands may need, kept outside the SAM home and outside .sam (the backup never carries it, the workspace readers never reach it; directory 0700, store 0600). A credential is referenced by NAME only: the executor injects its value into a child process at run time - the consumers are git-clone and the owner-approved git-push, which gain the credential for their declared hosts over HTTPS via askpass, and a vault-bound MCP connector (sam pair), whose executor resolves the value at call time into its Authorization header alone - and every deposit, removal, and use is ledgered with name, purpose, and outcome, never the value. Deposit is operator-only: the value arrives from an env var, a file, or stdin, never from argv and never from a chat; no command here ever prints a value");
@@ -526,6 +528,7 @@ filesCmd.command("clear").argument("<name>").argument("<file>").description("Rem
 const usageCmd=program.command("usage").description("Token spend (P11): provider-reported usage recorded per call in .sam/usage.jsonl, by model, route, tier, and profile");
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
+usageCmd.command("context").option("--actor <name>","Only this profile").description("Injected-context size per turn (Program H): chars and words measured at assembly in .sam/context.jsonl, with the memory-derived tiers (law, recall, standing, summary, history) broken out - the size metric that rides beside token spend").action((o:{actor?:string})=>output({today:contextToday(program.opts().workspace),allTime:contextSummary(program.opts().workspace,o.actor?{actor:o.actor}:{})}));
 program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
   const root=program.opts().workspace as string;
   let targets;
@@ -853,6 +856,15 @@ memory.command("search").argument("<query>").action((query:string)=>{
 });
 memory.command("archive").argument("<id>").action((id:string)=>{
   const mem=new MemoryStore(dbPath()); try{output({archived:mem.archive(id)});}finally{mem.close();}
+});
+memory.command("suppress").argument("<phrase...>").option("--profile <name>","Profile the suppression binds","sam").description("Record a standing do-not-store instruction (Program H): the phrase is refused by every automatic memory capture path and by MemoryStore.add itself, from now on, until unsuppressed").action((phrase:string[],o:{profile:string})=>{
+  output(addSuppression(program.opts().workspace,{profile:o.profile,needle:phrase.join(" "),source:"cli"}));
+});
+memory.command("suppressions").option("--profile <name>","Only this profile").option("--all","Include revoked").description("List capture suppressions (standing do-not-store instructions), active first-class; the needle is shown because this is the operator's own door").action((o:{profile?:string;all?:boolean})=>{
+  const guard=new CaptureGuardStore(program.opts().workspace); try{output(guard.list(o.profile,!!o.all));}finally{guard.close();}
+});
+memory.command("unsuppress").argument("<id>").description("Revoke a capture suppression by id (a status flip, never a delete - the instruction's record survives like revoked law)").action((id:string)=>{
+  const guard=new CaptureGuardStore(program.opts().workspace); try{output({revoked:guard.revoke(id)});}finally{guard.close();}
 });
 
 const subagentCmd=program.command("subagent").description("Debug invisible helpers a chat turn started on its own. list, status, and cancel inspect them. The owner-facing path is the sam_spawn_subagent tool: the chat shows Working on it, then the folded answer, never the helper's own text. A child with no pinned connector runs on the plain chat path");

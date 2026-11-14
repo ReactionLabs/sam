@@ -1,8 +1,11 @@
+import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore, type ChatCompaction, type ChatMessage } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { episodeScope } from "./episodes.js";
 import { recordActivity } from "./activity.js";
+import { activeSuppressions, needleMatches, recordSuppressionBlock, MemorySuppressedError, type CaptureSuppression } from "./capture-guard.js";
+import { readLawSnapshot, verifyLawAcrossFold, recordFenceIntegrityFailure, fenceIntegrityFailureSummary, digestLaw, type LawSnapshot } from "./fence-integrity.js";
 
 // Context compression with a memory flush (Plan Phase A, item 2 - the
 // Hermes/OpenClaw runtime spine). Before this, agent-turn built every
@@ -127,6 +130,17 @@ export function recordCompactionFailure(root: string, actor: string, chatId: str
   recordActivity(root, actor, "compaction-failed", compactionFailureSummary(chatId, phase, reason));
 }
 
+// The fence snapshot reader for both sides of a fold: a profile
+// with no preference store yet has no law to protect, so the
+// snapshot is empty rather than the read creating the store on
+// a path that is otherwise read-only until a fold lands.
+export function snapshotLawIfStoreExists(root: string, profile: string): LawSnapshot {
+  if (!existsSync(join(resolve(root), ".sam", "preferences.db"))) {
+    return { profile, entries: [], digest: digestLaw([]) };
+  }
+  return readLawSnapshot(root, profile);
+}
+
 // Build the prompt context for one turn: the stored summary (if any)
 // plus the kept raw tail, folding first when the history crossed a
 // trigger. Purely a read model over the chat store plus, on a fold,
@@ -151,6 +165,12 @@ export function buildChatContext(
   if (need && history.length - COMPACT_KEEP_MESSAGES > covered) {
     const boundary = foldBoundary(history, covered, history.length - COMPACT_KEEP_MESSAGES);
     if (boundary > covered) {
+      // FENCE VERBATIM (Program H item C): snapshot the profile's
+      // standing law before the fold; it is verified byte-for-byte
+      // after the save, below. Law never enters the summarizer -
+      // this pair is the standing proof that it did not move,
+      // with identifiers re-checked by name.
+      const lawBefore = snapshotLawIfStoreExists(root, profile);
       const segment = history.slice(covered, boundary);
       const digest = digestSegment(segment);
       // FLUSH FIRST: the durable memory record exists before the
@@ -162,24 +182,63 @@ export function buildChatContext(
         const flushSource = "compaction:" + chatId + ":" + boundary;
         const scope = episodeScope(profile);
         try {
+          // The capture guard (Program H item A): suppressed
+          // messages are dropped from the flush digest before it
+          // is written - the flush is an automatic capture path,
+          // so a standing do-not-store instruction binds it. The
+          // in-prompt summary is the chat's own context and is
+          // NOT filtered (the raw turns remain in the chat record
+          // regardless); only the durable memory write is.
+          const suppressions = activeSuppressions(root, profile);
+          let flushDigest = digest;
+          let suppressedHit: CaptureSuppression | null = null;
+          if (suppressions.length) {
+            const kept = segment.filter(m => {
+              const hit = suppressions.find(s => needleMatches(s.needle, m.content));
+              if (hit) { if (!suppressedHit) suppressedHit = hit; return false; }
+              return true;
+            });
+            flushDigest = digestSegment(kept);
+          }
           const mem = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
           try {
             const alreadyFlushed = mem.list(undefined, [scope]).some(r => r.source === flushSource);
-            if (!alreadyFlushed) mem.add({
+            if (!alreadyFlushed && flushDigest.trim()) mem.add({
               kind: "observation",
               content: "Chat compaction flush · chat " + chatId.slice(0, 8) + " · profile " + profile +
-                " · messages " + (covered + 1) + "-" + boundary + "\n" + digest,
+                " · messages " + (covered + 1) + "-" + boundary + "\n" + flushDigest,
               source: flushSource,
               scope,
             });
           } finally { mem.close(); }
-        } catch (error) { recordCompactionFailure(root, profile, chatId, "flush", error); throw error; }
+          if (suppressedHit) recordSuppressionBlock(root, profile, "compaction", suppressedHit);
+        } catch (error) {
+          // The store-level backstop can still refuse the joined
+          // digest (a needle whose words are spread across
+          // messages): the flush is skipped and ledgered, the
+          // fold itself proceeds - suppression binds the memory
+          // write, not the chat's own compaction.
+          if (error instanceof MemorySuppressedError) recordSuppressionBlock(root, profile, "compaction", error.hit);
+          else { recordCompactionFailure(root, profile, chatId, "flush", error); throw error; }
+        }
       }
       summary = mergeSummary(summary, digest, boundary);
       try {
         const saved = new ChatStore(root);
         try { saved.setCompaction(chatId, boundary, summary); } finally { saved.close(); }
       } catch (error) { recordCompactionFailure(root, profile, chatId, "save", error); throw error; }
+      // FENCE VERBATIM, the after side: the profile's law must be
+      // byte-identical to the before snapshot, identifiers
+      // included. A moved fence refuses the fold's context (the
+      // caller fails open to the raw tail under its standing
+      // contract) and ledgers ONE fence-integrity-failed line -
+      // a compaction that altered standing law is never quietly
+      // trusted.
+      const fenceCheck = verifyLawAcrossFold(root, profile, lawBefore, snapshotLawIfStoreExists);
+      if (!fenceCheck.ok) {
+        recordFenceIntegrityFailure(root, profile, profile, fenceCheck);
+        throw new Error(fenceIntegrityFailureSummary(profile, fenceCheck));
+      }
       foldedCount = boundary - covered;
       covered = boundary;
       compactedNow = true;

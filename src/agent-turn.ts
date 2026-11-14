@@ -12,6 +12,9 @@ import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
 import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { recordUsage } from "./usage.js";
+import { recordContextMeter } from "./context-meter.js";
+import { countWords } from "./memory.js";
+import { captureSuppressionsFromText, filterUnsuppressed } from "./capture-guard.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { composeSystemPrompt, standingPromptParts } from "./standing-files.js";
 import { buildChatContext } from "./compaction.js";
@@ -189,7 +192,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
         const routed=tryRouteCorrection(root,{actor:profileName,chatId,text:content});
         if(routed)correctionNote=" The owner just corrected you. That correction is now a proposed standing law pending owner approval (\""+routed.proposal.detail+"\"): follow it in this reply, and briefly acknowledge that it has been proposed as law and is not standing law yet. Do not claim it is already law.";
       }
-      if(!resuming)for(const found of withoutCorrectedRules(extractPreferences(content),correction))prefs.note(profileName,found.statement,found.kind,chatId);
+      // The capture guard (Program H item A): a do-not-store
+      // instruction in the owner's own words is recorded FIRST,
+      // so it binds this message's own preference capture below
+      // and every later automatic write; suppressed finds never
+      // reach the preference store.
+      if(!resuming)captureSuppressionsFromText(root,profileName,content,chatId);
+      if(!resuming)for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(content),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
     }else{
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName));
@@ -239,6 +248,23 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
     ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming})];
+  // Context metering (Program H item D): the injected context
+  // of THIS turn, measured at assembly in chars and words with
+  // the memory-derived tiers broken out, lands in
+  // .sam/context.jsonl beside the token spend - growth in what
+  // a turn carries is a number before it is a feeling. The
+  // meter never breaks a turn (its recorder fails soft and
+  // ledgers; the arithmetic is guarded the same way).
+  try{
+    const systemCount=contextSummary?2:1;
+    const historyChars=messages.slice(systemCount).reduce((n,m)=>n+m.content.length,0);
+    recordContextMeter(root,{actor:profileName,route,
+      systemChars:systemContent.length,lawChars:lawBlock.length,recallChars:recallBlock.length,
+      standingChars:standing.stable.length+standing.context.length,
+      summaryChars:contextSummary?contextSummary.length:0,historyChars,
+      totalChars:systemContent.length+(contextSummary?contextSummary.length:0)+historyChars,
+      totalWords:messages.reduce((n,m)=>n+countWords(m.content),0)});
+  }catch{/* the meter never breaks a turn */}
   let partialId:string|null=resuming?.id??null;
   let reply="";
   let answered=false;
