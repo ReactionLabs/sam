@@ -592,6 +592,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed direct read rethrows instead of folding the store as no designation (which would silently un-fence or mis-fence the coder hands dressed as an unset root), a touch already ledgered by the store is never recorded twice by a catching caller, and a failure line never carries any config content (the designated path is fence data, not failure data)",
      "An absent store still reads as no designation with no line and creates nothing, exactly as a fresh install expects, torn rows still parse forgiving, and setCodeRoot's validation refusals (missing / non-directory / SAM-home fences) still ledger nothing",
      "The full suite is green, including the code store failure-ledger tests"]);
+  if (key.startsWith("engine-connection-store-failed:")) return base(
+    ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
+    "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
+    ["The next status reads, engine connects, provider choices, and engine runs resolve their marker and provider again instead of engine-connection-store-failed lines",
+     "Exactly one engine-connection-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed direct read rethrows instead of folding the store as no connection (which would silently un-connect a verified engine route dressed as never-connected), the run layer's mirror still folds to the default provider on a failed resolve exactly as before, a touch already ledgered by the store is never recorded twice, and a failure line never carries any marker or provider content (the recorded binary path and provider are fence data, not failure data)",
+     "An absent store still reads as no connection / the default provider with no line and creates nothing, torn rows still parse forgiving, and setEngineProvider's invalid-provider refusal still ledgers nothing",
+     "The full suite is green, including the engine connection store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -937,6 +945,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Code store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "code-store-failed:" + phase, label: "code store failures (" + phase + " step)" };
+    }
+    case "engine-connection-store-failed": {
+      const m = summary.match(/^Engine connection store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "engine-connection-store-failed:" + phase, label: "engine connection store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);

@@ -6,6 +6,7 @@ import { openDatabase } from "./sqlite.js";
 import { engineBinary } from "./engine.js";
 import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { recordActivity } from "./activity.js";
+import { failEngineConnectionStore } from "./engine-connection-failure.js";
 
 // CLI dressing item 3 (Dip, 2026-11-10; OpenClaw borrow, research doc
 // section 6 item 4): "Connect Claude Code" the CLI-reuse way. Before
@@ -299,19 +300,34 @@ function migrateLegacyConnection(db: Database.Database, root: string): void {
 function connectionStoreExists(root: string): boolean {
   return existsSync(connectionDbPath(root)) || existsSync(connectionPath(root));
 }
+// Failure visibility (hourly run 2026-11-15): the touches
+// below own their failure through the shared seam in
+// engine-connection-failure.ts - readEngineConnection /
+// readEngineProviderRecord at phase read, saveEngineConnection
+// / deleteEngineConnection / setEngineProvider at phase
+// write, one engine-connection-store-failed line per failed
+// touch, tagged and rethrown exactly. An absent store still
+// reads as no connection / the default provider creating
+// nothing, torn rows still parse forgiving, and
+// setEngineProvider's invalid-provider refusal runs before
+// any touch and ledgers nothing.
 function saveEngineConnection(root: string, record: EngineConnection): void {
-  const db = openConnectionStore(root);
+  let db: Database.Database;
+  try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "write", error); }
   try {
-    db.prepare("INSERT INTO engine_connection (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO engine_connection (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
+  } catch (error) { failEngineConnectionStore(root, "write", error); }
+  finally { db!.close(); }
 }
 function deleteEngineConnection(root: string): boolean {
   if (!connectionStoreExists(root)) return false;
-  const db = openConnectionStore(root);
+  let db: Database.Database;
+  try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "write", error); }
   try {
-    const result = db.prepare("DELETE FROM engine_connection WHERE id = 1").run();
+    const result = db!.prepare("DELETE FROM engine_connection WHERE id = 1").run();
     return result.changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failEngineConnectionStore(root, "write", error); }
+  finally { db!.close(); }
 }
 
 // The store's read door: the recorded route marker through
@@ -320,12 +336,14 @@ function deleteEngineConnection(root: string): boolean {
 // all creates nothing.
 export function readEngineConnection(root: string): EngineConnection | null {
   if (!connectionStoreExists(root)) return null;
-  const db = openConnectionStore(root);
+  let db: Database.Database;
+  try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM engine_connection WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM engine_connection WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return null;
     try { return parseEngineConnection(JSON.parse(row.data)); } catch { return null; }
-  } finally { db.close(); }
+  } catch (error) { failEngineConnectionStore(root, "read", error); }
+  finally { db!.close(); }
 }
 
 // --- the provider choice --------------------------------------------------
@@ -338,15 +356,17 @@ export interface EngineProviderRecord { provider: EngineProvider; updatedAt: str
  *  nothing. */
 export function readEngineProviderRecord(root: string): EngineProviderRecord | null {
   if (!connectionStoreExists(root)) return null;
-  const db = openConnectionStore(root);
+  let db: Database.Database;
+  try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM engine_provider WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM engine_provider WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return null;
     try {
       const value = JSON.parse(row.data) as EngineProviderRecord;
       return isEngineProvider(value?.provider) && typeof value?.updatedAt === "string" ? { provider: value.provider, updatedAt: value.updatedAt } : null;
     } catch { return null; }
-  } finally { db.close(); }
+  } catch (error) { failEngineConnectionStore(root, "read", error); }
+  finally { db!.close(); }
 }
 
 /** The provider this install's engine route is set to. */
@@ -361,10 +381,12 @@ export function engineProvider(root: string): EngineProvider {
 export function setEngineProvider(root: string, provider: EngineProvider): EngineProviderRecord {
   if (!isEngineProvider(provider)) throw new Error("Invalid engine provider: " + String(provider) + " (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + ")");
   const record: EngineProviderRecord = { provider, updatedAt: new Date().toISOString() };
-  const db = openConnectionStore(root);
+  let db: Database.Database;
+  try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "write", error); }
   try {
-    db.prepare("INSERT INTO engine_provider (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO engine_provider (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
+  } catch (error) { failEngineConnectionStore(root, "write", error); }
+  finally { db!.close(); }
   recordActivity(root, "owner", "engine-provider", engineProviderDef(provider).label + " selected as the coding-engine provider (config choice; no connection was recorded or removed by this act)");
   return record;
 }

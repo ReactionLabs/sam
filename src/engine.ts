@@ -10,6 +10,7 @@ import { recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
 import { commitTaskPaths, gitRepoRoot, headFileContent, prepareTaskBranch, worktreeChanges, type CodingGitState } from "./git-work.js";
 import { verificationStatus } from "./verification.js";
+import { isEngineConnectionStoreLedgered, recordEngineConnectionStoreFailure } from "./engine-connection-failure.js";
 import type { GoldfishRecord } from "./goldfish.js";
 
 /**
@@ -264,9 +265,24 @@ export function selectedEngineProvider(root: string): EngineRunProvider {
     if (!table) return "claude-code";
     const row = db.prepare("SELECT data FROM engine_provider WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return "claude-code";
-    const value = JSON.parse(row.data) as { provider?: unknown };
+    // A torn row payload is data, not a store failure: it
+    // parses forgiving to the default with no ledger line,
+    // exactly as the store's own reader treats it.
+    let value: { provider?: unknown };
+    try { value = JSON.parse(row.data) as { provider?: unknown }; } catch { return "claude-code"; }
     return value?.provider === "codex" ? "codex" : "claude-code";
-  } catch { return "claude-code"; }
+  } catch (error) {
+    // The mirror still folds to the default exactly as before
+    // (a run must never die on a provider read), but the fold
+    // is now countable: one engine-connection-store-failed
+    // line at phase resolve per failed touch (the
+    // dashboard-config coreActor precedent), never a second
+    // line for a touch the store already ledgered.
+    if (!isEngineConnectionStoreLedgered(error)) {
+      try { recordEngineConnectionStoreFailure(root, "resolve", error); } catch { /* the ledger never breaks the fold */ }
+    }
+    return "claude-code";
+  }
   finally { try { db?.close(); } catch { /* already closed */ } }
 }
 
