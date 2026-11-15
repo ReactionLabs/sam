@@ -489,6 +489,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Routing still fails closed exactly as before: a failed read rethrows instead of folding the store as no fallbacks (which would silently drop a profile's fallback routes dressed as an empty list, so a dead primary becomes fatal instead of failing over), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a route record (provider and model names are routing data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no fallbacks with no line, while validation errors (bad profile / provider / model shape, unknown provider, fallback limit) still ledger nothing",
      "The full suite is green, including the failover failure-ledger tests"]);
+  if (key.startsWith("loop-store-failed:")) return base(
+    ["loops.ts", "loop-revisit.ts", "recall.ts", "status.ts", "cli.ts"],
+    "Loop store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the loop store (.sam/loops.db) must open, read, and write instead of dying at that seam - this store is the SECOND ANSWERS record (each open loop's question, answer, watchFor, and revisit cadence), read by recall into every new session's prompt and by the status payload, so while it is dead sessions greet cold with the seam unnamed, the status payload dies raw, and the revisit's mutations can fail uncounted.",
+    ["The next session greetings, status reads, revisits, and loop writes resolve their loops again instead of loop-store-failed lines",
+     "Exactly one loop-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Loops still fail closed exactly as before: a failed read rethrows instead of folding the store as no loops (which would silently drop every open loop dressed as an empty list, and a resolved loop's close could be lost), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a loop record (questions and answers are the owner's words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no loops with no line, while validation errors (missing question / watchFor) still ledger nothing",
+     "The full suite is green, including the loop store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -773,6 +781,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Failover ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "failover-failed:" + phase, label: "failover store failures (" + phase + " step)" };
+    }
+    case "loop-store-failed": {
+      const m = summary.match(/^Loop store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "loop-store-failed:" + phase, label: "loop store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, renameSync, mkdirSync, lstatSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 /**
  * Open loops (Smarter-and-Smoother S2 carry-in + the SECOND
@@ -46,6 +47,75 @@ export interface OpenLoop {
 
 function loopsFile(root: string): string { return join(resolve(root), ".sam", "loops.json"); }
 function loopsDbFile(root: string): string { return join(resolve(root), ".sam", "loops.db"); }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 22:04 EST): the open-loop store holds the SECOND ANSWERS
+// record - each loop's question, answer given, watchFor, and
+// revisit cadence - and every touch opened it raw. listLoops
+// rides recall (open loops carry into every new session's
+// prompt), the status payload (dueLoops + openLoopCount),
+// loop-revisit, and the CLI; the mutation doors ride
+// sam_open_loop in chat, the revisit's reschedule / answer /
+// adoption writes, and the CLI. A dead loops.db threw into
+// whichever catch wrapped the call with the seam unnamed,
+// and no loop-store-failed kind existed (loop-failed is the
+// revisit's own re-check class, a different seam), so the
+// class was uncountable, and any reader folding a dead store
+// as "no loops" would silently drop every open loop dressed
+// as an empty list. Now the store's touches own their
+// failure (the events / failover / action-store precedent):
+// a failed touch ledgers ONE loop-store-failed line (phase
+// read for listLoops / getOpenLoop, write for insertLoop /
+// updateLoopRow and every mutation door riding them; actor
+// sam; the verbatim reason collapsed and capped; never any
+// loop record - questions and answers are the owner's
+// words, not failure data), tags the error, and rethrows
+// exactly, so every caller's handling is unchanged and
+// reads still fail closed. A touch already ledgered by an
+// inner door keeps its one line and gains no second.
+// Validation errors (missing question / watchFor) are not
+// store failures and ledger nothing. An absent store still
+// reads empty with no line and creates nothing, and torn
+// row payloads still parse forgiving - only the store
+// touch is guarded.
+export type LoopStorePhase = "read" | "write";
+
+export function loopStoreFailureSummary(phase: LoopStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Loop store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordLoopStoreFailure(root: string, phase: LoopStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "loop-store-failed", loopStoreFailureSummary(phase, reason));
+}
+
+function tagLoopStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { loopStoreLedgered?: boolean }).loopStoreLedgered = true;
+  }
+}
+
+export function isLoopStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { loopStoreLedgered?: boolean }).loopStoreLedgered === true;
+}
+
+const LOOP_STORE_VALIDATION = [/^An open loop needs the question$/, /^An open loop needs what would change the answer \(watchFor\)$/];
+
+function isLoopStoreValidation(error: unknown): boolean {
+  return error instanceof Error && LOOP_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failLoopStore(root: string, phase: LoopStorePhase, error: unknown): never {
+  if (!isLoopStoreLedgered(error) && !isLoopStoreValidation(error)) recordLoopStoreFailure(root, phase, error);
+  if (!isLoopStoreValidation(error)) tagLoopStoreLedgered(error);
+  throw error;
+}
+
+function openLoopsGuarded(root: string, phase: LoopStorePhase): Database.Database {
+  try { return openLoopsStore(root); }
+  catch (error) { failLoopStore(root, phase, error); }
+}
 // State convergence (UNIFICATION item 4, eighth store): the
 // open-loop store is SQLite (.sam/loops.db, the
 // actions/jobs/background/coding/engine pattern), one row per
@@ -113,7 +183,7 @@ function storeExists(root: string): boolean {
 }
 export function listLoops(root: string, filter?: { profile?: string; status?: "open" | "closed" }): OpenLoop[] {
   if (!storeExists(root)) return [];
-  const db = openLoopsStore(root);
+  const db = openLoopsGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM open_loops ORDER BY rowid").all() as Array<{ data: string }>;
     const items: OpenLoop[] = [];
@@ -121,24 +191,28 @@ export function listLoops(root: string, filter?: { profile?: string; status?: "o
     return items.filter(l =>
       (filter?.profile === undefined || l.profile === filter.profile) &&
       (filter?.status === undefined || l.status === filter.status));
-  } finally { db.close(); }
+  } catch (error) { failLoopStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function getOpenLoop(root: string, id: string): OpenLoop | null {
   if (!storeExists(root)) return null;
-  const db = openLoopsStore(root);
+  const db = openLoopsGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM open_loops WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToLoop(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failLoopStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertLoop(root: string, item: OpenLoop): void {
-  const db = openLoopsStore(root);
+  const db = openLoopsGuarded(root, "write");
   try { db.prepare("INSERT INTO open_loops (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  catch (error) { failLoopStore(root, "write", error); }
   finally { db.close(); }
 }
 function updateLoopRow(root: string, item: OpenLoop): void {
-  const db = openLoopsStore(root);
+  const db = openLoopsGuarded(root, "write");
   try { db.prepare("UPDATE open_loops SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  catch (error) { failLoopStore(root, "write", error); }
   finally { db.close(); }
 }
 // The store's update door (the updateBackgroundTask /
