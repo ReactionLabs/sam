@@ -94,22 +94,80 @@ function rowToBridgeState(data:string):BridgeState|null{
 function bridgeStoreExists(root:string):boolean{
  return existsSync(stateDbFile(root))||existsSync(statePath(root));
 }
+// Telegram state store failure visibility (hourly run
+// 2026-11-15 14:04 EST): this store is the bridge's one row -
+// the poll offset, the telegram-chat -> SAM-chat map, and the
+// pairing candidate - and every touch was unguarded.
+// loadBridgeState rides runTelegramBridge's first load
+// (uncaught: a dead store kills the bridge at its first line
+// on start), the heartbeat tick's deliverToChannel
+// (unguarded), and channelForChat, which folds every failure
+// to null by design - so a dead store silently stripped a
+// heartbeat proposal's inherited delivery channel and every
+// loop's channel leg, dressed as a chat that lives on no
+// channel. Now the store owns its touches (the code-store
+// precedent, helpers here because this module already imports
+// the ledger and is its own leaf for this seam): a failed
+// open/read/write ledgers ONE telegram-state-failed line
+// (phase read for the read door, phase write for the write
+// door; actor sam; the verbatim reason collapsed and capped;
+// never any state content - chat ids and the pairing
+// candidate's identity are the owner's data) and rethrows
+// exactly, tagged so a catching caller records nothing more
+// for the same touch. channelForChat still folds to null
+// exactly as before, now countable. An absent store still
+// reads as the empty bridge state with no line and creates
+// nothing, and a torn row payload still parses forgiving to
+// the empty state - only the store touch is guarded.
+export type TelegramStateStorePhase = "read" | "write";
+
+export function telegramStateStoreFailureSummary(phase: TelegramStateStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Telegram state store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordTelegramStateStoreFailure(root: string, phase: TelegramStateStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "telegram-state-failed", telegramStateStoreFailureSummary(phase, reason));
+}
+
+function tagTelegramStateStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { telegramStateStoreLedgered?: boolean }).telegramStateStoreLedgered = true;
+  }
+}
+
+export function isTelegramStateStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { telegramStateStoreLedgered?: boolean }).telegramStateStoreLedgered === true;
+}
+
+function failTelegramStateStore(root: string, phase: TelegramStateStorePhase, error: unknown): never {
+  if (!isTelegramStateStoreLedgered(error)) recordTelegramStateStoreFailure(root, phase, error);
+  tagTelegramStateStoreLedgered(error);
+  throw error;
+}
+
 // The store's read door: the full bridge state through the store's
 // own shape, or the empty state when none has ever been persisted -
 // and a read on an install with no store at all creates nothing.
 export function loadBridgeState(root:string):BridgeState{
  if(!bridgeStoreExists(root))return {offset:0,chats:{}};
- const db=openBridgeStore(root);
+ let db:Database.Database;
+ try{db=openBridgeStore(root);}catch(error){failTelegramStateStore(root,"read",error);}
  try{
-  const row=db.prepare("SELECT data FROM telegram_state WHERE id = 1").get() as {data:string}|undefined;
+  const row=db!.prepare("SELECT data FROM telegram_state WHERE id = 1").get() as {data:string}|undefined;
   return row?(rowToBridgeState(row.data)??{offset:0,chats:{}}):{offset:0,chats:{}};
- }finally{db.close();}
+ }catch(error){failTelegramStateStore(root,"read",error);}
+ finally{db!.close();}
 }
 export function saveBridgeState(root:string,state:BridgeState){
- const db=openBridgeStore(root);
+ let db:Database.Database;
+ try{db=openBridgeStore(root);}catch(error){failTelegramStateStore(root,"write",error);}
  try{
-  db.prepare("INSERT INTO telegram_state (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(state));
- }finally{db.close();}
+  db!.prepare("INSERT INTO telegram_state (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(state));
+ }catch(error){failTelegramStateStore(root,"write",error);}
+ finally{db!.close();}
 }
 // The channel a SAM chat lives on, if any: a chat id found in the
 // Telegram bridge state belongs to that bridge's telegram channel.

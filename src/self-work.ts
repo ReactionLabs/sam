@@ -600,6 +600,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed direct read rethrows instead of folding the store as no connection (which would silently un-connect a verified engine route dressed as never-connected), the run layer's mirror still folds to the default provider on a failed resolve exactly as before, a touch already ledgered by the store is never recorded twice, and a failure line never carries any marker or provider content (the recorded binary path and provider are fence data, not failure data)",
      "An absent store still reads as no connection / the default provider with no line and creates nothing, torn rows still parse forgiving, and setEngineProvider's invalid-provider refusal still ledgers nothing",
      "The full suite is green, including the engine connection store failure-ledger tests"]);
+  if (key.startsWith("telegram-state-failed:")) return base(
+    ["telegram.ts", "heartbeat.ts", "actions.ts", "loop-revisit.ts"],
+    "Telegram state store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the telegram state store (.sam/telegram-state.db: the bridge's one row holding the poll offset, the telegram-chat to SAM-chat map, and the pairing candidate) must open, read, and write instead of dying at that seam - while it is dead the bridge dies at its first load on start, the heartbeat tick's channel delivery rides a dying read, and channelForChat folds the failure to null, silently stripping a heartbeat proposal's inherited delivery channel and every loop's channel leg dressed as a chat that lives on no channel.",
+    ["The next bridge loads and saves, heartbeat channel deliveries, and channel resolutions resolve their bridge state again instead of telegram-state-failed lines",
+     "Exactly one telegram-state-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed direct read rethrows instead of folding the store as the empty bridge state (which would silently reset the poll offset and lose the chat map dressed as a bridge that never ran), channelForChat still folds to null on a failed read exactly as before, a touch already ledgered by the store is never recorded twice, and a failure line never carries any state content (chat ids and the pairing candidate's identity are the owner's data, not failure data)",
+     "An absent store still reads as the empty bridge state with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (the empty state, never fatal)",
+     "The full suite is green, including the telegram state store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -950,6 +958,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "engine-connection-store-failed:" + phase, label: "engine connection store failures (" + phase + " step)" };
+    }
+    case "telegram-state-failed": {
+      const m = summary.match(/^Telegram state store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "telegram-state-failed:" + phase, label: "telegram state store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);
