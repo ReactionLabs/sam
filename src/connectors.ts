@@ -82,6 +82,68 @@ function rowToConnector(data:string):Connector|null{
 function storeExists(root:string):boolean{
  return existsSync(connectorsDbFile(root))||existsSync(connectorsFile(root));
 }
+// Failure visibility (gap found 2026-11-14, hourly run
+// 19:04 EST): the connector store holds the MCP connector
+// registry - every connector's URL, credential NAME (env or
+// vault), enabled flag, and allowedTools set, the fields the
+// turn loops authorize from - and every touch opened it raw.
+// connectors() rides the status payload, stack watch, config
+// detection, self-audit, agent turns, connector-chat, the
+// CLI, and spawn validation; getConnector is the dashboard's
+// lookup door; addConnector / addConnectorVault /
+// updateConnector / removeConnector are the writes; the pair
+// allowlist doors ride the same store. A dead connectors.db
+// threw into whichever catch happened to wrap the call with
+// the seam unnamed, and no connector-failed kind existed, so
+// the class was uncountable - and any reader folding a dead
+// store as "no connectors" would silently strip every
+// connector pin and tool authorization dressed as an empty
+// registry. Now the store's touches own their failure (the
+// channels / contacts precedent): a failed touch ledgers ONE
+// connector-failed line (phase read for connectors() and the
+// pair allowlist read, lookup for getConnector's store touch,
+// write for the mutation doors; actor sam; the verbatim
+// reason collapsed and capped; never any connector record -
+// URLs, credential names, and allowedTools are authorization
+// data, not failure data), tags the error, and rethrows
+// exactly, so every caller's handling is unchanged and
+// authorization still fails closed. A touch already ledgered
+// by an inner door (the pair read inside allowedUrl, the
+// registry read inside an add) keeps its one line and gains
+// no second. Validation errors (bad name / env / vault key,
+// URL allowlist refusals, duplicate / limit, not-found-or-
+// disabled) are not store failures and ledger nothing. An
+// absent store still reads as no connectors with no line and
+// creates nothing, and torn row payloads still parse
+// forgiving - only the store touch is guarded.
+export type ConnectorPhase = "read" | "lookup" | "write";
+
+export function connectorFailureSummary(phase: ConnectorPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Connector " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordConnectorFailure(root: string, phase: ConnectorPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "connector-failed", connectorFailureSummary(phase, reason));
+}
+
+function tagConnectorLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { connectorLedgered?: boolean }).connectorLedgered = true;
+  }
+}
+
+export function isConnectorLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { connectorLedgered?: boolean }).connectorLedgered === true;
+}
+
+function failConnector(root: string, phase: ConnectorPhase, error: unknown): never {
+  if (!isConnectorLedgered(error)) recordConnectorFailure(root, phase, error);
+  tagConnectorLedgered(error);
+  throw error;
+}
 // The pairing flow's persisted loopback allowlist: when SAM pairs
 // himself to a same-machine MCP (the Desktop Bridge shape), the
 // loopback host is recorded here - in the connector store itself -
@@ -94,20 +156,24 @@ const LOOPBACK_HOSTS = new Set(["127.0.0.1","localhost","::1"]);
 export function isLoopbackHost(host:string):boolean{return LOOPBACK_HOSTS.has(host.toLowerCase());}
 export function pairAllowlistedHosts(root:string):string[]{
  if(!existsSync(connectorsDbFile(root)))return [];
- const db=openConnectorsStore(root);
+ let db:Database.Database;
+ try{db=openConnectorsStore(root);}catch(error){failConnector(root,"read",error);}
  try{
-  db.exec("CREATE TABLE IF NOT EXISTS pair_allowlist (host TEXT PRIMARY KEY)");
-  return (db.prepare("SELECT host FROM pair_allowlist ORDER BY rowid").all() as Array<{host:string}>).map(r=>r.host);
- }finally{db.close();}
+  db!.exec("CREATE TABLE IF NOT EXISTS pair_allowlist (host TEXT PRIMARY KEY)");
+  return (db!.prepare("SELECT host FROM pair_allowlist ORDER BY rowid").all() as Array<{host:string}>).map(r=>r.host);
+ }catch(error){failConnector(root,"read",error);}
+ finally{db!.close();}
 }
 export function allowlistPairHost(root:string,host:string):string{
  const h=host.trim().toLowerCase();
  if(!isLoopbackHost(h))throw Error("Only a loopback host can be allowlisted by pairing");
- const db=openConnectorsStore(root);
+ let db:Database.Database;
+ try{db=openConnectorsStore(root);}catch(error){failConnector(root,"write",error);}
  try{
-  db.exec("CREATE TABLE IF NOT EXISTS pair_allowlist (host TEXT PRIMARY KEY)");
-  db.prepare("INSERT OR IGNORE INTO pair_allowlist (host) VALUES (?)").run(h);
- }finally{db.close();}
+  db!.exec("CREATE TABLE IF NOT EXISTS pair_allowlist (host TEXT PRIMARY KEY)");
+  db!.prepare("INSERT OR IGNORE INTO pair_allowlist (host) VALUES (?)").run(h);
+ }catch(error){failConnector(root,"write",error);}
+ finally{db!.close();}
  return h;
 }
 function allowedUrl(raw:string,root?:string):string{
@@ -131,13 +197,15 @@ function allowedUrl(raw:string,root?:string):string{
 }
 export function connectors(root:string):Connector[]{
  if(!storeExists(root))return [];
- const db=openConnectorsStore(root);
+ let db:Database.Database;
+ try{db=openConnectorsStore(root);}catch(error){failConnector(root,"read",error);}
  try{
-  const rows=db.prepare("SELECT data FROM connectors ORDER BY rowid").all() as Array<{data:string}>;
+  const rows=db!.prepare("SELECT data FROM connectors ORDER BY rowid").all() as Array<{data:string}>;
   const items:Connector[]=[];
   for(const row of rows){const connector=rowToConnector(row.data);if(connector)items.push(connector);}
   return items;
- }finally{db.close();}
+ }catch(error){failConnector(root,"read",error);}
+ finally{db!.close();}
 }
 function findConnectorRow(root:string,id:string):Connector|null{
  if(!storeExists(root))return null;
@@ -163,18 +231,21 @@ function updateConnectorRow(root:string,item:Connector):void{
 // an install with no store at all creates nothing.
 export function updateConnector(root:string,id:string,patch:Partial<Connector>):Connector|null{
  if(!storeExists(root))return null;
- const current=findConnectorRow(root,id);
- if(!current)return null;
- const next:Connector={...current,...patch,id:current.id};
- updateConnectorRow(root,next);
- return next;
+ try{
+  const current=findConnectorRow(root,id);
+  if(!current)return null;
+  const next:Connector={...current,...patch,id:current.id};
+  updateConnectorRow(root,next);
+  return next;
+ }catch(error){failConnector(root,"write",error);}
 }
 export function addConnector(root:string,name:string,url:string,tokenEnv:string):Connector{
  if(!namePattern.test(name)||!envPattern.test(tokenEnv))throw Error("Invalid connector name or environment variable");
  const endpoint=allowedUrl(url,root), items=connectors(root);
  if(items.length>=32||items.some(c=>c.name===name))throw Error("Connector limit or duplicate name");
  const item:Connector={id:randomUUID(),name,url:endpoint,tokenEnv,enabled:true,allowedTools:[...readOnlyTools]};
- insertConnectorRow(root,item);return item;
+ try{insertConnectorRow(root,item);}catch(error){failConnector(root,"write",error);}
+ return item;
 }
 // The vault-bound registration (SELF-PAIRING): the connector names
 // a vault credential instead of an env var. The credential must
@@ -189,7 +260,8 @@ export function addConnectorVault(root:string,name:string,url:string,vaultKey:st
  const endpoint=allowedUrl(url,root), items=connectors(root);
  if(items.length>=32||items.some(c=>c.name===name))throw Error("Connector limit or duplicate name");
  const item:Connector={id:randomUUID(),name,url:endpoint,tokenEnv:"",vaultKey,enabled:true,allowedTools:[...readOnlyTools]};
- insertConnectorRow(root,item);return item;
+ try{insertConnectorRow(root,item);}catch(error){failConnector(root,"write",error);}
+ return item;
 }
 // EXECUTOR-ONLY credential resolution: env-backed connectors read
 // their named env var (unchanged); vault-backed connectors resolve
@@ -211,16 +283,19 @@ function ledgerConnectorVaultUse(root:string,c:Connector,purpose:string,outcome:
 }
 export function removeConnector(root:string,id:string):boolean{
  if(!storeExists(root))return false;
- const db=openConnectorsStore(root);
+ let db:Database.Database;
+ try{db=openConnectorsStore(root);}catch(error){failConnector(root,"write",error);}
  try{
-  const result=db.prepare("DELETE FROM connectors WHERE id = ?").run(id);
+  const result=db!.prepare("DELETE FROM connectors WHERE id = ?").run(id);
   return result.changes>0;
- }finally{db.close();}
+ }catch(error){failConnector(root,"write",error);}
+ finally{db!.close();}
 }
 export function getConnector(root:string,id:string):Connector{
- const c=findConnectorRow(root,id);
- if(!c||!c.enabled)throw Error("Connector not found or disabled");
- allowedUrl(c.url,root);return c;
+ let c:Connector|null;
+ try{c=findConnectorRow(root,id);}catch(error){failConnector(root,"lookup",error);}
+ if(!c!||!c!.enabled)throw Error("Connector not found or disabled");
+ allowedUrl(c!.url,root);return c!;
 }
 type RpcEnvelope={jsonrpc?:string;id?:string|number;result?:unknown;error?:unknown};
 type Session={id?:string;version:string};

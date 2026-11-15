@@ -465,6 +465,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The gate still fails closed exactly as before: a failed read rethrows instead of folding the store as the manual default (which would silently revert a smart/off posture the owner set), a touch already ledgered by the store is never recorded twice (a save whose internal read died keeps its one read line), and a failure line never carries any policy content (the mode and auto list are the owner's gate posture, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as the manual default with no line, a malformed legacy file still imports nothing silently, and a torn row payload still parses forgiving to manual",
      "The full suite is green, including the approval policy failure-ledger tests"]);
+  if (key.startsWith("connector-failed:")) return base(
+    ["connectors.ts", "status.ts", "agent-turn.ts", "connector-chat.ts", "connector-pairing.ts"],
+    "Connector store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the connector store (.sam/connectors.db) must open, read, and write instead of dying at that seam - this store is the MCP connector registry (every connector's URL, credential name, enabled flag, and allowedTools set, the fields the turn loops authorize from), so while it is dead turns die with the seam unnamed, the status payload dies raw, and a pairing can die mid-flow.",
+    ["The next status reads, turns, stack watches, and connector writes resolve their registry again instead of connector-failed lines",
+     "Exactly one connector-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Authorization still fails closed exactly as before: a failed read rethrows instead of folding the store as no connectors (which would silently strip every connector pin and tool authorization dressed as an empty registry), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a connector record (URLs, credential names, and allowedTools are authorization data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no connectors with no line, while validation errors (bad name, URL allowlist refusals, duplicates, not-found) still ledger nothing",
+     "The full suite is green, including the connector failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -734,6 +742,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Approval policy ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "approval-policy-failed:" + phase, label: "approval policy store failures (" + phase + " step)" };
+    }
+    case "connector-failed": {
+      const m = summary.match(/^Connector ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "connector-failed:" + phase, label: "connector store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
