@@ -45,6 +45,81 @@ function bgDbFile(root: string): string { return join(resolve(root), ".sam", "ba
 // neither file creates nothing, so read-only audits stay read-only.
 // The P9 backup snapshots every .sam/*.db generically, so the migrated
 // store is carried with no backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 18:04 EST): the background store holds the P5 legs
+// queue - each handed-off task's actor, chat, title,
+// prompt, status, and result - and every touch opened
+// it raw. listBackgroundTasks rides the dashboard
+// status payload, the morning brief, and the
+// UNIFICATION census; getBackgroundTask and the row
+// writes ride the heartbeat drain's transitions,
+// updateBackgroundTask, and the CLI background verbs;
+// queueBackgroundTask rides the sam_handoff_task chat
+// tool. A dead background.db threw into whichever catch
+// wrapped the call with the seam unnamed, and no
+// background-store-failed kind existed
+// (background-failed is the drain's task-outcome class,
+// a different seam), so the class was uncountable, and
+// any reader folding a dead store as "no tasks" would
+// silently empty the legs queue dressed as an idle
+// install - a handed-off task's record gone while its
+// chat waits for a result that can now never land. Now
+// the store's touches own their failure (the coding
+// precedent): a failed touch ledgers ONE
+// background-store-failed line (phase read for
+// listBackgroundTasks / getBackgroundTask, write for
+// insertTask / updateTaskRow and every mutation door
+// riding them; actor sam; the verbatim reason collapsed
+// and capped; never any task record - prompts, titles,
+// and results are the owner's words, not failure data),
+// tags the error, and rethrows exactly, so every
+// caller's handling is unchanged and reads still fail
+// closed. A touch already ledgered by an inner door
+// keeps its one line and gains no second. Validation
+// errors (actor / prompt / chat / queue-full refusals)
+// are not store failures and ledger nothing. An absent
+// store still reads empty with no line and creates
+// nothing, and torn row payloads still parse forgiving
+// - only the store touch is guarded.
+export type BackgroundStorePhase = "read" | "write";
+
+export function backgroundStoreFailureSummary(phase: BackgroundStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Background store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordBackgroundStoreFailure(root: string, phase: BackgroundStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "background-store-failed", backgroundStoreFailureSummary(phase, reason));
+}
+
+function tagBackgroundStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { backgroundStoreLedgered?: boolean }).backgroundStoreLedgered = true;
+  }
+}
+
+export function isBackgroundStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { backgroundStoreLedgered?: boolean }).backgroundStoreLedgered === true;
+}
+
+const BACKGROUND_STORE_VALIDATION = [/^Invalid actor$/, /^Invalid background prompt$/, /^A chat is required$/, /^Background queue is full$/];
+
+function isBackgroundStoreValidation(error: unknown): boolean {
+  return error instanceof Error && BACKGROUND_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failBackgroundStore(root: string, phase: BackgroundStorePhase, error: unknown): never {
+  if (!isBackgroundStoreLedgered(error) && !isBackgroundStoreValidation(error)) recordBackgroundStoreFailure(root, phase, error);
+  if (!isBackgroundStoreValidation(error)) tagBackgroundStoreLedgered(error);
+  throw error;
+}
+
+function openBackgroundGuarded(root: string, phase: BackgroundStorePhase): Database.Database {
+  try { return openBackgroundStore(root); }
+  catch (error) { failBackgroundStore(root, phase, error); }
+}
 function openBackgroundStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   const db = openDatabase(bgDbFile(root));
@@ -78,30 +153,34 @@ function rowToTask(data: string): BackgroundTask | null {
 }
 export function listBackgroundTasks(root: string): BackgroundTask[] {
   if (!existsSync(bgDbFile(root)) && !existsSync(bgFile(root))) return [];
-  const db = openBackgroundStore(root);
+  const db = openBackgroundGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM background_tasks ORDER BY rowid").all() as Array<{ data: string }>;
     const items: BackgroundTask[] = [];
     for (const row of rows) { const task = rowToTask(row.data); if (task) items.push(task); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failBackgroundStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function getBackgroundTask(root: string, id: string): BackgroundTask | null {
   if (!existsSync(bgDbFile(root)) && !existsSync(bgFile(root))) return null;
-  const db = openBackgroundStore(root);
+  const db = openBackgroundGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM background_tasks WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToTask(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failBackgroundStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertTask(root: string, item: BackgroundTask): void {
-  const db = openBackgroundStore(root);
+  const db = openBackgroundGuarded(root, "write");
   try { db.prepare("INSERT INTO background_tasks (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  catch (error) { failBackgroundStore(root, "write", error); }
   finally { db.close(); }
 }
 function updateTaskRow(root: string, item: BackgroundTask): void {
-  const db = openBackgroundStore(root);
+  const db = openBackgroundGuarded(root, "write");
   try { db.prepare("UPDATE background_tasks SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  catch (error) { failBackgroundStore(root, "write", error); }
   finally { db.close(); }
 }
 // The store's update door (the updateHeartbeatJob precedent): patch one
