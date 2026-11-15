@@ -55,6 +55,7 @@ import { readPromptAudit } from "./prompt-audit.js";
 import { readContextAudit } from "./context-audit.js";
 import { readLoopAudit } from "./loop-audit.js";
 import { readEvalBattery } from "./eval-battery.js";
+import { answerJudgeSummary, type AnswerJudgeSummary } from "./answer-judge.js";
 import { vaultStatus } from "./vault.js";
 import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
@@ -183,6 +184,13 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     contextAudit: readContextAudit(root),
     loopAudit: readLoopAudit(root),
     evalBattery: readEvalBattery(root),
+    // The Q2 judge summary rides the status payload for the
+    // dashboard Activity surface. The store ledgers its own
+    // answer-judge-failed line before throwing, so a dead
+    // ledger degrades this key to the empty summary instead of
+    // taking the whole status payload down (the artifacts
+    // precedent above).
+    answerJudge: (() => { try { return answerJudgeSummary(root); } catch { const empty: AnswerJudgeSummary = { judged: 0, malformed: 0, meanOverall: null, byDimension: { answered: null, grounded: null, noInventedFacts: null, rightLength: null }, weakestDimension: null, verdicts: { strong: 0, mixed: 0, weak: 0 }, lastAt: null, latest: null }; return empty; } })(),
     vault: vaultStatus(root),
     selfWork: readSelfWork(root),
     selfWorkFixes: selfWorkFixViews(root),

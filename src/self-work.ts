@@ -537,6 +537,13 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The guard still fails closed exactly as before: a failed read rethrows instead of folding the store as no suppressions (which would silently unbind the owner's standing do-not-store instruction dressed as an empty list), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a suppression record (needles are the owner's secret words, not failure data)",
      "The backstop door's absent-file and no-table-yet shapes still read as no suppressions with no line, exactly as a fresh install expects, while validation errors (Invalid profile, Invalid suppression phrase) still ledger nothing, and the guard's own memory-suppressed and memory-suppression lines stay unclassified (the guard holding is the system working)",
      "The full suite is green, including the capture guard store failure-ledger tests"]);
+  if (key.startsWith("answer-judge-failed:")) return base(
+    ["answer-judge.ts", "cli.ts", "status.ts"],
+    "Answer judge ledger touches stop failing: '" + label + "' has ledgered " + n + " failures, and the answer judge ledger (.sam/answer-judge.jsonl: the per-turn rubric scores the Q2 summary, status payload, and battery drop check quote as truth) must append and read instead of dying at that seam - while it is dead judged turns lose their verdicts and a read folded as no scores would report a false empty history.",
+    ["The next judge runs record their per-turn verdicts again instead of answer-judge-failed lines, and the summary reads them back",
+     "Exactly one answer-judge-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The ledger still fails closed exactly as before: a failed read rethrows instead of folding the store as no scores, and a failure line never carries a turn record (asks and answers are the owner's words, not failure data)",
+     "The full suite is green, including the answer judge failure-ledger tests"]);
   if (key.startsWith("task-store-failed:")) return base(
     ["tasks.ts", "offline-runner.ts", "cli.ts"],
     "Task store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the task store (the TaskScheduler riding missions.db: the mission task plan with dependency ordering, fenced leases, heartbeat, and completion) must create its schema, read, and write instead of dying at that seam - while it is dead the CLI task doors and the offline runner die with the seam unnamed, and a leased task's completion can be lost with nothing counted.",
@@ -864,6 +871,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Task store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "task-store-failed:" + phase, label: "task store failures (" + phase + " step)" };
+    }
+    case "answer-judge-failed": {
+      const m = summary.match(/^Answer judge ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "answer-judge-failed:" + phase, label: "answer judge ledger failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

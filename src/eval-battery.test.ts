@@ -7,7 +7,7 @@ import { readActivity } from "./activity.js";
 import { buildEvalBattery, evalBatteryText, EVAL_TASK_TOTAL, readEvalBattery, runEvalBattery } from "./eval-battery.js";
 
 // HARNESS INTELLIGENCE item 4: the behavior eval battery. The
-// 26 tasks run the REAL machinery in scratch state (the stack
+// 27 tasks run the REAL machinery in scratch state (the stack
 // watch's counters, recall and note tiers, the ONE gate's
 // policy functions, the verification ledger, the code store,
 // the senses/engine probes, the door guard pack), a run
@@ -18,18 +18,18 @@ import { buildEvalBattery, evalBatteryText, EVAL_TASK_TOTAL, readEvalBattery, ru
 
 function fresh(): string { return mkdtempSync(join(tmpdir(), "sam-eval-battery-")); }
 
-test("eval-battery: all 24 realistic tasks pass on the current harness", async () => {
+test("eval-battery: all 27 realistic tasks pass on the current harness", async () => {
   const root = fresh();
   try {
     const battery = await buildEvalBattery(null);
     assert.equal(battery.overall.total, EVAL_TASK_TOTAL);
     assert.equal(battery.findings.length, 0, JSON.stringify(battery.findings));
     assert.equal(battery.overall.passed, EVAL_TASK_TOTAL);
-    assert.equal(battery.categories.length, 5);
+    assert.equal(battery.categories.length, 6);
     assert.equal(battery.verdict, "first-run");
     assert.equal(battery.previous, null);
     const perCategory = Object.fromEntries(battery.categories.map(c => [c.id, c.passed + "/" + c.total]));
-    assert.deepEqual(perCategory, { inquiries: "4/4", memory: "9/9", gate: "6/6", coding: "3/3", limits: "4/4" });
+    assert.deepEqual(perCategory, { inquiries: "4/4", memory: "9/9", gate: "6/6", coding: "3/3", limits: "4/4", answers: "1/1" });
     assert.match(evalBatteryText(battery), /Findings: none/);
     assert.match(evalBatteryText(battery), /verdict: first-run/);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -50,8 +50,8 @@ test("eval-battery: a run records to SQLite, the next run holds against it, and 
     assert.deepEqual(second.previous, { at: first.at, passed: first.overall.passed, total: first.overall.total });
     const lines = readActivity(root, 50).filter(l => l.kind === "eval-battery");
     assert.equal(lines.length, 2);
-    assert.match(lines[0].summary, /Eval battery recorded: 26\/26 tasks, verdict first-run/);
-    assert.match(lines[1].summary, /verdict held \(was 26\/26\)/);
+    assert.match(lines[0].summary, /Eval battery recorded: 27\/27 tasks, verdict first-run/);
+    assert.match(lines[1].summary, /verdict held \(was 27\/27\)/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

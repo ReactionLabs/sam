@@ -25,10 +25,12 @@ import { sensesStatus, SENSES_NOT_INSTALLED } from "./senses.js";
 import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
 import { engineStatus } from "./engine.js";
 import { runRedTeamPack } from "./door-guard.js";
+import { ANSWER_JUDGE_BASELINE_MEAN, ANSWER_JUDGE_DROP_TOLERANCE, ANSWER_JUDGE_FIXED_CASES, ANSWER_JUDGE_FIXED_SCORES, answerJudgeSummary, judgeAnswer, readAnswerScores } from "./answer-judge.js";
+import type { EditModel } from "./model-edit.js";
 
 /**
  * The behavior eval battery (HARNESS INTELLIGENCE item 4, Dip
- * 2026-11-11 23:41-23:42 EST): "~20 realistic Dip tasks (lead
+ * 2026-11-11 23:41-23:42 EST): "~27 realistic Dip tasks (lead
  * questions, memory recall, gated proposals, coding tasks,
  * honest-limit cases) run before and after any prompt/harness
  * change; a change ships only if the battery improves or
@@ -61,7 +63,7 @@ import { runRedTeamPack } from "./door-guard.js";
  */
 
 export const EVAL_BATTERY_SCRIPT = "sam-eval-battery";
-export const EVAL_TASK_TOTAL = 26;
+export const EVAL_TASK_TOTAL = 27;
 
 export interface EvalTaskResult { id: string; label: string; passed: boolean }
 export interface EvalCategory { id: string; label: string; passed: number; total: number; tasks: EvalTaskResult[] }
@@ -127,6 +129,9 @@ const CATEGORIES: Array<{ id: string; label: string; tasks: TaskSpec[] }> = [
     { id: "engine-absent", label: "with no coding engine on the machine, engine status reads not installed, never queued-and-hoped", missing: "engine status that reports not-installed from the binary probe", run: () => scratch(root => { const s = engineStatus(root, { PATH: "/nonexistent-eval" }); return !s.installed && s.binary === null && s.queued === 0; }) },
     { id: "door-guard-pack", label: "the door guard blocks the whole injection pack and passes the whole benign pack", missing: "the door guard's red-team coverage (injections blocked, ordinary talk untouched)", run: () => runRedTeamPack().pass },
     { id: "rate-limit-grace", label: "\"are you there?\" while the provider cap is maxed gets the one plain grace message, never the raw platform error - and a second capped message gets silence", missing: "the rate-limit grace (a simulated quota response classifies, the first capped failure opens the episode and speaks the plain message with zero platform error text, the second stays silent, a success closes the episode)", run: () => scratch(root => { if (!isRateLimitError(new Error("Model connector request failed (HTTP 429)"))) return false; if (!isRateLimitError(new Error("insufficient_quota: quota exceeded"))) return false; if (isRateLimitError(new Error("Model request failed (HTTP 401)"))) return false; if (isRateLimitError(new Error("Model request timed out"))) return false; if (/HTTP|429|Something went wrong|platform|error code/i.test(RATE_LIMIT_GRACE_MESSAGE)) return false; if (!openRateLimitEpisode(root, "eval-chat")) return false; if (openRateLimitEpisode(root, "eval-chat")) return false; if (!closeRateLimitEpisode(root)) return false; return openRateLimitEpisode(root, "eval-chat"); }) },
+  ] },
+  { id: "answers", label: "Answer quality (the Q2 judge)", tasks: [
+    { id: "answer-judge-fixed-set", label: "the answer judge scores the fixed set of recorded turns at the hand-checked baseline, per turn, and a dropped mean is detectable", missing: "the Q2 answer-quality judge (a fresh-context judge scoring recorded turns against the written rubric - answered, grounded, no invented facts, right length - with per-turn records Dip can drill into, a summary mean, and a drop check against the hand-checked baseline mean; the battery's stub judge returns the hand-checked scores, so this task measures the judge machinery, never a live model)", run: () => scratchAsync(async root => { const stub: EditModel = { complete: async (req: { model: string; messages: Array<{ role: "user"; content: string }> }) => { const prompt = req.messages[0].content; const found = ANSWER_JUDGE_FIXED_CASES.find(c => prompt.includes(c.ask) && prompt.includes(c.answer.slice(0, 40))); if (!found) throw new Error("stub judge handed an unknown case"); const scores = ANSWER_JUDGE_FIXED_SCORES[found.id]; return { message: { content: JSON.stringify({ scores, notes: { answered: "stub: hand-checked", grounded: "stub: hand-checked", noInventedFacts: "stub: hand-checked", rightLength: "stub: hand-checked" }, summary: "Stub judge: hand-checked fixed-set score." }) } }; } }; for (const c of ANSWER_JUDGE_FIXED_CASES) await judgeAnswer(root, { ask: c.ask, evidence: c.evidence, answer: c.answer }, "stub-judge", stub); const records = readAnswerScores(root); if (records.length !== ANSWER_JUDGE_FIXED_CASES.length || records.some(r => r.malformed)) return false; const summary = answerJudgeSummary(root); if (summary.meanOverall !== ANSWER_JUDGE_BASELINE_MEAN) return false; if (!(summary.meanOverall >= ANSWER_JUDGE_BASELINE_MEAN - ANSWER_JUDGE_DROP_TOLERANCE)) return false; if (summary.meanOverall - 1.2 >= ANSWER_JUDGE_BASELINE_MEAN - ANSWER_JUDGE_DROP_TOLERANCE) return false; return records[0].overall === 5 && records[1].overall === 2.25 && records[2].overall === 1; }) },
   ] },
 ];
 
