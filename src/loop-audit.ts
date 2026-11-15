@@ -8,7 +8,7 @@ import { budgetFallbackAnswer, toolBudget, trimHistoryForRetry } from "./budgets
 import { loaderLoopFallbackAnswer } from "./tool-tiers.js";
 import { recordChange, recordVerification, verificationGate, verificationStatus, type VerificationStatus } from "./verification.js";
 import { dueLoops, openLoop, openLoopCount, updateOpenLoop } from "./loops.js";
-import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
 
 /**
  * The loop audit (HARNESS INTELLIGENCE item 3, Dip 2026-11-11):
@@ -91,7 +91,7 @@ interface CheckSpec { id: string; label: string; missing: string; run: () => boo
 const DIMENSIONS: Array<{ id: string; label: string; checks: CheckSpec[] }> = [
   { id: "verify", label: "Verify before claiming", checks: [
     { id: "verify-gate", label: "the verification gate refuses an unverified change and closes a verified one", missing: "a verification gate that closes only on a fresh build AND test pass after the last change", run: verifyGateCheck },
-    { id: "verify-note", label: "a code-changing chat turn closes with a verification note unless the ledger reads verified", missing: "the deterministic verification note appended to a code-changing chat turn's reply when the ledger does not read verified", run: () => { const note = codeVerificationNote(unverifiedStatus()); return note !== null && note.includes("src/probe.ts") && /not verified/.test(note) && codeVerificationNote({ ...unverifiedStatus(), state: "verified", pendingChanges: [] }) === null && codeVerificationNote({ ...unverifiedStatus(), state: "failed" }) !== null; } },
+    { id: "verify-note", label: "a code-changing chat turn records its verification bookkeeping in the ledger and tells the owner in at most one plain line", missing: "the split verification close (Dip, 2026-11-15): full bookkeeping with file names for the activity ledger, one plain owner sentence with no file list or machinery for the chat reply, both silent when the ledger reads verified", run: () => { const ledger = codeVerificationLedgerNote(unverifiedStatus()); const owner = codeVerificationOwnerLine(unverifiedStatus()); const ownerFailed = codeVerificationOwnerLine({ ...unverifiedStatus(), state: "failed" }); return ledger !== null && ledger.includes("src/probe.ts") && /not verified/.test(ledger) && codeVerificationLedgerNote({ ...unverifiedStatus(), state: "verified", pendingChanges: [] }) === null && codeVerificationLedgerNote({ ...unverifiedStatus(), state: "failed" }) !== null && owner !== null && !owner.includes("src/probe.ts") && !/Verification note/.test(owner) && !owner.includes("\n") && ownerFailed !== null && codeVerificationOwnerLine({ ...unverifiedStatus(), state: "verified", pendingChanges: [] }) === null; } },
   ] },
   { id: "repair", label: "Tool-failure repair", checks: [
     { id: "repair-signature", label: "a repeated call is recognized by name plus stable-ordered arguments", missing: "a failure signature over the tool name and its arguments with stable key ordering", run: () => failureSignature("sam_code", { b: 1, a: { d: 2, c: 3 } }) === failureSignature("sam_code", { a: { c: 3, d: 2 }, b: 1 }) && failureSignature("sam_code", { a: 1 }) !== failureSignature("sam_code", { a: 2 }) && failureSignature("sam_code", { a: 1 }) !== failureSignature("sam_read", { a: 1 }) },

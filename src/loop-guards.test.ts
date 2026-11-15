@@ -5,19 +5,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readActivity } from "./activity.js";
 import { setCodeRoot } from "./code.js";
-import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
 import { ownToolsChat } from "./own-tools.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { VerificationStatus } from "./verification.js";
 
 // HARNESS INTELLIGENCE item 3: the loop guards. The shared
 // shapes are unit-pinned (signature stability, error
-// extraction, stub and note text), and the own-tools chat loop
-// proves the behavior end to end with a stub model: a repeated
-// identical failing call is stubbed instead of re-executed, a
-// success in between re-arms the call, and a code-changing
-// turn closes with the verification note until build and test
-// both pass after the change.
+// extraction, stub text, and the split verification close),
+// and the own-tools chat loop proves the behavior end to end
+// with a stub model: a repeated identical failing call is
+// stubbed instead of re-executed, a success in between
+// re-arms the call, and a code-changing turn closes with its
+// verification bookkeeping in the activity ledger and at most
+// one plain sentence in the reply (Dip, 2026-11-15) until
+// build and test both pass after the change.
 
 function status(state: VerificationStatus["state"]): VerificationStatus {
   return { state, pendingChanges: state === "unverified" ? [{ path: "a.txt", replacementHash: "h", at: "", source: "code-write" }] : [], lastChangeAt: null, lastVerificationAt: null, buildPassedAfterChange: false, testPassedAfterChange: false };
@@ -38,17 +40,33 @@ test("loop-guards: error extraction reads only the error shape", () => {
   assert.equal(toolResultError(null), null);
 });
 
-test("loop-guards: the stub and the verification note say what happened and what closes the work", () => {
+test("loop-guards: the stub says what happened, and the verification close splits ledger bookkeeping from the one owner line", () => {
   const stub = repeatedFailureStubContent("sam_workspace_read", "Path not available");
   assert.match(stub, /not executed/);
   assert.match(stub, /Path not available/);
   assert.match(stub, /Change the arguments or the approach/);
-  const note = codeVerificationNote(status("unverified"));
-  assert.match(note ?? "", /Verification note/);
-  assert.match(note ?? "", /a\.txt/);
-  assert.match(codeVerificationNote(status("failed")) ?? "", /FAILED/);
-  assert.equal(codeVerificationNote(status("verified")), null);
-  assert.equal(codeVerificationNote(status("clean")), null);
+  // The bookkeeping keeps everything it ever had - for the
+  // activity ledger and the coding surface.
+  const ledger = codeVerificationLedgerNote(status("unverified"));
+  assert.match(ledger ?? "", /Verification note/);
+  assert.match(ledger ?? "", /a\.txt/);
+  assert.match(codeVerificationLedgerNote(status("failed")) ?? "", /FAILED/);
+  assert.equal(codeVerificationLedgerNote(status("verified")), null);
+  assert.equal(codeVerificationLedgerNote(status("clean")), null);
+  // The owner's line is one plain sentence: no file names, no
+  // verification machinery, no instructions to itself.
+  for (const state of ["unverified", "failed"] as const) {
+    const line = codeVerificationOwnerLine(status(state));
+    assert.ok(line, state);
+    assert.ok(!line.includes("\n"), state + ": single line");
+    assert.ok(!line.includes("a.txt"), state + ": no file list");
+    assert.ok(!/Verification note/.test(line), state + ": no machinery header");
+    assert.ok(!/sam_code/.test(line), state + ": no self-instructions");
+  }
+  assert.match(codeVerificationOwnerLine(status("unverified")) ?? "", /not been verified yet/);
+  assert.match(codeVerificationOwnerLine(status("failed")) ?? "", /latest check failed/);
+  assert.equal(codeVerificationOwnerLine(status("verified")), null);
+  assert.equal(codeVerificationOwnerLine(status("clean")), null);
 });
 
 function scripted(steps: Array<{ content: string | null; calls: Array<{ id: string; name: string; args: Record<string, unknown> }> }>, seenTools: string[][]) {
@@ -101,7 +119,7 @@ test("loop-guards in chat: a success between failures re-arms the same call", as
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-function codeFixture() {
+function codeFixture(buildScript = "node -e \"process.exit(0)\"") {
   // The code root must be a sibling of the SAM home, never inside
   // it (the C1 fence), so the fixture builds both under one parent.
   const parent = mkdtempSync(join(tmpdir(), "sam-loop-verify-"));
@@ -109,14 +127,14 @@ function codeFixture() {
   mkdirSync(root, { recursive: true });
   const codeDir = join(parent, "code-root");
   mkdirSync(codeDir, { recursive: true });
-  writeFileSync(join(codeDir, "package.json"), JSON.stringify({ name: "fixture", scripts: { build: "node -e \"process.exit(0)\"", test: "node -e \"process.exit(0)\"" } }));
+  writeFileSync(join(codeDir, "package.json"), JSON.stringify({ name: "fixture", scripts: { build: buildScript, test: "node -e \"process.exit(0)\"" } }));
   setCodeRoot(root, codeDir);
   return parent;
 }
 
 function codeHome(parent: string): string { return join(parent, "home"); }
 
-test("loop-guards in chat: a code-changing turn closes with the verification note until build and test pass", async () => {
+test("loop-guards in chat: a code-changing turn closes with the bookkeeping in the ledger and one plain line in the reply", async () => {
   const parent = codeFixture();
   const root = codeHome(parent);
   try {
@@ -127,11 +145,42 @@ test("loop-guards in chat: a code-changing turn closes with the verification not
     ], seen);
     const reply = await ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "write a.txt" }]);
     assert.match(reply, /Done - I wrote a\.txt\./);
-    assert.match(reply, /Verification note: code changed in this turn and is not verified yet/);
-    assert.match(reply, /a\.txt/);
+    // The reply carries the one plain owner sentence and NONE
+    // of the bookkeeping block (Dip, 2026-11-15).
+    assert.match(reply, /One heads-up: I changed code this turn and it has not been verified yet/);
+    assert.ok(!/Verification note/.test(reply), reply);
+    assert.ok(!reply.includes("(unverified:"), reply);
+    assert.ok(!/run them through sam_code/.test(reply), reply);
+    // The bookkeeping itself is not lost: it sits in the
+    // activity ledger with the state and the pending file.
     const lines = readActivity(root, 50).filter(l => l.kind === "loop-check");
     assert.equal(lines.length, 1);
     assert.match(lines[0].summary, /unverified/);
+    assert.match(lines[0].summary, /a\.txt/);
+    assert.match(lines[0].summary, /Verification note/);
+  } finally { rmSync(parent, { recursive: true, force: true }); }
+});
+
+test("loop-guards in chat: a turn whose verification FAILED saves a reply with no verification block", async () => {
+  const parent = codeFixture("node -e \"process.exit(1)\"");
+  const root = codeHome(parent);
+  try {
+    const seen: string[][] = [];
+    const fake = scripted([
+      { content: null, calls: [{ id: "c1", name: "sam_code", args: { action: "write", path: "a.txt", content: "hello" } }] },
+      { content: null, calls: [{ id: "c2", name: "sam_code", args: { action: "run", command: "build" } }] },
+      { content: "I wrote a.txt and tried to check it.", calls: [] },
+    ], seen);
+    const reply = await ownToolsChat(root, "sam", fake, "test-model", [{ role: "user", content: "write a.txt and check it" }], undefined, undefined, { rounds: 6, maxCalls: 12 });
+    assert.match(reply, /I wrote a\.txt/);
+    assert.match(reply, /One heads-up: I changed code this turn and its latest check failed/);
+    assert.ok(!/Verification note/.test(reply), reply);
+    assert.ok(!/FAILED/.test(reply), reply);
+    assert.ok(!/Read the failing build or test output/.test(reply), reply);
+    const lines = readActivity(root, 50).filter(l => l.kind === "loop-check");
+    assert.equal(lines.length, 1);
+    assert.match(lines[0].summary, /failed/);
+    assert.match(lines[0].summary, /FAILED/);
   } finally { rmSync(parent, { recursive: true, force: true }); }
 });
 

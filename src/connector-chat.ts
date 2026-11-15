@@ -5,10 +5,10 @@ import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswe
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import type { SpawnPoolContext } from "./subagents.js";
 import { recordActivity } from "./activity.js";
-import { TurnInvalidatedError, deadlineCloseNote, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
+import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { annotateToolResult } from "./source-citations.js";
-import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
 import { verificationStatus } from "./verification.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
@@ -115,10 +115,14 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
   if(!codeChanged)return answer;
   try{
    const status=verificationStatus(root);
-   const note=codeVerificationNote(status);
-   if(!note)return answer;
-   recordActivity(root,own?.actor??"sam","loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+")");
-   return answer+"\n\n"+note;
+   const ledgerNote=codeVerificationLedgerNote(status);
+   if(!ledgerNote)return answer;
+   // The bookkeeping lands in the activity ledger; the reply
+   // itself carries at most the one plain owner sentence
+   // (Dip, 2026-11-15), same seam as the own-tools loop.
+   recordActivity(root,own?.actor??"sam","loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+") - "+ledgerNote);
+   const ownerLine=codeVerificationOwnerLine(status);
+   return ownerLine?answer+"\n\n"+ownerLine:answer;
   }catch{return answer;}
  };
  for(let round=0;round<effRounds&&!exhausted&&!guardrailed&&!loaderLoop;round++){
@@ -310,8 +314,8 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
   messages.push({role:"system",content:deadlineCloseNote()});
   let closed:string|null=null;
   try{const f=await provider.completeConnectorTurn(model,messages,[]);closed=f.content;}catch{if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);closed=null;}
-  if(closed){const ca=acceptAnswer(closed);if(ca!==null)return finish(ca);}
-  return finish(turnDeadlineFallbackAnswer(executed));
+  if(closed){const ca=acceptAnswer(closed);if(ca!==null&&!closeReadsAsToolLedger(ca,executed))return finish(ca);}
+  return finish(turnDeadlineFallbackAnswer(ownerAskForClose(messages)));
  }
  const final=await provider.completeConnectorTurn(model,messages,[]);
  let finalBlocked=false;

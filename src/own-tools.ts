@@ -9,10 +9,10 @@ import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
-import { TurnInvalidatedError, deadlineCloseNote, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
+import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import type { SpawnPoolContext } from "./subagents.js";
-import { codeVerificationNote, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
 import { verificationStatus } from "./verification.js";
 import { patchNote, saveNote } from "./notes.js";
 import { proposeAuthoredSkill } from "./skill-author.js";
@@ -740,10 +740,14 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   if(!codeChanged)return answer;
   try{
    const status=verificationStatus(root);
-   const note=codeVerificationNote(status);
-   if(!note)return answer;
-   recordActivity(root,actor,"loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+")");
-   return answer+"\n\n"+note;
+   const ledgerNote=codeVerificationLedgerNote(status);
+   if(!ledgerNote)return answer;
+   // The bookkeeping (state, pending files, the full note)
+   // lands in the activity ledger; the reply itself carries
+   // at most the one plain owner sentence (Dip, 2026-11-15).
+   recordActivity(root,actor,"loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+") - "+ledgerNote);
+   const ownerLine=codeVerificationOwnerLine(status);
+   return ownerLine?answer+"\n\n"+ownerLine:answer;
   }catch{return answer;}
  };
  for(let round=0;round<effRounds&&!exhausted&&!guardrailed&&!loaderLoop;round++){
@@ -955,8 +959,8 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   messages.push({role:"system",content:deadlineCloseNote()});
   let closed:string|null=null;
   try{const f=await provider.completeConnectorTurn(model,messages,[]);closed=f.content;}catch{if(control?.invalidated())throw new TurnInvalidatedError(control.chatId);closed=null;}
-  if(closed){const ca=acceptAnswer(closed);if(ca!==null)return finish(ca);}
-  return finish(turnDeadlineFallbackAnswer(executed));
+  if(closed){const ca=acceptAnswer(closed);if(ca!==null&&!closeReadsAsToolLedger(ca,executed))return finish(ca);}
+  return finish(turnDeadlineFallbackAnswer(ownerAskForClose(messages)));
  }
  const final=await provider.completeConnectorTurn(model,messages,[]);
  let finalBlocked=false;

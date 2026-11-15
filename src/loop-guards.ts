@@ -25,9 +25,15 @@ import type { VerificationStatus } from "./verification.js";
  *   changed code through sam_code gets the deterministic version
  *   of the same rule. When such a turn closes, the loop reads
  *   the verification ledger itself - never the model's text -
- *   and appends a verification note whenever the ledger does
- *   not read verified, so a change is never "done" on the
- *   model's say-so alone.
+ *   and records the full bookkeeping (state, pending files, the
+ *   works) in the activity ledger whenever the ledger does not
+ *   read verified, so a change is never "done" on the model's
+ *   say-so alone. The chat reply itself carries at most ONE
+ *   plain sentence saying the change is not verified (Dip,
+ *   2026-11-15: the bookkeeping block - "Verification note:",
+ *   file lists, instructions to itself - was rendering in the
+ *   owner's chat; that text belongs to the ledger and the
+ *   coding surface, never the bubble).
  */
 
 function stableValue(value: unknown): unknown {
@@ -108,20 +114,34 @@ export function repeatedFailureStubContent(name: string, firstError: string): st
   });
 }
 
-/** The deterministic self-check note a code-changing chat turn
- *  closes with, or null when there is nothing to correct: the
- *  ledger reads verified (fresh build AND test after the last
- *  change) or clean (no changes recorded). An unverified epoch
- *  names its pending files; a failed epoch names the failure -
- *  in both cases the change is not done, whatever the reply
- *  above the note claims. */
-export function codeVerificationNote(status: VerificationStatus): string | null {
+/** The coding-loop bookkeeping for a code-changing chat turn
+ *  that closes unverified or failed: the full text, file names
+ *  and all, for the activity ledger and the coding surface
+ *  ONLY - it never rides a chat reply. Null when there is
+ *  nothing to record: the ledger reads verified (fresh build
+ *  AND test after the last change) or clean (no changes
+ *  recorded). An unverified epoch names its pending files; a
+ *  failed epoch names the failure - in both cases the change
+ *  is not done, whatever the model's reply claims. */
+export function codeVerificationLedgerNote(status: VerificationStatus): string | null {
   if (status.state === "unverified") {
     const pending = status.pendingChanges.map(c => c.path).slice(0, 6).join(", ");
-    return "Verification note: code changed in this turn and is not verified yet - a fresh build and test have not both passed after the last change" + (pending ? " (unverified: " + pending + ")" : "") + ". The change above is not done until both pass; run them through sam_code, or hand the work to the coding loop.";
+    return "Verification note: code changed in this turn and is not verified yet - a fresh build and test have not both passed after the last change" + (pending ? " (unverified: " + pending + ")" : "") + ". The change is not done until both pass; run them through sam_code, or hand the work to the coding loop.";
   }
   if (status.state === "failed") {
-    return "Verification note: code changed in this turn and the latest verification after the change FAILED, so the change above is not done, whatever it says. Read the failing build or test output, fix the cause, and verify again.";
+    return "Verification note: code changed in this turn and the latest verification after the change FAILED, so the change is not done. Read the failing build or test output, fix the cause, and verify again.";
   }
+  return null;
+}
+
+/** The ONE plain sentence a chat reply may carry when the turn
+ *  leaves code changed and unverified or failed (Dip ruling
+ *  2026-11-15): the owner hears that the change is not counted
+ *  as done, in a single line - no file lists, no verification
+ *  machinery, no instructions to itself. Null when the ledger
+ *  reads verified or clean. */
+export function codeVerificationOwnerLine(status: VerificationStatus): string | null {
+  if (status.state === "unverified") return "One heads-up: I changed code this turn and it has not been verified yet, so I am not counting it as done.";
+  if (status.state === "failed") return "One heads-up: I changed code this turn and its latest check failed, so I am not counting it as done.";
   return null;
 }

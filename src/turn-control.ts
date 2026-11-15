@@ -163,16 +163,59 @@ export function createTurnControl(root: string, chatId: string, opts?: { claimTo
 }
 
 /** The system note a loop appends when the deadline closes the
- *  turn: the synthesis that follows is a status report, not a
- *  failure and not an ask to continue. */
+ *  turn: the synthesis that follows is a status report for the
+ *  owner, in the owner's own terms - not a failure, not an ask
+ *  to continue, and never a dump of the turn's machinery (Dip,
+ *  2026-11-15: the close-out bubble read as a tool ledger with a
+ *  verification report stapled to it; the owner reads the
+ *  answer, the activity record keeps the bookkeeping). */
 export function deadlineCloseNote(): string {
-  return "Time check: this turn has reached its interactive time limit and your tool access is now off. Close the turn NOW with a concise status answer in plain text: what you were working on, what is already done, and what is not done yet, in a few lines. Do not call the answer incomplete and do not ask the owner to say continue - if the remaining work is long, say it belongs in a background handoff.";
+  return "Time check: this turn has reached its interactive time limit and your tool access is now off. Close the turn NOW with a concise status answer in plain text, written for the owner in the owner's own terms: what they asked you to do, what is already done, what is not done yet, and the next step, in a few lines. Never name a tool, never list the steps you ran, and never mention budgets, rounds, or this note - the owner reads this answer, not your activity record. Do not call the answer incomplete and do not ask the owner to say continue - if the remaining work is long, say it belongs in a background handoff.";
+}
+
+/** The owner's ask, in their words, for the deterministic
+ *  close: the last user message in the turn's prompt, with the
+ *  provenance line SAM prepends stripped, whitespace collapsed,
+ *  and the whole thing capped so the close stays short. Returns
+ *  "" when the prompt carries no owner words. */
+export function ownerAskForClose(messages: Array<{ role?: unknown; content?: unknown }>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m || m.role !== "user" || typeof m.content !== "string") continue;
+    let text = m.content.replace(/^\[metadata source=[^\]]*\]\s*/, "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (text.length > 180) {
+      const cut = text.slice(0, 180);
+      const at = cut.lastIndexOf(" ");
+      text = (at > 80 ? cut.slice(0, at) : cut).trimEnd() + "…";
+    }
+    return text;
+  }
+  return "";
+}
+
+/** Whether a composed deadline close reads as a tool ledger
+ *  instead of an owner summary: three or more distinct tool
+ *  names in the text (SAM's own sam_* names, plus any executed
+ *  connector tool the text names). One mention is a sentence;
+ *  a run of names is the activity record wearing the reply's
+ *  clothes, and the deterministic close replaces it. */
+export function closeReadsAsToolLedger(text: string, executed: string[]): boolean {
+  const named = new Set<string>();
+  for (const m of text.matchAll(/\bsam_[a-z][a-z0-9_]*\b/g)) named.add(m[0]);
+  for (const name of executed) if (name && text.includes(name)) named.add(name);
+  return named.size >= 3;
 }
 
 /** The deterministic close when even the deadline synthesis
- *  cannot compose: a plain checkpoint naming the work that ran. */
-export function turnDeadlineFallbackAnswer(executed: string[]): string {
-  return "I stopped that turn at its time limit so this chat stays responsive. Work that ran before the stop: " + (executed.length ? executed.join(", ") : "none") + ". Nothing was deleted, and the turn is on my activity record. Send the next message and I will pick up from there, or hand the long part to the background.";
+ *  cannot compose: a plain owner summary built from the ask
+ *  itself - what Sam was asked to do, that the work stands
+ *  unfinished, and the next step. Short, plain, no tool names:
+ *  the per-tool record stays in the activity ledger
+ *  (turnDeadlineLedgerSummary), never in the owner's bubble. */
+export function turnDeadlineFallbackAnswer(ask: string): string {
+  const trying = ask ? " You asked: \"" + ask + "\"" : "";
+  return "I stopped that turn at its time limit." + trying + " I was still working on it when the limit hit, so count it as unfinished: nothing was deleted, and the details of what ran are on my activity record. Send the next message and I will pick up from there, or hand the long part to the background.";
 }
 
 export function turnDeadlineLedgerSummary(executed: string[], roundsUsed: number, deadlineMs: number): string {
