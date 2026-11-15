@@ -92,6 +92,77 @@ const SUMMARY_DIFF_BUDGET = 6_000;
 
 function codingFile(root: string): string { return join(resolve(root), ".sam", "coding.json"); }
 function codingDbFile(root: string): string { return join(resolve(root), ".sam", "coding.db"); }
+// Failure visibility (gap found 2026-11-15, hourly run
+// 17:04 EST): the coding store holds the C3 loop's queue -
+// each task's spec, status, iterations, verification,
+// review, and C4 git state - and every touch opened it
+// raw. listCodingTasks / codingSummary ride the dashboard
+// status payload, the CLI overview, and the drain;
+// getCodingTask and the row writes ride the drain's
+// transitions and the CLI coding verbs. A dead coding.db
+// threw into whichever catch wrapped the call with the
+// seam unnamed, and no coding-store-failed kind existed
+// (coding-failed is the loop's task-outcome class, a
+// different seam), so the class was uncountable, and any
+// reader folding a dead store as "no tasks" would
+// silently empty the queue dressed as an idle loop - a
+// running task's record gone from every surface while
+// its writes sit in the code root. Now the store's
+// touches own their failure (the loops precedent): a
+// failed touch ledgers ONE coding-store-failed line
+// (phase read for listCodingTasks / getCodingTask, write
+// for insertCodingTask / updateCodingTaskRow and every
+// mutation door riding them; actor sam; the verbatim
+// reason collapsed and capped; never any task record -
+// specs and results are the owner's words, not failure
+// data), tags the error, and rethrows exactly, so every
+// caller's handling is unchanged and reads still fail
+// closed. A touch already ledgered by an inner door
+// keeps its one line and gains no second. Validation
+// errors (actor / spec / chat / code-root / queue-full
+// refusals) are not store failures and ledger nothing.
+// An absent store still reads empty with no line and
+// creates nothing, and torn row payloads still parse
+// forgiving - only the store touch is guarded.
+export type CodingStorePhase = "read" | "write";
+
+export function codingStoreFailureSummary(phase: CodingStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Coding store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordCodingStoreFailure(root: string, phase: CodingStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "coding-store-failed", codingStoreFailureSummary(phase, reason));
+}
+
+function tagCodingStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { codingStoreLedgered?: boolean }).codingStoreLedgered = true;
+  }
+}
+
+export function isCodingStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { codingStoreLedgered?: boolean }).codingStoreLedgered === true;
+}
+
+const CODING_STORE_VALIDATION = [/^Invalid actor$/, /^Invalid coding spec$/, /^A chat is required$/, /^No code root is designated/, /^Coding queue is full$/];
+
+function isCodingStoreValidation(error: unknown): boolean {
+  return error instanceof Error && CODING_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failCodingStore(root: string, phase: CodingStorePhase, error: unknown): never {
+  if (!isCodingStoreLedgered(error) && !isCodingStoreValidation(error)) recordCodingStoreFailure(root, phase, error);
+  if (!isCodingStoreValidation(error)) tagCodingStoreLedgered(error);
+  throw error;
+}
+
+function openCodingGuarded(root: string, phase: CodingStorePhase): Database.Database {
+  try { return openCodingStore(root); }
+  catch (error) { failCodingStore(root, phase, error); }
+}
 // State convergence (UNIFICATION item 4, sixth store): the coding
 // queue is SQLite (.sam/coding.db, the actions/jobs/background
 // pattern), one row per task holding the task's full JSON, rowid
@@ -151,30 +222,34 @@ function rowToTask(data: string): CodingTask | null {
 }
 export function listCodingTasks(root: string): CodingTask[] {
   if (!existsSync(codingDbFile(root)) && !existsSync(codingFile(root))) return [];
-  const db = openCodingStore(root);
+  const db = openCodingGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM coding_tasks ORDER BY rowid").all() as Array<{ data: string }>;
     const items: CodingTask[] = [];
     for (const row of rows) { const task = rowToTask(row.data); if (task) items.push(task); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failCodingStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function getCodingTask(root: string, id: string): CodingTask | null {
   if (!existsSync(codingDbFile(root)) && !existsSync(codingFile(root))) return null;
-  const db = openCodingStore(root);
+  const db = openCodingGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM coding_tasks WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToTask(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failCodingStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertCodingTask(root: string, item: CodingTask): void {
-  const db = openCodingStore(root);
+  const db = openCodingGuarded(root, "write");
   try { db.prepare("INSERT INTO coding_tasks (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  catch (error) { failCodingStore(root, "write", error); }
   finally { db.close(); }
 }
 function updateCodingTaskRow(root: string, item: CodingTask): void {
-  const db = openCodingStore(root);
+  const db = openCodingGuarded(root, "write");
   try { db.prepare("UPDATE coding_tasks SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  catch (error) { failCodingStore(root, "write", error); }
   finally { db.close(); }
 }
 // The store's update door (the updateBackgroundTask precedent):
