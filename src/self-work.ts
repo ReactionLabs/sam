@@ -505,6 +505,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The registry still fails closed exactly as before: a failed read rethrows instead of folding the store as no minis (which would silently drop every scoped SAM dressed as an empty registry, orphaning profiles no console lists and no door serves), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a mini record (names and persons are people's data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no minis with no line, while validation errors (invalid mini name / person, Mini already exists, spawn-detail refusals) still ledger nothing",
      "The full suite is green, including the mini store failure-ledger tests"]);
+  if (key.startsWith("chat-store-failed:")) return base(
+    ["chats.ts", "agent-turn.ts", "dashboard.ts", "cli.ts"],
+    "Chat store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the chat store (.sam/chats.db) must open, read, and write instead of dying at that seam - this store holds every conversation (chats, messages, team events, agent profiles, and compactions behind the one ChatStore class), read and written on every turn's context assembly and persistence and by the dashboard, the doors, and the CLI, so while it is dead turns die with the seam unnamed and a reader folding it as no chats would silently empty every conversation dressed as a fresh install.",
+    ["The next turns, dashboard reads, door turns, and CLI chat views resolve their chats again instead of chat-store-failed lines",
+     "Exactly one chat-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no chats (which would silently empty every conversation dressed as a fresh install), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a chat record (titles, message content, and profile instructions are the owner's words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation and data errors (bad title / profile / message / reaction / compaction / event shapes, Chat not found, Parent chat not found, Agent limit reached) still ledger nothing",
+     "The full suite is green, including the chat store failure-ledger tests"]);
   if (key.startsWith("provider-store-failed:")) return base(
     ["providers.ts", "failover.ts", "agent-turn.ts", "cli.ts"],
     "Provider store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the provider store (.sam/providers.db) must open, read, and write instead of dying at that seam - this store is the model provider registry (one row per file-configured provider: endpoint, key env name, and models), and a profile's provider pin resolves its turns through it, so while it is dead pinned turns die with the seam unnamed, auth status and the CLI providers view die raw, and failover validation can die mid-check.",
@@ -807,6 +815,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Mini store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "mini-store-failed:" + phase, label: "mini store failures (" + phase + " step)" };
+    }
+    case "chat-store-failed": {
+      const m = summary.match(/^Chat store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "chat-store-failed:" + phase, label: "chat store failures (" + phase + " step)" };
     }
     case "provider-store-failed": {
       const m = summary.match(/^Provider store ([a-z]+) failed/);
