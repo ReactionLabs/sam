@@ -1,5 +1,6 @@
 import type { ConversationRequest, ConversationResponse, ModelProvider } from "./model-conversation.js";
 import { validateConversation } from "./model-conversation.js";
+import { isTransientHttpStatus, providerHttpStatus, TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./provider-retry.js";
 import { WORKSPACE_TOOLS } from "./workspace-tools.js";
 import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 
@@ -145,6 +146,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
   // turn layer ledgers its size and drops it; it must never be
   // persisted as message content or rendered on any surface.
   onNarration?: (text: string) => void;
+  // Provider overload resilience (provider-retry.ts): when a
+  // chat turn sets this sink, every transient retry scheduled
+  // by completeConnectorTurn is reported here as it is
+  // scheduled, so the turn layer can ledger the hiccup (the
+  // recovery is the turn's own success line). Best-effort - a
+  // failing sink never breaks a model call.
+  onProviderRetry?: (info: { status: number; retry: number; limit: number; delayMs: number }) => void;
   // Turn control (turn-control.ts): a turn that must be stoppable
   // from outside - the interactive deadline, or the owner's Reset -
   // sets this signal, and every request below links its own abort
@@ -165,6 +173,24 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const usage = parseTokenUsage(payload);
       if (usage) this.onUsage?.(usage, model);
     } catch { /* accounting never breaks a turn */ }
+  }
+  private reportProviderRetry(status: number, retry: number, delayMs: number): void {
+    try { this.onProviderRetry?.({ status, retry, limit: TRANSIENT_RETRY_LIMIT, delayMs }); } catch { /* accounting never breaks a turn */ }
+  }
+  // The transient-retry backoff, riding the turn's abort
+  // signal: resolves true when the wait elapsed, false when
+  // the signal aborted first - a Reset or the turn deadline
+  // cancels a pending retry immediately instead of letting
+  // it fire into a turn that is already closing.
+  private async waitForRetry(delayMs: number): Promise<boolean> {
+    const sig = this.abortSignal;
+    if (!sig) { await new Promise<void>(resolvePromise => setTimeout(resolvePromise, delayMs)); return true; }
+    if (sig.aborted) return false;
+    return new Promise<boolean>((resolvePromise) => {
+      const onAbort = () => { clearTimeout(timer); resolvePromise(false); };
+      const timer = setTimeout(() => { sig.removeEventListener("abort", onAbort); resolvePromise(true); }, delayMs);
+      sig.addEventListener("abort", onAbort, { once: true });
+    });
   }
   private readonly endpoint: string;
   constructor(endpoint: string, private readonly apiKey: string, private readonly timeoutMs = 30_000) {
@@ -282,12 +308,39 @@ export class OpenAICompatibleProvider implements ModelProvider {
     // not enough and the raw error reached the owner), so the fresh
     // attempt budget is three total. Nothing has executed for any of
     // these calls, so every retry is safe.
+    // Transient provider failures (provider-retry.ts, Dip live
+    // defect 2026-11-15: a MiniMax 529 ate the owner's turn on the
+    // spot) ride a SEPARATE bounded budget: an HTTP 429 or 5xx is
+    // the provider blinking, so the same call retries in place on
+    // the backoff schedule - 3.5s of added wait at most, far inside
+    // the interactive deadline. A non-transient status surfaces
+    // immediately, exactly as before. The backoff rides the turn's
+    // abort signal: when it fires mid-wait (Reset, deadline), the
+    // original error surfaces instead, so the turn layer's control
+    // checks close the turn as they always have.
     let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    let emptyAttempts = 0;
+    let transientRetries = 0;
+    for (;;) {
       try { return await this.connectorTurnOnce(model, messages, tools); }
-      catch (e) { if (e instanceof Error && (e.message === "Empty model response" || e.message === "Unsafe model output")) { lastError = e; continue; } throw e; }
+      catch (e) {
+        if (e instanceof Error && (e.message === "Empty model response" || e.message === "Unsafe model output")) {
+          lastError = e;
+          emptyAttempts++;
+          if (emptyAttempts < 3) continue;
+          throw lastError;
+        }
+        const status = providerHttpStatus(e);
+        if (status !== null && isTransientHttpStatus(status) && transientRetries < TRANSIENT_RETRY_LIMIT) {
+          transientRetries++;
+          const delayMs = TRANSIENT_RETRY_DELAYS_MS[Math.min(transientRetries - 1, TRANSIENT_RETRY_DELAYS_MS.length - 1)];
+          this.reportProviderRetry(status, transientRetries, delayMs);
+          if (!await this.waitForRetry(delayMs)) throw e;
+          continue;
+        }
+        throw e;
+      }
     }
-    throw lastError;
   }
   private async connectorTurnOnce(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     if(!model.trim()||messages.length<1||messages.length>50||tools.length>20)throw Error("Invalid connector model request");

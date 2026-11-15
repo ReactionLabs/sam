@@ -21,6 +21,7 @@ import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
 import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
+import { isProviderOverloadError, PROVIDER_OVERLOAD_MESSAGE } from "./provider-retry.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, type TurnControl } from "./turn-control.js";
@@ -329,6 +330,11 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
         try{const store=new ChatStore(root);try{partialId=store.savePartial(chatId,partialId,text);}finally{store.close();}}catch{/* a partial write never breaks the read */}
       };
       provider.onUsage=(usage,usedModel)=>{turnTokens+=typeof usage.totalTokens==="number"?usage.totalTokens:usage.promptTokens+usage.completionTokens;recordUsage(root,{actor:profileName,route,tier,model:usedModel,...usage});};
+      // Provider overload resilience (provider-retry.ts): each
+      // transient retry the provider schedules inside this turn
+      // ledgers one line, so the record shows the hiccup; the
+      // recovery is this turn's own success line below.
+      provider.onProviderRetry=(info)=>{try{recordActivity(root,profileName,"provider-retry","Provider retry in chat "+chatId.slice(0,8)+": the model request failed (HTTP "+info.status+"), retry "+info.retry+" of "+info.limit+" after "+info.delayMs+"ms backoff");}catch{/* the ledger never breaks a turn */}};
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
@@ -382,6 +388,32 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
         if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
         recordSessionTurn(root,{chatId,route,tokens:turnTokens});
         return "";
+      }
+      // Provider overload (Dip live defect, 2026-11-15): a 5xx
+      // failure on the LAST route has already spent the provider's
+      // in-turn retries (provider-retry.ts) - the provider sits in
+      // an overload window, which is NOT the rate-limit class
+      // above: a 429 / quota failure takes the grace path and
+      // never reaches here, and this branch never fires for one.
+      // The turn still fails - the throw below ledgers turn-failed
+      // and the queue marks the message failed, not lost, exactly
+      // as today - but first the chat gets the one plain outage
+      // note, so the owner reads words instead of staring at a
+      // bare failed tag. Saved before the rethrow, exactly once:
+      // a partial this turn left open is finished with the note
+      // rather than joined by a second assistant row. Machine
+      // routes keep the bare throw (job-failed is their contract)
+      // and a visitor hears the door's plain failure - the
+      // owner's provider state is not a customer's business.
+      if(!visitor&&route==="chat"&&isProviderOverloadError(error)){
+        try{
+          const store=new ChatStore(root);
+          try{
+            if(partialId){if(!store.finishPartial(chatId,partialId,PROVIDER_OVERLOAD_MESSAGE))store.add(chatId,"assistant",PROVIDER_OVERLOAD_MESSAGE);}
+            else store.add(chatId,"assistant",PROVIDER_OVERLOAD_MESSAGE);
+          }finally{store.close();}
+        }catch{/* the note never breaks the failure path: the throw below still marks the message failed */}
+        try{recordActivity(root,profileName,"provider-overload","Provider overloaded in chat "+chatId.slice(0,8)+": in-turn retries exhausted, the plain outage note is in the chat and the message stays marked failed, not lost (the raw provider error never reaches the owner)");}catch{/* the ledger never breaks a turn */}
       }
       // A turn that dies mid-flight still spent what it spent; the
       // session ledger records it so the caps see the true total.
