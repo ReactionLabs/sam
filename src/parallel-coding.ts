@@ -652,7 +652,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       catch (e) { close("blocked", "The coordinator worktree could not be created: " + (e instanceof Error ? e.message : String(e))); continue; }
       for (const slice of job.slices) {
         if (slice.status !== "done") continue;
-        const merge = gitIn(mergedTree, ["merge", "--no-ff", "--no-edit", "-m", "sam: merge slice " + slice.name + " (" + job.title.slice(0, 60) + ")", slice.branch]);
+        const merge = gitIn(mergedTree, ["-c", "user.name=SAM", "-c", "user.email=sam@localhost", "merge", "--no-ff", "--no-edit", "-m", "sam: merge slice " + slice.name + " (" + job.title.slice(0, 60) + ")", slice.branch]);
         if (merge.ok) { job.merges.push({ slice: slice.name, ok: true, conflicts: [] }); continue; }
         const conflictProbe = gitIn(mergedTree, ["diff", "--name-only", "--diff-filter=U"]);
         const conflicts = conflictProbe.ok ? conflictProbe.out.split("\n").map(s => s.trim()).filter(Boolean) : [];
