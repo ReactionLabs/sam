@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { auditStoreTouch } from "./audit-store-failure.js";
 import { listActions } from "./actions.js";
 import { loadApprovalPolicy, neverListSummary } from "./approval-policy.js";
 import { authStatus } from "./auth-status.js";
@@ -113,6 +114,10 @@ function auditStoreExists(root: string): boolean {
  *  no store at all creates nothing. */
 export function readSelfAudit(root: string): SelfAudit | null {
   if (!auditStoreExists(root)) return null;
+  return auditStoreTouch(root, "self-audit", "read", () => readSelfAuditRecord(root));
+}
+
+function readSelfAuditRecord(root: string): SelfAudit | null {
   const db = openAuditStore(root);
   try {
     const row = db.prepare("SELECT data FROM self_audit WHERE id = 1").get() as { data: string } | undefined;
@@ -122,10 +127,12 @@ export function readSelfAudit(root: string): SelfAudit | null {
 }
 
 function saveSelfAudit(root: string, audit: SelfAudit): void {
-  const db = openAuditStore(root);
-  try {
-    db.prepare("INSERT INTO self_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
-  } finally { db.close(); }
+  auditStoreTouch(root, "self-audit", "write", () => {
+    const db = openAuditStore(root);
+    try {
+      db.prepare("INSERT INTO self_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
+    } finally { db.close(); }
+  });
 }
 
 /** Assemble the audit from the live doors. Deterministic, no

@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { auditStoreTouch } from "./audit-store-failure.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { OWN_TOOLS } from "./own-tools.js";
@@ -177,6 +178,10 @@ function auditStoreExists(root: string): boolean {
  *  no store at all creates nothing. */
 export function readPromptAudit(root: string): PromptAudit | null {
   if (!auditStoreExists(root)) return null;
+  return auditStoreTouch(root, "prompt-audit", "read", () => readPromptAuditRecord(root));
+}
+
+function readPromptAuditRecord(root: string): PromptAudit | null {
   const db = openAuditStore(root);
   try {
     const row = db.prepare("SELECT data FROM prompt_audit WHERE id = 1").get() as { data: string } | undefined;
@@ -186,10 +191,12 @@ export function readPromptAudit(root: string): PromptAudit | null {
 }
 
 function savePromptAudit(root: string, audit: PromptAudit): void {
-  const db = openAuditStore(root);
-  try {
-    db.prepare("INSERT INTO prompt_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
-  } finally { db.close(); }
+  auditStoreTouch(root, "prompt-audit", "write", () => {
+    const db = openAuditStore(root);
+    try {
+      db.prepare("INSERT INTO prompt_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
+    } finally { db.close(); }
+  });
 }
 
 /** Run the audit over the live shipped surfaces: build it,

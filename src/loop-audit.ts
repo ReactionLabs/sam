@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { auditStoreTouch } from "./audit-store-failure.js";
 import { budgetFallbackAnswer, toolBudget, trimHistoryForRetry } from "./budgets.js";
 import { loaderLoopFallbackAnswer } from "./tool-tiers.js";
 import { recordChange, recordVerification, verificationGate, verificationStatus, type VerificationStatus } from "./verification.js";
@@ -216,6 +217,10 @@ function auditStoreExists(root: string): boolean {
  *  no store at all creates nothing. */
 export function readLoopAudit(root: string): LoopAudit | null {
   if (!auditStoreExists(root)) return null;
+  return auditStoreTouch(root, "loop-audit", "read", () => readLoopAuditRecord(root));
+}
+
+function readLoopAuditRecord(root: string): LoopAudit | null {
   const db = openAuditStore(root);
   try {
     const row = db.prepare("SELECT data FROM loop_audit WHERE id = 1").get() as { data: string } | undefined;
@@ -225,10 +230,12 @@ export function readLoopAudit(root: string): LoopAudit | null {
 }
 
 function saveLoopAudit(root: string, audit: LoopAudit): void {
-  const db = openAuditStore(root);
-  try {
-    db.prepare("INSERT INTO loop_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
-  } finally { db.close(); }
+  auditStoreTouch(root, "loop-audit", "write", () => {
+    const db = openAuditStore(root);
+    try {
+      db.prepare("INSERT INTO loop_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
+    } finally { db.close(); }
+  });
 }
 
 /** Run the audit over the live loop machinery and stores: build

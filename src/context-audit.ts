@@ -5,6 +5,7 @@ import { MemoryStore, MEMORY_RECORD_MAX_WORDS } from "./memory.js";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { auditStoreTouch } from "./audit-store-failure.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
 import { ChatStore } from "./chats.js";
@@ -185,6 +186,10 @@ function auditStoreExists(root: string): boolean {
  *  no store at all creates nothing. */
 export function readContextAudit(root: string): ContextAudit | null {
   if (!auditStoreExists(root)) return null;
+  return auditStoreTouch(root, "context-audit", "read", () => readContextAuditRecord(root));
+}
+
+function readContextAuditRecord(root: string): ContextAudit | null {
   const db = openAuditStore(root);
   try {
     const row = db.prepare("SELECT data FROM context_audit WHERE id = 1").get() as { data: string } | undefined;
@@ -194,10 +199,12 @@ export function readContextAudit(root: string): ContextAudit | null {
 }
 
 function saveContextAudit(root: string, audit: ContextAudit): void {
-  const db = openAuditStore(root);
-  try {
-    db.prepare("INSERT INTO context_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
-  } finally { db.close(); }
+  auditStoreTouch(root, "context-audit", "write", () => {
+    const db = openAuditStore(root);
+    try {
+      db.prepare("INSERT INTO context_audit (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(audit));
+    } finally { db.close(); }
+  });
 }
 
 /** Run the audit over the live assembly and stores: build it,

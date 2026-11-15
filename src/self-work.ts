@@ -568,6 +568,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed touch rethrows instead of folding the store as an empty queue (which would silently drop the owner's queued messages dressed as nothing pending, the one loss this store exists to prevent), a touch already ledgered by an inner door is never recorded twice across either module's handle, and a failure line never carries a queue record (message content is the owner's words, not failure data)",
      "A fresh install still reads as an empty queue with no line (this store's reads create the file by design, schema on every open), exactly as before",
      "The full suite is green, including the chat queue store failure-ledger tests"]);
+  if (key.startsWith("audit-store-failed:")) return base(
+    ["audit-store-failure.ts", "self-audit.ts", "prompt-audit.ts", "context-audit.ts", "loop-audit.ts", "eval-battery.ts", "cli.ts"],
+    "Audit store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the singleton audit stores (.sam/self-audit.db, prompt-audit.db, context-audit.db, loop-audit.db, eval-battery.db: one row each, the latest scorecard of SAM's measuring instruments - the capability map self-work picks rest on, the prompt / context / loop scorecards, and the eval battery's ship verdict) must open, read, and write instead of dying at that seam - while one is dead its audit run loses its scorecard at the save with the seam unnamed, and the status payload and CLI audit views that read it die raw or fold it as no audit recorded.",
+    ["The next audit runs record their scorecards again instead of audit-store-failed lines, and the status and CLI reads return them",
+     "Exactly one audit-store-failed ledger line still lands per genuinely failed touch, naming the store, the phase, and the verbatim reason, so the class stays countable",
+     "The stores still fail closed exactly as before: a failed read rethrows instead of folding the store as no audit recorded (which would silently empty an instrument's history dressed as a version that never ran), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries an audit record (findings can quote the owner's surfaces, not failure data)",
+     "An absent store still reads as no audit with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (null, never fatal)",
+     "The full suite is green, including the audit store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -897,6 +905,12 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Chat queue store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "chat-queue-failed:" + phase, label: "chat queue store failures (" + phase + " step)" };
+    }
+    case "audit-store-failed": {
+      const m = summary.match(/^Audit store ([a-z-]+) ([a-z]+) failed/);
+      const store = m ? m[1] : "unknown";
+      const phase = m ? m[2] : "unknown";
+      return { key: "audit-store-failed:" + store + ":" + phase, label: "audit store failures (" + store + ", " + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);

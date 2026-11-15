@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
+import { auditStoreTouch } from "./audit-store-failure.js";
 import { MemoryStore } from "./memory.js";
 import { ChatStore } from "./chats.js";
 import { forceCompactChat } from "./compaction.js";
@@ -201,6 +202,10 @@ function batteryStoreExists(root: string): boolean {
  *  no store at all creates nothing. */
 export function readEvalBattery(root: string): EvalBattery | null {
   if (!batteryStoreExists(root)) return null;
+  return auditStoreTouch(root, "eval-battery", "read", () => readEvalBatteryRecord(root));
+}
+
+function readEvalBatteryRecord(root: string): EvalBattery | null {
   const db = openBatteryStore(root);
   try {
     const row = db.prepare("SELECT data FROM eval_battery WHERE id = 1").get() as { data: string } | undefined;
@@ -210,10 +215,12 @@ export function readEvalBattery(root: string): EvalBattery | null {
 }
 
 function saveEvalBattery(root: string, battery: EvalBattery): void {
-  const db = openBatteryStore(root);
-  try {
-    db.prepare("INSERT INTO eval_battery (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(battery));
-  } finally { db.close(); }
+  auditStoreTouch(root, "eval-battery", "write", () => {
+    const db = openBatteryStore(root);
+    try {
+      db.prepare("INSERT INTO eval_battery (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(battery));
+    } finally { db.close(); }
+  });
 }
 
 /** Run the battery, compare against the previous recorded run,
