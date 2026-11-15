@@ -18,6 +18,8 @@ On Unix the `.sam` directory is mode 0700 and the socket is mode 0600, so anothe
 
 On Windows, Node's `net` module creates the named pipe with a null security descriptor and does not expose a handle SAM can put a DACL on. SAM does not claim that the pipe ACL denies other users. A process that can open the pipe still cannot `ping` or `stop` without the token. The token file's protection on Windows is best-effort (`chmod` is not an NTFS ACL). A local user who can read that file can control the daemon. That is the owner-only limit: control belongs to processes that can read the install's token, which is the owner's account.
 
+The negative tests run on Ubuntu (inside the full suite) and on Windows (a CI job that runs only the daemon suites). The rest of the suite is not run on Windows: a checkout there rewrites the reserved `src/engine.ts` probe lines to CRLF, which the byte-identity check rejects, and a few path tests assume a Linux host.
+
 ## What a captured request can still do
 
 A request sniffed from a same-user process can be replayed until its timestamp is older than 60 seconds, and only if the daemon has not already seen that nonce. The nonce memory is in the daemon process. After a restart the memory is empty, and a captured request is still rejected once its timestamp leaves the 60-second window. SAM does not claim resistance to a same-user attacker who can read the token file: that attacker is inside the owner boundary and can mint a fresh request.
