@@ -4,6 +4,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { join, resolve } from "node:path";
 import { discoverSkills, parseSkillMetadata, type SkillEntry } from "./skills.js";
+import { skillUseEntries } from "./skill-use.js";
 import { installedSkills } from "./skill-registry.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
 import { ChatStore } from "./chats.js";
@@ -48,9 +49,14 @@ import { recordActivity } from "./activity.js";
 // unmatchable description. Each finding carries a suggested patch in
 // words; findings persist in .sam/skill-curator.db and a changed
 // finding set writes ONE curator ledger line, so a standing problem
-// is reported once, not every 15 minutes. Usage-based staleness (a
-// skill nobody loads) is NOT claimed: SAM has no skill-use tracking,
-// so the curator stays silent about it rather than faking a signal.
+// is reported once, not every 15 minutes. Usage staleness rides
+// the skill-use ledger (skill-use.ts, landed 2026-11-10): a skill
+// nobody loads is flagged unused, and one not loaded in 30 days is
+// flagged stale - but only once the ledger's own span covers 14
+// days, so a young install's silence is never dressed as neglect,
+// and a dead ledger yields no usage findings at all (its read
+// ledgers its own failure line at its own seam) rather than a
+// false "nothing is used".
 export interface SkillDraft { name: string; description: string; instructions: string }
 export interface AuthoredSkill { name: string; source: "sam-authored"; actor: string; version: number; createdAt: string; updatedAt: string }
 
@@ -268,7 +274,14 @@ export function writeAuthoredSkill(root: string, draftInput: SkillDraft, opts: {
 
 // --- Curator ---
 
-export type CuratorFindingKind = "duplicate-content" | "duplicate-description" | "shadowed" | "orphaned-provenance" | "unmatchable-description";
+export type CuratorFindingKind = "duplicate-content" | "duplicate-description" | "shadowed" | "orphaned-provenance" | "unmatchable-description" | "unused-skill" | "stale-skill";
+// Usage-staleness windows (curator usage pass): the skill-use
+// ledger must itself span SKILL_TRACKING_MIN_DAYS before any
+// usage finding can fire, and a used skill goes stale after
+// SKILL_STALE_DAYS without a recorded load.
+export const SKILL_TRACKING_MIN_DAYS = 14;
+export const SKILL_STALE_DAYS = 30;
+const DAY_MS = 86_400_000;
 export interface CuratorFinding { id: string; kind: CuratorFindingKind; skills: string[]; detail: string; suggestedPatch: string }
 
 function bodyOf(markdown: string): string {
@@ -323,9 +336,52 @@ function shadowedSkills(root: string): CuratorFinding[] {
   return findings;
 }
 
-export function curateSkills(root: string): CuratorFinding[] {
+// Usage findings from the skill-use ledger: one line per
+// sam_read_skill the MODEL made, so this answers "which skills
+// is SAM actually riding". The claim is fenced by the ledger's
+// own age: until tracking spans SKILL_TRACKING_MIN_DAYS, silence
+// proves nothing and no finding fires. A dead ledger read throws
+// out of skillUseEntries AFTER ledgering its own skill-use-failed
+// line; here that reads as "no usage signal" (skip the pass),
+// never as "nothing is used".
+function usageFindings(root: string, skills: SkillEntry[], now: Date): CuratorFinding[] {
+  let entries: ReturnType<typeof skillUseEntries>;
+  try { entries = skillUseEntries(root); } catch { return []; }
+  if (!entries.length) return [];
+  const times = entries.map(e => Date.parse(e.at)).filter(t => Number.isFinite(t));
+  if (!times.length) return [];
+  const trackingStart = Math.min(...times);
+  if (now.getTime() - trackingStart < SKILL_TRACKING_MIN_DAYS * DAY_MS) return [];
+  const lastUse = new Map<string, number>();
+  for (const e of entries) {
+    const t = Date.parse(e.at);
+    if (!Number.isFinite(t)) continue;
+    if (t > (lastUse.get(e.skill) ?? -Infinity)) lastUse.set(e.skill, t);
+  }
+  const findings: CuratorFinding[] = [];
+  const since = new Date(trackingStart).toISOString().slice(0, 10);
+  for (const skill of skills) {
+    const last = lastUse.get(skill.name);
+    if (last === undefined) {
+      findings.push({
+        id: findingId("unused-skill", [skill.name]), kind: "unused-skill", skills: [skill.name],
+        detail: "Skill \"" + skill.name + "\" has no recorded use since skill-use tracking began on " + since + " (" + Math.floor((now.getTime() - trackingStart) / DAY_MS) + " days of tracking), so auto-selection carries it in every catalog without it ever being loaded.",
+        suggestedPatch: "If it is still wanted, its next matching task will load it and record the use; otherwise the owner can remove it so the catalog stops carrying dead weight.",
+      });
+    } else if (now.getTime() - last >= SKILL_STALE_DAYS * DAY_MS) {
+      findings.push({
+        id: findingId("stale-skill", [skill.name]), kind: "stale-skill", skills: [skill.name],
+        detail: "Skill \"" + skill.name + "\" was last loaded on " + new Date(last).toISOString().slice(0, 10) + ", " + Math.floor((now.getTime() - last) / DAY_MS) + " days ago, past the " + SKILL_STALE_DAYS + "-day staleness window.",
+        suggestedPatch: "If the work it covers still happens, its description may no longer match how tasks are phrased - refresh the description; if the work is gone, the owner can remove the skill.",
+      });
+    }
+  }
+  return findings;
+}
+
+export function curateSkills(root: string, now: Date = new Date()): CuratorFinding[] {
   const skills = discoverSkills(root);
-  const findings: CuratorFinding[] = [...shadowedSkills(root)];
+  const findings: CuratorFinding[] = [...shadowedSkills(root), ...usageFindings(root, skills, now)];
   // Duplicate bodies: the same playbook under two names.
   const byBody = new Map<string, string[]>();
   for (const skill of skills) {
