@@ -6,6 +6,7 @@ import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { addHeartbeatJob } from "./heartbeat.js";
 import { connectors } from "./connectors.js";
+import { recordActivity } from "./activity.js";
 
 // Minis: a mini is a scoped SAM spawned for one person. Under the hood it is a
 // profile plus a registry record, and everything SAM has learned to scope by
@@ -43,6 +44,77 @@ function minisDbFile(root:string){return join(resolve(root),".sam","minis.db");}
 // file creates nothing. The P9 backup snapshots every .sam/*.db
 // generically, so the migrated store is carried with no backup
 // change.
+// Failure visibility (gap found 2026-11-14, hourly run
+// 23:04 EST): the minis registry holds one row per scoped
+// SAM - its id, profile name, and person - and every touch
+// opened it raw. minis() rides the dashboard status build,
+// the door handler, self-audit, spawn validation, and the
+// CLI; the writes ride spawn, update, and remove (the ONE
+// gate's spawn executor among them). A dead minis.db threw
+// into whichever catch wrapped the call with the seam
+// unnamed, and no mini-store-failed kind existed, so the
+// class was uncountable, and any reader folding a dead store
+// as "no minis" would silently drop every scoped SAM dressed
+// as an empty registry - an orphaned profile no console
+// lists and no door serves. Now the store's touches own
+// their failure (the loops / failover precedent): a failed
+// touch ledgers ONE mini-store-failed line (phase read for
+// minis / findMiniRow, write for insertMiniRow /
+// updateMiniRow / removeMini's delete; actor sam; the
+// verbatim reason collapsed and capped; never any mini
+// record - names and persons are people's data, not failure
+// data), tags the error, and rethrows exactly, so every
+// caller's handling is unchanged and reads still fail
+// closed. A touch already ledgered by an inner door keeps
+// its one line and gains no second (updateMini and
+// removeMini ride the read + write doors; spawnMini's
+// ChatStore and heartbeat writes are other stores' seams
+// and are never dressed as this one). Validation errors
+// (invalid mini name / person, Mini already exists, the
+// spawn-detail refusals) are not store failures and ledger
+// nothing. An absent store still reads empty with no line
+// and creates nothing, and torn row payloads still parse
+// forgiving - only the store touch is guarded.
+export type MiniStorePhase = "read" | "write";
+
+export function miniStoreFailureSummary(phase: MiniStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Mini store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordMiniStoreFailure(root: string, phase: MiniStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "mini-store-failed", miniStoreFailureSummary(phase, reason));
+}
+
+function tagMiniStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { miniStoreLedgered?: boolean }).miniStoreLedgered = true;
+  }
+}
+
+export function isMiniStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { miniStoreLedgered?: boolean }).miniStoreLedgered === true;
+}
+
+const MINI_STORE_VALIDATION = [/^Invalid mini name$/, /^Invalid person$/, /^Mini already exists$/, /^Invalid spawn/, /^Cannot spawn/];
+
+function isMiniStoreValidation(error: unknown): boolean {
+  return error instanceof Error && MINI_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failMiniStore(root: string, phase: MiniStorePhase, error: unknown): never {
+  if (!isMiniStoreLedgered(error) && !isMiniStoreValidation(error)) recordMiniStoreFailure(root, phase, error);
+  if (!isMiniStoreValidation(error)) tagMiniStoreLedgered(error);
+  throw error;
+}
+
+function openMinisGuarded(root: string, phase: MiniStorePhase): Database.Database {
+  try { return openMinisStore(root); }
+  catch (error) { failMiniStore(root, phase, error); }
+}
+
 function openMinisStore(root:string):Database.Database{
  const dir=join(resolve(root),".sam");
  mkdirSync(dir,{recursive:true,mode:0o700});
@@ -81,30 +153,34 @@ function storeExists(root:string):boolean{
 }
 export function minis(root:string):Mini[]{
  if(!storeExists(root))return [];
- const db=openMinisStore(root);
+ const db=openMinisGuarded(root,"read");
  try{
   const rows=db.prepare("SELECT data FROM minis ORDER BY rowid").all() as Array<{data:string}>;
   const items:Mini[]=[];
   for(const row of rows){const mini=rowToMini(row.data);if(mini)items.push(mini);}
   return items;
- }finally{db.close();}
+ }catch(error){failMiniStore(root,"read",error);}
+ finally{db.close();}
 }
 function findMiniRow(root:string,id:string):Mini|null{
  if(!storeExists(root))return null;
- const db=openMinisStore(root);
+ const db=openMinisGuarded(root,"read");
  try{
   const row=db.prepare("SELECT data FROM minis WHERE id = ?").get(id) as {data:string}|undefined;
   return row?rowToMini(row.data):null;
- }finally{db.close();}
+ }catch(error){failMiniStore(root,"read",error);}
+ finally{db.close();}
 }
 function insertMiniRow(root:string,item:Mini):void{
- const db=openMinisStore(root);
+ const db=openMinisGuarded(root,"write");
  try{db.prepare("INSERT INTO minis (id, data) VALUES (?, ?)").run(item.id,JSON.stringify(item));}
+ catch(error){failMiniStore(root,"write",error);}
  finally{db.close();}
 }
 function updateMiniRow(root:string,item:Mini):void{
- const db=openMinisStore(root);
+ const db=openMinisGuarded(root,"write");
  try{db.prepare("UPDATE minis SET data = ? WHERE id = ?").run(JSON.stringify(item),item.id);}
+ catch(error){failMiniStore(root,"write",error);}
  finally{db.close();}
 }
 // The store's update door (the updateLinkGroup precedent): patch one
@@ -172,9 +248,10 @@ export function removeMini(root:string,name:string):boolean{
   if(!storeExists(root))return false;
   const target=minis(root).find(m=>m.name===name);
   if(!target)return false;
-  const db=openMinisStore(root);
+  const db=openMinisGuarded(root,"write");
   try{
     const result=db.prepare("DELETE FROM minis WHERE id = ?").run(target.id);
     return result.changes>0;
-  }finally{db.close();}
+  }catch(error){failMiniStore(root,"write",error);}
+  finally{db.close();}
 }
