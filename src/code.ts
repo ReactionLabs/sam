@@ -133,18 +133,72 @@ function codeStoreExists(root: string): boolean {
   return existsSync(configDbPath(root)) || existsSync(configPath(root));
 }
 
+// Code store failure visibility (hourly run 2026-11-15): this
+// store is the C1 fence - the one row that decides which tree
+// SAM's coder hands may write in at all - and every touch was
+// unguarded. readCodeStore rides readConfig / codeRoot into
+// every sam_code call, the coding loop, the C6 engine
+// validation, git-work, goldfish, orchestration,
+// parallel-coding, run-inspector, self-work, and the status
+// builds, and no caller folds that read - a dead .sam/code.db
+// threw raw into every one of them with the seam unnamed, and
+// which surface died depended only on which coder door was
+// touched first. Now the store owns its touches (the dashboard-config
+// precedent, the closest sibling singleton config store): a
+// failed open/read/write ledgers ONE code-store-failed line
+// (phase read for the read door, phase write for the write
+// door; actor sam; the verbatim reason collapsed and capped;
+// never any config content - the designated path is fence
+// data, not failure data) and rethrows exactly, tagged so a
+// catching caller records nothing more for the same touch. An
+// absent store still reads as no designation with no line and
+// creates nothing, and a torn row payload still parses
+// forgiving to no designation - only the store touch is
+// guarded. setCodeRoot's validation refusals run before any
+// store touch and ledger nothing.
+export type CodeStorePhase = "read" | "write";
+
+export function codeStoreFailureSummary(phase: CodeStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Code store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordCodeStoreFailure(root: string, phase: CodeStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "code-store-failed", codeStoreFailureSummary(phase, reason));
+}
+
+function tagCodeStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { codeStoreLedgered?: boolean }).codeStoreLedgered = true;
+  }
+}
+
+export function isCodeStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { codeStoreLedgered?: boolean }).codeStoreLedgered === true;
+}
+
+function failCodeStore(root: string, phase: CodeStorePhase, error: unknown): never {
+  if (!isCodeStoreLedgered(error)) recordCodeStoreFailure(root, phase, error);
+  tagCodeStoreLedgered(error);
+  throw error;
+}
+
 /** The store's read door: the recorded designation through the
  *  store's own shape, or null when none has ever been recorded -
  *  and a read on an install with no store at all creates
  *  nothing. */
 export function readCodeStore(root: string): CodeConfig | null {
   if (!codeStoreExists(root)) return null;
-  const db = openCodeStore(root);
+  let db: Database.Database;
+  try { db = openCodeStore(root); } catch (error) { failCodeStore(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM code_config WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return null;
     try { return parseCodeConfig(JSON.parse(row.data)); } catch { return null; }
-  } finally { db.close(); }
+  } catch (error) { failCodeStore(root, "read", error); }
+  finally { db!.close(); }
 }
 
 function readConfig(root: string): CodeConfig {
@@ -152,10 +206,12 @@ function readConfig(root: string): CodeConfig {
 }
 
 function writeConfig(root: string, cfg: CodeConfig): void {
-  const db = openCodeStore(root);
+  let db: Database.Database;
+  try { db = openCodeStore(root); } catch (error) { failCodeStore(root, "write", error); }
   try {
-    db.prepare("INSERT INTO code_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(cfg));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO code_config (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(cfg));
+  } catch (error) { failCodeStore(root, "write", error); }
+  finally { db!.close(); }
 }
 
 /** The designated code root (absolute, realpath'd), or null when the

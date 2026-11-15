@@ -584,6 +584,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no memory (which would silently empty every profile's curated memory dressed as a fresh install), a touch already ledgered by an inner door (the capture-guard backstop inside add, an inner get inside setAliases) is never recorded twice, and a failure line never carries a memory record (content is the owner's words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation and data errors (bad kind / scope / alias shapes, the size and hot-budget refusals, the invalid search limit) and a capture-guard suppression still ledger nothing, and a bare-path construction with no install root still rethrows bare, never dressed as ledgered",
      "The full suite is green, including the memory store failure-ledger tests"]);
+  if (key.startsWith("code-store-failed:")) return base(
+    ["code.ts", "coding.ts", "engine.ts", "own-tools.ts"],
+    "Code store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the code store (.sam/code.db: the designated code root, the one row that decides which tree SAM's coder hands may write in at all - the C1 fence) must open, read, and write instead of dying at that seam - while it is dead every sam_code call, coding task, engine validation, and status build rides a dying codeRoot read with the seam unnamed, or a folding caller reads the dead fence store as no root designated, indistinguishable from an operator who never set one.",
+    ["The next code reads, coding tasks, engine runs, and status builds resolve the designated root again instead of code-store-failed lines, and a designation through the CLI lands",
+     "Exactly one code-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed direct read rethrows instead of folding the store as no designation (which would silently un-fence or mis-fence the coder hands dressed as an unset root), a touch already ledgered by the store is never recorded twice by a catching caller, and a failure line never carries any config content (the designated path is fence data, not failure data)",
+     "An absent store still reads as no designation with no line and creates nothing, exactly as a fresh install expects, torn rows still parse forgiving, and setCodeRoot's validation refusals (missing / non-directory / SAM-home fences) still ledger nothing",
+     "The full suite is green, including the code store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -924,6 +932,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Memory store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "memory-store-failed:" + phase, label: "memory store failures (" + phase + " step)" };
+    }
+    case "code-store-failed": {
+      const m = summary.match(/^Code store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "code-store-failed:" + phase, label: "code store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);
