@@ -2,8 +2,9 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { findSuppressionHitInDb, suppressionProfilesForScope, MemorySuppressedError } from "./capture-guard.js";
+import { basename, dirname, join, resolve } from "node:path";
+import { recordActivity } from "./activity.js";
+import { findSuppressionHitInDb, suppressionProfilesForScope, MemorySuppressedError, isCaptureGuardLedgered } from "./capture-guard.js";
 
 export type MemoryKind = "observation" | "decision" | "failure" | "procedure";
 export interface MemoryRecord {
@@ -40,6 +41,87 @@ function parseAliases(raw:unknown):string[] {
 }
 type RawRecord=Omit<MemoryRecord,"aliases">&{aliases?:unknown};
 function toRecord(row:RawRecord):MemoryRecord { return {...row,aliases:parseAliases(row.aliases)}; }
+// Failure visibility (gap found 2026-11-15, hourly run
+// 11:04 EST): the memory store is this class riding
+// missions.db - the file the TaskScheduler's guard covered
+// at 03:04 for its own tables, while the memory side of the
+// same file (every recall block, saved note, episode flush,
+// compaction flush, patch validation, and memory own-tool)
+// opened raw at every touch with no ledger import at all,
+// so a dead store threw with the seam unnamed into
+// whichever catch wrapped the call, and the seams that fold
+// by design (recall degrading to an empty block, flushes
+// degrading quietly) would silently empty SAM's memory
+// dressed as an install that remembers nothing. Now the
+// class's touches own their failure (the chats /
+// preferences precedent, adapted to a path-shaped class
+// like the tasks store): a failed touch ledgers ONE
+// memory-store-failed line (the constructor's open at
+// phase write, because the open performs the schema writes
+// and migrations; list / search / get at phase read; add /
+// setAliases / archive at phase write; actor sam; the
+// verbatim reason collapsed and capped; never any memory
+// record - content is the owner's words, not failure data),
+// tags the error, and rethrows exactly, so every caller's
+// handling is unchanged and reads still fail closed. The
+// ledger root derives from the store path itself: every
+// production door constructs the store at
+// <root>/.sam/missions.db, so a path inside a .sam
+// directory names its install; a bare-path construction
+// (unit tests, scratch harnesses) has no install ledger to
+// write to and rethrows bare, exactly as before - never
+// dressed as ledgered (the tasks precedent). A touch
+// already ledgered by an inner door (the capture guard's
+// backstop read inside add, an inner get inside setAliases)
+// gains no second line. Validation and data errors (the
+// kind / scope / alias shapes, the size and hot-budget
+// refusals, the invalid search limit) and
+// MemorySuppressedError (the capture guard holding is the
+// system working, not a store failure) are not store
+// failures and ledger nothing.
+export type MemoryStorePhase = "read" | "write";
+
+export function memoryStoreFailureSummary(phase: MemoryStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Memory store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordMemoryStoreFailure(root: string, phase: MemoryStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "memory-store-failed", memoryStoreFailureSummary(phase, reason));
+}
+
+function tagMemoryStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { memoryStoreLedgered?: boolean }).memoryStoreLedgered = true;
+  }
+}
+
+export function isMemoryStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { memoryStoreLedgered?: boolean }).memoryStoreLedgered === true;
+}
+
+/** The install root a store path names, or null when the
+ *  path does not live in a .sam directory (a bare-path
+ *  construction has no install ledger). */
+export function memoryStoreLedgerRoot(path: string): string | null {
+  const dir = dirname(resolve(path));
+  return basename(dir) === ".sam" ? dirname(dir) : null;
+}
+
+const MEMORY_STORE_VALIDATION = [/^Invalid memory kind/, /^Memory requires content and provenance$/, /^Memory exceeds size limit$/, /^Memory record exceeds the hot-memory budget/, /^Invalid memory scope$/, /^Invalid memory alias/, /^Invalid result limit$/];
+
+function isMemoryStoreValidation(error: unknown): boolean {
+  if (error instanceof MemorySuppressedError) return true;
+  return error instanceof Error && MEMORY_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failMemoryStore(root: string | null, phase: MemoryStorePhase, error: unknown): never {
+  if (root !== null && !isMemoryStoreLedgered(error) && !isCaptureGuardLedgered(error) && !isMemoryStoreValidation(error)) recordMemoryStoreFailure(root, phase, error);
+  if (root !== null && !isMemoryStoreValidation(error)) tagMemoryStoreLedgered(error);
+  throw error;
+}
 // Memory levels: "core" is the operator SAM's own memory. "profile:<name>" is
 // one profile's private memory, invisible to every other profile. "link:<id>"
 // is a link group's shared memory, visible to exactly that group's members.
@@ -66,11 +148,14 @@ export function countWords(text:string):number{
 export class MemoryStore {
   private db:Database.Database;
   private path:string;
+  private readonly ledgerRoot:string|null;
   constructor(path:string) {
     this.path=path;
+    this.ledgerRoot=memoryStoreLedgerRoot(path);
+    this.db=this.touch("write",()=>{
     mkdirSync(dirname(path),{recursive:true});
-    this.db=openDatabase(path);
-    this.db.exec(`
+    const db=openDatabase(path);
+    db.exec(`
       CREATE TABLE IF NOT EXISTS memory_records (
         id TEXT PRIMARY KEY, mission_id TEXT, kind TEXT NOT NULL,
         content TEXT NOT NULL, source TEXT NOT NULL, source_hash TEXT NOT NULL,
@@ -89,16 +174,23 @@ export class MemoryStore {
         INSERT INTO memory_search(rowid,content,source) VALUES(new.rowid,new.content,new.source);
       END;
     `);
-    const columns=this.db.pragma("table_info(memory_records)") as Array<{name:string}>;
+    const columns=db.pragma("table_info(memory_records)") as Array<{name:string}>;
     if(!columns.some(c=>c.name==="scope")){
-      this.db.exec("ALTER TABLE memory_records ADD COLUMN scope TEXT NOT NULL DEFAULT 'core'");
+      db.exec("ALTER TABLE memory_records ADD COLUMN scope TEXT NOT NULL DEFAULT 'core'");
     }
     if(!columns.some(c=>c.name==="aliases")){
-      this.db.exec("ALTER TABLE memory_records ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'");
+      db.exec("ALTER TABLE memory_records ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'");
     }
-    this.db.exec("CREATE INDEX IF NOT EXISTS memory_scope_idx ON memory_records(scope,created_at)");
+    db.exec("CREATE INDEX IF NOT EXISTS memory_scope_idx ON memory_records(scope,created_at)");
+    return db;
+    });
+  }
+  private touch<T>(phase:MemoryStorePhase, fn:()=>T):T{
+    try { return fn(); }
+    catch (error) { failMemoryStore(this.ledgerRoot, phase, error); }
   }
   add(input:{missionId?:string;kind:MemoryKind;content:string;source:string;scope?:string;aliases?:string[]}):MemoryRecord {
+    return this.touch("write",()=>{
     if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind. Choose observation, decision, failure, or procedure.");
     if(!input.content.trim() || !input.source.trim())throw new Error("Memory requires content and provenance");
     if(input.content.length>100_000)throw new Error("Memory exceeds size limit");
@@ -129,26 +221,32 @@ export class MemoryStore {
       VALUES (@id,@mission_id,@kind,@content,@source,@source_hash,@created_at,@archived_at,@scope,@aliases)`)
       .run({...record,aliases:JSON.stringify(aliases)});
     return record;
+    });
   }
   /** Replace a record's topic aliases (the editable door for
    *  the Q1 index). Returns the updated record, or null when
    *  no such record exists. Validation errors throw. */
   setAliases(id:string,aliases:string[]):MemoryRecord|null {
+    return this.touch("write",()=>{
     const clean=validateMemoryAliases(aliases);
     const existing=this.get(id);
     if(!existing)return null;
     this.db.prepare("UPDATE memory_records SET aliases=? WHERE id=?").run(JSON.stringify(clean),id);
     return {...existing,aliases:clean};
+    });
   }
   list(missionId?:string,scopes?:string[]):MemoryRecord[] {
+    return this.touch("read",()=>{
     const scopeSql=scopes&&scopes.length?" AND scope IN ("+scopes.map(()=>"?").join(",")+")":"";
     const scopeArgs=scopes&&scopes.length?scopes:[];
     const rows=(missionId
       ?this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL AND mission_id=?"+scopeSql+" ORDER BY created_at DESC").all(missionId,...scopeArgs)
       :this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL"+scopeSql+" ORDER BY created_at DESC").all(...scopeArgs)) as RawRecord[];
     return rows.map(toRecord);
+    });
   }
   search(query:string,limit=20,scopes?:string[]):MemoryRecord[] {
+    return this.touch("read",()=>{
     if(!query.trim())return [];
     if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error("Invalid result limit");
     const scopeSql=scopes&&scopes.length?" AND m.scope IN ("+scopes.map(()=>"?").join(",")+")":"";
@@ -157,16 +255,20 @@ export class MemoryStore {
       JOIN memory_records m ON m.rowid=s.rowid
       WHERE memory_search MATCH ? AND m.archived_at IS NULL${scopeSql}
       ORDER BY bm25(memory_search),m.created_at DESC LIMIT ?`).all(query,...(scopes&&scopes.length?scopes:[]),limit) as RawRecord[]).map(toRecord);
+    });
   }
   get(id:string):MemoryRecord|null {
+    return this.touch("read",()=>{
     // Includes archived records: patch/supersession validation needs to
     // distinguish "no such record" from "already retired".
     const row=this.db.prepare("SELECT * FROM memory_records WHERE id=?").get(id) as RawRecord|undefined;
     return row?toRecord(row):null;
+    });
   }
   archive(id:string):boolean {
-    return this.db.prepare("UPDATE memory_records SET archived_at=? WHERE id=? AND archived_at IS NULL")
-      .run(new Date().toISOString(),id).changes===1;
+    return this.touch("write",()=>
+    this.db.prepare("UPDATE memory_records SET archived_at=? WHERE id=? AND archived_at IS NULL")
+      .run(new Date().toISOString(),id).changes===1);
   }
   close():void {this.db.close();}
 }

@@ -576,6 +576,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The stores still fail closed exactly as before: a failed read rethrows instead of folding the store as no audit recorded (which would silently empty an instrument's history dressed as a version that never ran), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries an audit record (findings can quote the owner's surfaces, not failure data)",
      "An absent store still reads as no audit with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (null, never fatal)",
      "The full suite is green, including the audit store failure-ledger tests"]);
+  if (key.startsWith("memory-store-failed:")) return base(
+    ["memory.ts", "recall.ts", "notes.ts", "cli.ts"],
+    "Memory store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the memory store (the MemoryStore riding missions.db: every curated memory record with its scope and topic aliases, behind recall, saved notes, episode and compaction flushes, patch validation, and the memory own-tools) must open, read, and write instead of dying at that seam - while it is dead recall degrades to an empty block with the seam unnamed, flushes lose what they captured, and a reader folding it as no memory would silently empty SAM's memory dressed as an install that remembers nothing.",
+    ["The next recalls, note saves, flushes, and memory reads resolve their records again instead of memory-store-failed lines",
+     "Exactly one memory-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no memory (which would silently empty every profile's curated memory dressed as a fresh install), a touch already ledgered by an inner door (the capture-guard backstop inside add, an inner get inside setAliases) is never recorded twice, and a failure line never carries a memory record (content is the owner's words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation and data errors (bad kind / scope / alias shapes, the size and hot-budget refusals, the invalid search limit) and a capture-guard suppression still ledger nothing, and a bare-path construction with no install root still rethrows bare, never dressed as ledgered",
+     "The full suite is green, including the memory store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -911,6 +919,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const store = m ? m[1] : "unknown";
       const phase = m ? m[2] : "unknown";
       return { key: "audit-store-failed:" + store + ":" + phase, label: "audit store failures (" + store + ", " + phase + " step)" };
+    }
+    case "memory-store-failed": {
+      const m = summary.match(/^Memory store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "memory-store-failed:" + phase, label: "memory store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);
