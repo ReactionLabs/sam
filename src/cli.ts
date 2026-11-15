@@ -140,7 +140,7 @@ function missionOrThrow(missions:MissionStore,code:string) {
   const m=missions.get(code); if(!m) throw new Error("Mission not found: "+code); return m;
 }
 function withTasks<T>(fn:(tasks:TaskScheduler,missions:MissionStore)=>T):T {
-  return withDb((db,missions)=>fn(new TaskScheduler(db),missions));
+  return withDb((db,missions)=>fn(new TaskScheduler(db, program.opts().workspace as string),missions));
 }
 function output(data:unknown):void { console.log(program.opts().json?JSON.stringify(data,null,2):typeof data==="string"?data:JSON.stringify(data,null,2)); }
 // C5 self-review wiring for the production coding drains (heartbeat
@@ -732,12 +732,12 @@ task.command("run-offline").argument("<mission>").description("Execute one task 
   db.pragma("foreign_keys = ON");
   try {
     const m=missionOrThrow(missions,code);
-    const result=await new OfflineMissionRunner(db).runOne(m.id,"local-echo-worker",new LocalEchoAdapter());
+    const result=await new OfflineMissionRunner(db, Date.now, program.opts().workspace as string).runOne(m.id,"local-echo-worker",new LocalEchoAdapter());
     output(result??{status:"NO_ELIGIBLE_TASK"});
   } finally {db.close();missions.close();}
 });
 task.command("result").argument("<task-id>").description("Inspect persisted verified offline evidence").action((id:string)=>{
-  output(withDb((db)=>new OfflineMissionRunner(db).result(id)??{status:"NO_RESULT"}));
+  output(withDb((db)=>new OfflineMissionRunner(db, Date.now, program.opts().workspace as string).result(id)??{status:"NO_RESULT"}));
 });
 program.command("chat").description("Offline smoke test by default; --live explicitly enables one model API request")
   .argument("<message>").option("--model <id>","Model identifier")

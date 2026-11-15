@@ -529,6 +529,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no preferences (which would silently drop every profile's standing law dressed as an empty store, so SAM would answer without its law), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a preference record (statements are the owner's words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation errors (Invalid preference statement, Invalid profile) still ledger nothing",
      "The full suite is green, including the preference store failure-ledger tests"]);
+  if (key.startsWith("task-store-failed:")) return base(
+    ["tasks.ts", "offline-runner.ts", "cli.ts"],
+    "Task store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the task store (the TaskScheduler riding missions.db: the mission task plan with dependency ordering, fenced leases, heartbeat, and completion) must create its schema, read, and write instead of dying at that seam - while it is dead the CLI task doors and the offline runner die with the seam unnamed, and a leased task's completion can be lost with nothing counted.",
+    ["The next task adds, lists, claims, heartbeats, and completions resolve their plan again instead of task-store-failed lines",
+     "Exactly one task-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no tasks (which would silently drop the mission's whole plan dressed as an empty list), a touch already ledgered is never recorded twice, and a failure line never carries a task record (objectives are the owner's plan words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation and data errors (Task objective required, Mission does not exist, Mission is terminal, Dependency must belong to mission, Invalid worker, the lease / completion timestamp refusals) still ledger nothing, and a handle-only construction with no install root still rethrows bare, never dressed as ledgered",
+     "The full suite is green, including the task store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -838,6 +846,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Preference store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "preference-store-failed:" + phase, label: "preference store failures (" + phase + " step)" };
+    }
+    case "task-store-failed": {
+      const m = summary.match(/^Task store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "task-store-failed:" + phase, label: "task store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

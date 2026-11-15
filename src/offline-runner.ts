@@ -10,8 +10,8 @@ export interface StoredExecution {
 /** Offline execution boundary. Completion and evidence persistence share one SQLite transaction. */
 export class OfflineMissionRunner {
   private readonly tasks:TaskScheduler;
-  constructor(private readonly db:Database.Database, private readonly clock:()=>number=Date.now) {
-    this.tasks=new TaskScheduler(db);
+  constructor(private readonly db:Database.Database, private readonly clock:()=>number=Date.now, root?:string) {
+    this.tasks=new TaskScheduler(db, root);
     db.exec(`CREATE TABLE IF NOT EXISTS task_execution_results (
       task_id TEXT PRIMARY KEY REFERENCES tasks(id),
       mission_id TEXT NOT NULL REFERENCES missions(id),
