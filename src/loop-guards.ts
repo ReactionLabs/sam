@@ -145,3 +145,202 @@ export function codeVerificationOwnerLine(status: VerificationStatus): string | 
   if (status.state === "failed") return "One heads-up: I changed code this turn and its latest check failed, so I am not counting it as done.";
   return null;
 }
+
+/**
+ * - TURN ECONOMY (Dip ruling 2026-11-15, after chat afb0f1ef):
+ *   a live owner chat turn is a conversation, not an engineering
+ *   session - but left alone, a conversational question ("how
+ *   can I integrate this repo with you?") escalated itself into
+ *   ~23 sam_reach calls, then 23 sam_code calls writing throwaway
+ *   grep scripts into the code root (sam-grep-phrase.py,
+ *   sam-find-orch.py, sam-read-own-tools.py...), three turns in
+ *   a row, each burning the full deadline. The box's write ledger
+ *   is the inventory: EVERY code-root write ever recorded there
+ *   (63 of 63) is a created sam-*.py scratch script - no chat
+ *   turn has ever made a real edit through these hands, so the
+ *   guards below are shaped around the observed signature and
+ *   cost legitimate flows nothing:
+ *
+ *   1. SCRATCH-SCRIPT REFUSAL: a chat turn that tries to CREATE
+ *      a script file matching the throwaway signature (a sam-*
+ *      script at any depth, or a find/grep/search/probe-named
+ *      script at the code-root top level) is refused before
+ *      execution and redirected: read/search tools for looking,
+ *      a SANDBOX for a script that truly must run, the coding
+ *      loop for a real change. Replacing or editing a file that
+ *      already exists is project work and is never refused -
+ *      the refusal is creation-shaped, not name-shaped alone.
+ *   2. SPELUNK TRIPWIRE: code-search calls (sam_code list /
+ *      read / code-root python / read-only git) count against
+ *      CODE_SEARCH_LIMIT in a turn that has not landed real
+ *      code work. Past the limit they are stubbed: the turn
+ *      must answer from what it has or hand the investigation
+ *      to the background. The grant is behavioral, earned by
+ *      the turn's own actions, never guessed from the ask: a
+ *      landed write/edit (a real fix underway) or a queued
+ *      coding/parallel task lifts the wire for the rest of the
+ *      turn, so an explicit coding ask - look, edit, verify -
+ *      runs end to end untouched.
+ *   3. RESEARCH TRIPWIRE: the turn-1 shape, ~23 sam_reach calls
+ *      on one question. sam_reach counts against
+ *      REACH_CALL_LIMIT on the same terms; past it, the turn
+ *      answers from what the research returned or hands the
+ *      deep dive to sam_handoff_task, whose budget is deeper
+ *      by design.
+ *
+ *   Scope: the loops instantiate the guard ONLY on live owner
+ *   chat turns (the turns that carry the Lane F ceiling).
+ *   Machine routes - the coding loop, background tasks,
+ *   heartbeat turns, sub-agent drives - never see it: their
+ *   code work is their job, bounded by their own verification
+ *   and review machinery. A trip ledgers exactly one line per
+ *   turn per wire (kind spelunk-tripwire / research-tripwire);
+ *   each scratch refusal ledgers its own line (kind
+ *   scratch-write-refused, the path only - SAM invented the
+ *   name, it is not the owner's words). Stubbed calls spend no
+ *   budget and never execute.
+ */
+export const CODE_SEARCH_LIMIT = 6;
+export const REACH_CALL_LIMIT = 8;
+
+const SCRATCH_SCRIPT_EXTENSIONS = new Set([".py", ".sh", ".js", ".mjs", ".cjs"]);
+const SEARCHY_SCRIPT_BASENAME = /^(?:find|grep|search|probe|scratch|tmp|temp|lookup|inspect)[-_]/i;
+
+/** The throwaway-script signature, name shape only: a script
+ *  extension AND (a sam-* basename at any depth - SAM names its
+ *  ad-hoc search scripts after itself - OR a search-shaped
+ *  basename at the code-root top level, where project source
+ *  does not live). Whether a matching write is a CREATION is
+ *  the caller's check (codeFileExists): replacing an existing
+ *  file is project work, never scratch. */
+export function scratchScriptPath(rel: string): boolean {
+  if (typeof rel !== "string" || !rel) return false;
+  const parts = rel.split(/[\\/]+/).filter(p => p !== "" && p !== ".");
+  if (!parts.length) return false;
+  const base = parts[parts.length - 1].toLowerCase();
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || !SCRATCH_SCRIPT_EXTENSIONS.has(base.slice(dot))) return false;
+  if (/^sam[-_]/.test(base)) return true;
+  return parts.length === 1 && SEARCHY_SCRIPT_BASENAME.test(base);
+}
+
+const CODE_SEARCH_ACTIONS = new Set(["list", "read"]);
+const CODE_SEARCH_COMMANDS = new Set(["git-status", "git-diff", "git-log"]);
+
+/** Whether a call digs through the code root: sam_code list /
+ *  read, a code-root python run (a sandbox run is the sanctioned
+ *  scratch space and never counts), or a read-only git look.
+ *  Verify runs (build / test / lint), status, the writes ledger,
+ *  clones, and sandbox actions are not digging. */
+export function isCodeSearchCall(name: string, args: Record<string, unknown> | undefined): boolean {
+  if (name !== "sam_code") return false;
+  const action = typeof args?.action === "string" ? args.action : "";
+  if (CODE_SEARCH_ACTIONS.has(action)) return true;
+  if (action === "python") return !(typeof args?.sandbox === "string" && args.sandbox.length > 0);
+  if (action === "run") return CODE_SEARCH_COMMANDS.has(typeof args?.command === "string" ? args.command : "");
+  return false;
+}
+
+export function scratchScriptStubContent(rel: string): string {
+  return JSON.stringify({
+    error: "Scratch script write refused in a chat turn: " + rel + " is a throwaway script, and the code root is not a scratchpad",
+    note: "Do not write ad-hoc scripts into the code root to search or inspect it. For looking, use sam_code list and read. For a script you truly need to run, use a sandbox instead: sam_code sandbox-create, sandbox-write, then python with that sandbox. For a real code change, edit the existing project files, or queue the change with sam_coding_task so the coding loop lands it with verification. If you already have what you need, answer the owner now.",
+  });
+}
+
+export function spelunkStubContent(): string {
+  return JSON.stringify({
+    error: "Code digging stopped for this turn: " + CODE_SEARCH_LIMIT + " code lookups already ran and no code change has landed",
+    note: "This conversation is not an engineering session. Answer the owner's question now, in plain words, from what you have already gathered. If the question genuinely needs a deep codebase investigation, hand it to the background with sam_handoff_task (or queue the change with sam_coding_task) and tell the owner it is handed off - do not keep digging in this turn.",
+  });
+}
+
+export function researchStubContent(): string {
+  return JSON.stringify({
+    error: "Research calls stopped for this turn: " + REACH_CALL_LIMIT + " sam_reach calls already ran",
+    note: "Answer the owner's question now from what the research already returned. If it needs a deeper dive, hand it to sam_handoff_task, where the research budget is deeper, and tell the owner it is handed off - do not keep searching inside this live turn.",
+  });
+}
+
+export function spelunkSteerNote(): string {
+  return "Turn economy: this conversation turn has spent its code-lookup allowance (" + CODE_SEARCH_LIMIT + ") without landing a code change. Stop investigating the codebase here. Answer the owner's question from what you have already gathered, in plain words - or, if the question truly needs the deep investigation, hand it to the background with sam_handoff_task and tell the owner plainly that it is handed off.";
+}
+
+export function researchSteerNote(): string {
+  return "Turn economy: this conversation turn has spent its research allowance (" + REACH_CALL_LIMIT + " sam_reach calls). Answer the owner's question from what the research already returned, or hand the deep dive to sam_handoff_task and tell the owner plainly that it is handed off.";
+}
+
+export function scratchRefusalLedgerSummary(rel: string): string {
+  return ("Refused a scratch script write in a chat turn: " + rel.replace(/\s+/g, " ").trim() + " in the code root - throwaway search scripts belong in a sandbox, and the code root stays clean").slice(0, 300);
+}
+
+export function spelunkLedgerSummary(): string {
+  return "Code digging cut in a chat turn after " + CODE_SEARCH_LIMIT + " code lookups with no code change landed: the turn must answer from what it has or hand the investigation to the background";
+}
+
+export function researchLedgerSummary(): string {
+  return "Research calls cut in a chat turn after " + REACH_CALL_LIMIT + " sam_reach calls: the turn must answer from what it gathered or hand the deep research to the background";
+}
+
+export interface TurnEconomyDecision {
+  stub: string;
+  ledger?: { kind: string; summary: string };
+  steer?: string;
+}
+
+/** The per-turn economy state both chat loops ride. Constructed
+ *  only for live owner chat turns; decide() is consulted in the
+ *  classification pass (after duplicate / repeat suppression, so
+ *  a free repeat never counts) and noteSuccess() in the executed
+ *  bookkeeping, exactly where the other loop guards live. */
+export class TurnEconomyGuard {
+  private codeSearchUsed = 0;
+  private reachUsed = 0;
+  private codingGranted = false;
+  private spelunkLedgered = false;
+  private reachLedgered = false;
+
+  /** The stub decision for a call about to execute, or null to
+   *  let it run (counting it against its wire). exists() is the
+   *  caller's code-root existence check (codeFileExists), kept
+   *  injected so this guard stays pure. */
+  decide(name: string, args: Record<string, unknown> | undefined, exists: (rel: string) => boolean): TurnEconomyDecision | null {
+    if (name === "sam_code" && (typeof args?.action === "string" ? args.action : "") === "write") {
+      const rel = typeof args?.path === "string" ? args.path : "";
+      if (rel && scratchScriptPath(rel) && !exists(rel)) {
+        return { stub: scratchScriptStubContent(rel), ledger: { kind: "scratch-write-refused", summary: scratchRefusalLedgerSummary(rel) } };
+      }
+    }
+    if (isCodeSearchCall(name, args)) {
+      if (this.codingGranted) return null;
+      if (this.codeSearchUsed >= CODE_SEARCH_LIMIT) {
+        const decision: TurnEconomyDecision = { stub: spelunkStubContent(), steer: spelunkSteerNote() };
+        if (!this.spelunkLedgered) { this.spelunkLedgered = true; decision.ledger = { kind: "spelunk-tripwire", summary: spelunkLedgerSummary() }; }
+        return decision;
+      }
+      this.codeSearchUsed++;
+      return null;
+    }
+    if (name === "sam_reach") {
+      if (this.reachUsed >= REACH_CALL_LIMIT) {
+        const decision: TurnEconomyDecision = { stub: researchStubContent(), steer: researchSteerNote() };
+        if (!this.reachLedgered) { this.reachLedgered = true; decision.ledger = { kind: "research-tripwire", summary: researchLedgerSummary() }; }
+        return decision;
+      }
+      this.reachUsed++;
+      return null;
+    }
+    return null;
+  }
+
+  /** A landed code change - or a coding job queued through the
+   *  sanctioned doors - earns the turn its digging room: real
+   *  code work is underway, and verifying it may need to look.
+   *  Called only for executed calls that did not error. */
+  noteSuccess(name: string, args: Record<string, unknown> | undefined): void {
+    if (name === "sam_coding_task" || name === "sam_parallel_task") { this.codingGranted = true; return; }
+    if (name !== "sam_code") return;
+    const action = typeof args?.action === "string" ? args.action : "";
+    if (action === "write" || action === "edit") this.codingGranted = true;
+  }
+}

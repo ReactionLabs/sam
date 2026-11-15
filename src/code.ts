@@ -170,6 +170,17 @@ export function codeRoot(root: string): string | null {
   } catch { return null; }
 }
 
+/** Whether a confined path already exists inside the designated
+ *  code root. Rides the same targetPath confinement as a read, so
+ *  a path that escapes, is protected, or is missing reads as false.
+ *  The turn-economy guard (loop-guards.ts) uses it to tell a write
+ *  that CREATES a file from one that replaces project content. */
+export function codeFileExists(root: string, rel: string): boolean {
+  const base = codeRoot(root);
+  if (!base || typeof rel !== "string" || !rel) return false;
+  try { return existsSync(targetPath(base, rel, false)); } catch { return false; }
+}
+
 export function setCodeRoot(root: string, candidate: string): string {
   if (!candidate || typeof candidate !== "string") throw new Error("A code root path is required");
   let real: string;

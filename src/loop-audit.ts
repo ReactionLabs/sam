@@ -8,7 +8,7 @@ import { budgetFallbackAnswer, toolBudget, trimHistoryForRetry } from "./budgets
 import { loaderLoopFallbackAnswer } from "./tool-tiers.js";
 import { recordChange, recordVerification, verificationGate, verificationStatus, type VerificationStatus } from "./verification.js";
 import { dueLoops, openLoop, openLoopCount, updateOpenLoop } from "./loops.js";
-import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, scratchScriptPath, isCodeSearchCall, TurnEconomyGuard, CODE_SEARCH_LIMIT, REACH_CALL_LIMIT } from "./loop-guards.js";
 
 /**
  * The loop audit (HARNESS INTELLIGENCE item 3, Dip 2026-11-11):
@@ -101,6 +101,28 @@ const DIMENSIONS: Array<{ id: string; label: string; checks: CheckSpec[] }> = [
   { id: "planning", label: "Planning and budget spend", checks: [
     { id: "planning-budgets", label: "budgets tier by route: background goes deeper than chat, chat at least as deep as a heartbeat poll", missing: "route-tiered tool budgets (background deeper than chat, chat at least a heartbeat poll's)", run: () => { const h = toolBudget("heartbeat"); const c = toolBudget("chat"); const b = toolBudget("background"); return b.rounds > c.rounds && b.maxCalls > c.maxCalls && c.maxCalls >= h.maxCalls && c.rounds >= h.rounds; } },
     { id: "planning-due-loops", label: "an open loop is stored, reads back due on its schedule, and counts as open", missing: "the open-loop store: a recorded question that comes due on schedule for the revisit engine", run: dueLoopCheck },
+    { id: "planning-economy", label: "a chat turn cannot escalate into an engineering session: scratch script creations are refused, code digging and research ride named tripwires, and a landed code change earns the digging back", missing: "the turn-economy guard (Dip, 2026-11-15): the scratch-script signature refused at creation, CODE_SEARCH_LIMIT / REACH_CALL_LIMIT wires stubbed past the limit with one ledger line per trip, the behavioral grant on a landed write/edit or a queued coding task", run: () => {
+      if (!scratchScriptPath("sam-find-orch.py") || !scratchScriptPath("tools/sam_grep.py") || !scratchScriptPath("find-routes.py")) return false;
+      if (scratchScriptPath("src/search.py") || scratchScriptPath("src/index.ts") || scratchScriptPath("sam-notes.md") || scratchScriptPath("scripts/install.sh")) return false;
+      if (!isCodeSearchCall("sam_code", { action: "read", path: "src/a.ts" }) || !isCodeSearchCall("sam_code", { action: "python", path: "x.py" }) || !isCodeSearchCall("sam_code", { action: "run", command: "git-log" })) return false;
+      if (isCodeSearchCall("sam_code", { action: "python", path: "x.py", sandbox: "scratch" }) || isCodeSearchCall("sam_code", { action: "run", command: "build" }) || isCodeSearchCall("sam_code", { action: "write", path: "a.py" })) return false;
+      const guard = new TurnEconomyGuard();
+      const missing = () => false;
+      const refused = guard.decide("sam_code", { action: "write", path: "sam-scan.py", content: "x" }, missing);
+      if (!refused || !/Scratch script write refused/.test(refused.stub) || refused.ledger?.kind !== "scratch-write-refused") return false;
+      // Replacing an existing file is project work, never scratch.
+      if (guard.decide("sam_code", { action: "write", path: "sam-scan.py", content: "x" }, () => true) !== null) return false;
+      for (let i = 0; i < CODE_SEARCH_LIMIT; i++) if (guard.decide("sam_code", { action: "read", path: "src/f" + i + ".ts" }, missing) !== null) return false;
+      const tripped = guard.decide("sam_code", { action: "read", path: "src/one-more.ts" }, missing);
+      if (!tripped || tripped.ledger?.kind !== "spelunk-tripwire" || !tripped.steer) return false;
+      // The grant is behavioral: a landed edit lifts the wire.
+      guard.noteSuccess("sam_code", { action: "edit", path: "src/f0.ts" });
+      if (guard.decide("sam_code", { action: "read", path: "src/still-fine.ts" }, missing) !== null) return false;
+      const research = new TurnEconomyGuard();
+      for (let i = 0; i < REACH_CALL_LIMIT; i++) if (research.decide("sam_reach", { channel: "web", action: "search", query: "q" + i }, missing) !== null) return false;
+      const researchTripped = research.decide("sam_reach", { channel: "web", action: "search", query: "one more" }, missing);
+      return !!researchTripped && researchTripped.ledger?.kind === "research-tripwire";
+    } },
   ] },
   { id: "endings", label: "Honest endings", checks: [
     { id: "endings-budget", label: "a budget ending names the checks that did not run and says the answer is incomplete", missing: "an honest budget fallback (the unfinished checks named, the answer marked incomplete)", run: () => { const text = budgetFallbackAnswer(["sam_code"], ["sam_brief"], 6); return text.includes("sam_brief") && /incomplete/.test(text); } },

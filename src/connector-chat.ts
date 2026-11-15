@@ -8,7 +8,8 @@ import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { annotateToolResult } from "./source-citations.js";
-import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState, TurnEconomyGuard } from "./loop-guards.js";
+import { codeFileExists } from "./code.js";
 import { verificationStatus } from "./verification.js";
 
 // Arguments a model may pass to an approved read-only tool. Shallow and bounded on
@@ -111,6 +112,13 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
  let lastFailure:{sig:string;error:string}|null=null;
  let codeChanged=false;
  const sigById=new Map<string,string>();
+ // Turn economy (loop-guards.ts, Dip ruling 2026-11-15): the
+ // own-tools loop's contract, identical shapes - the guard is
+ // instantiated only on live owner chat turns (a ceiling
+ // rides), so machine routes never see it. MCP calls pass
+ // through decide() untouched (their names never match).
+ const economy=ceilingMode?new TurnEconomyGuard():null;
+ let economySteer:string|null=null;
  const finish=(answer:string):string=>{
   if(!codeChanged)return answer;
   try{
@@ -221,6 +229,18 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
    // A deferred tool called before loading is stubbed, not executed, and
    // does not spend budget: the stub names the loader.
    if(part.active&&call.name!==LOADER_TOOL_NAME&&!part.upfrontNames.has(call.name)&&!currentLoaded().has(call.name)){outputs.set(call.id,notLoadedStubContent(call.name));continue;}
+   // Turn economy (owner chat turns only): a scratch-script
+   // creation is refused, and a call past its wire (code digging
+   // or research) is stubbed - no execution, no budget spent.
+   if(economy){
+    const decision=economy.decide(call.name,call.args??{},(rel)=>codeFileExists(root,rel));
+    if(decision){
+     outputs.set(call.id,decision.stub);
+     if(decision.ledger){try{recordActivity(root,actor,decision.ledger.kind,decision.ledger.summary);}catch{/* the ledger never breaks a turn */}}
+     if(decision.steer)economySteer=decision.steer;
+     continue;
+    }
+   }
    callsUsed++;executed.push(call.name);roundCalls.push(call.name);roundExecuted.add(call.id);
    if(call.name!==LOADER_TOOL_NAME)roundSigs.set(failureSignature(call.name,call.args),call.id);
    if(call.name===LOADER_TOOL_NAME){
@@ -268,6 +288,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
    else{
     lastFailure=null;
     if(call.name==="sam_code"&&(call.args?.action==="write"||call.args?.action==="edit"))codeChanged=true;
+    if(economy)economy.noteSuccess(call.name,call.args);
     if(callChangesState(call.name,call.args))stateVersion++;
     resultCache.set(sig,{version:stateVersion,out:outputs.get(call.id)});
    }
@@ -277,6 +298,9 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
    const out=outputs.get(call.id);
    messages.push({role:"tool",tool_call_id:call.id,content:typeof out==="string"?out:JSON.stringify(out??null).slice(0,12000)});
   }
+  // Turn economy steer: a wire tripped this round - the note
+  // lands after the round's results, once per trip.
+  if(economySteer){messages.push({role:"system",content:economySteer});economySteer=null;}
   // Preparation-loop guard (Defect 1), the own-tools loop's shape:
   // loads and no-progress hire calls are preparation, not progress.
   // An owner turn steers and continues with the loader disabled; any
