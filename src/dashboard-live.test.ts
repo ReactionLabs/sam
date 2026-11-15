@@ -173,7 +173,7 @@ test.after(async () => {
 });
 
 interface LiveEvent {
-  messages?: Array<{ id?: string; role?: string; content?: string; partial?: number }>;
+  messages?: Array<{ id?: string; role?: string; content?: string; partial?: number; queueStatus?: string; queueId?: string }>;
   queue?: Array<{ id?: string; status?: string; content?: string }>;
   turnActive?: boolean;
 }
@@ -237,6 +237,14 @@ function hasAnswer(events: LiveEvent[], text: string): boolean {
 function hasQueue(events: LiveEvent[], content: string, status: string): boolean {
   return events.some(event => (event.queue ?? []).some(q => q.status === status && String(q.content ?? "").includes(content)));
 }
+// Chat trust (2026-11-15): once a queued follow-up is saved as
+// the turn's message, its queue state decorates THAT message
+// (queueStatus) instead of riding the queue list as a second
+// bubble - one send, one bubble. The steered state is read off
+// the message it belongs to.
+function hasSteered(events: LiveEvent[], content: string): boolean {
+  return events.some(event => (event.messages ?? []).some(m => m.queueStatus === "steered" && String(m.content ?? "").includes(content)));
+}
 
 test("open stream receives the reply, then queued and steered, with no further thread GET", { timeout: 30000 }, async () => {
   const quickId = await createChat("Quick");
@@ -261,9 +269,9 @@ test("open stream receives the reply, then queued and steered, with no further t
     await waitFor("the held turn to show as running", () => held.events.some(event => event.turnActive === true));
     await postMessage(heldId, "please steer me toward the kelp");
     await waitFor("the follow-up to show as queued", () => hasQueue(held.events, "steer me", "queued"), 4000);
-    await waitFor("the follow-up to show as steered", () => hasQueue(held.events, "steer me", "steered"), 12000);
+    await waitFor("the follow-up to show as steered", () => hasSteered(held.events, "steer me"), 12000);
     const queuedAt = held.events.findIndex(event => (event.queue ?? []).some(q => q.status === "queued" && String(q.content ?? "").includes("steer me")));
-    const steeredAt = held.events.findIndex(event => (event.queue ?? []).some(q => q.status === "steered" && String(q.content ?? "").includes("steer me")));
+    const steeredAt = held.events.findIndex(event => (event.messages ?? []).some(m => m.queueStatus === "steered" && String(m.content ?? "").includes("steer me")));
     assert.ok(queuedAt >= 0 && steeredAt > queuedAt, "steered is a later event than queued");
     releaseHold();
     await waitFor("the steered turn's answer", () => hasAnswer(held.events, STEERED_ANSWER), 8000);

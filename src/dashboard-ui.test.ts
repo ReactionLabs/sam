@@ -167,3 +167,20 @@ test("dashboard page: calm presentation and working state (sprint 3 item 6)", ()
   assert.match(dashboardHtml, /function fallbackCopyText\(text\)/);
   assert.match(dashboardHtml, /id="configPanel"/);
 });
+
+test("dashboard page: chat trust wiring - queue state decorates the send's bubble, failed bubbles carry Resend",()=>{
+  // Item 1: the thread render decorates a message with its queue
+  // state instead of rendering the queue item as a second bubble,
+  // and the live signature carries the decoration so a status
+  // flip re-renders on its own.
+  assert.match(dashboardHtml,/function decorateQueued\(h,m\)/);
+  assert.match(dashboardHtml,/if\(m\.queueStatus\)decorateQueued\(bh,m\)/);
+  assert.match(dashboardHtml,/m\.queueStatus\|\|''/);
+  // Item 3: the Resend control on a failed bubble, posting the
+  // saved message's queue id to the resend route under the
+  // dashboard request header.
+  assert.match(dashboardHtml,/function resendButton\(itemId\)/);
+  assert.match(dashboardHtml,/function resendQueued\(itemId\)/);
+  assert.match(dashboardHtml,/\/queue\/'\+itemId\+'\/resend/);
+  assert.match(dashboardHtml,/\.resendbtn\{/);
+});

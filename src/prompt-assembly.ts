@@ -43,6 +43,15 @@ export interface AssembledPromptMessage {
 export const RESUME_PARTIAL_INSTRUCTION =
   "Continue the partial assistant reply above from where it stopped. Do not repeat the text already saved.";
 
+/** The resent-message nudge (chat trust sprint, Item 3): a
+ * resent message's row already sits in the kept history -
+ * followed by the failure note the dead attempt left - so the
+ * dedupe rule would hand the model a transcript whose last word
+ * is the failure. This synthetic line, the resume-partial
+ * precedent's sibling, makes the pending ask the live one. */
+export const RESEND_INSTRUCTION =
+  "The owner's message above is being resent after the earlier attempt failed before answering it. Answer it now.";
+
 /** First occurrence wins: later entries carrying an id that
  *  was already seen are dropped. Id-less entries always pass. */
 export function dedupeMessageIds<T extends { id?: string | null }>(items: T[]): T[] {
@@ -80,6 +89,7 @@ export function assembleTurnMessages(opts: {
   currentContent: string;
   currentSource?: unknown;
   resuming: boolean;
+  resent?: boolean;
 }): AssembledPromptMessage[] {
   const kept = dedupeMessageIds(opts.kept);
   const messages: AssembledPromptMessage[] = kept.map(m => ({
@@ -90,7 +100,10 @@ export function assembleTurnMessages(opts: {
     messages.push({ role: "user", content: RESUME_PARTIAL_INSTRUCTION });
     return messages;
   }
-  if (opts.currentId && kept.some(m => m.id === opts.currentId)) return messages;
+  if (opts.currentId && kept.some(m => m.id === opts.currentId)) {
+    if (opts.resent) messages.push({ role: "user", content: RESEND_INSTRUCTION });
+    return messages;
+  }
   messages.push({ role: "user", content: withMessageProvenance(opts.currentContent, opts.currentSource) });
   return messages;
 }

@@ -21,7 +21,7 @@ import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } f
 import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
 import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
-import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resetChatTurn, resumeChatQueues } from "./chat-queue.js";
+import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, mergeQueueIntoMessages, resendFailedMessage, resetChatTurn, resumeChatQueues, type QueueItem } from "./chat-queue.js";
 import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
@@ -94,8 +94,14 @@ function loadChatThread(workspace:string,chatId:string){
     let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,chatId);}catch{/* citations are garnish: a dead citation store never takes the thread down */}
     let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,chatId);}catch{/* sources are garnish the same way */}
     let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,chatId);}catch{/* artifacts are garnish the same way */}
-    let queue:unknown[]=[];let turnActive=false;try{queue=listChatQueue(workspace,chatId);turnActive=chatTurnActive(workspace,chatId);}catch{/* the queue view is garnish the same way */}
-    return {messages:db.messages(chatId),events:db.events(chatId),actions:listActions(workspace).filter(a=>a.chatId===chatId),citations,sources,artifacts,queue,turnActive};
+    let queue:QueueItem[]=[];let turnActive=false;try{queue=listChatQueue(workspace,chatId);turnActive=chatTurnActive(workspace,chatId);}catch{/* the queue view is garnish the same way */}
+    // One send, one bubble (chat trust sprint, Item 1): the
+    // queue state decorates the message it belongs to before
+    // the payload ships; only sends with no transcript row
+    // remain in the queue list, so no surface can render a
+    // send twice by reading both lists.
+    const merged=mergeQueueIntoMessages(db.messages(chatId),queue);
+    return {messages:merged.messages,events:db.events(chatId),actions:listActions(workspace).filter(a=>a.chatId===chatId),citations,sources,artifacts,queue:merged.queue,turnActive};
   }finally{db.close();}
 }
 
@@ -194,6 +200,14 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       // messages. Rides the same dashboard auth + X-SAM-Request
       // header as every POST here (the post() reader enforces it).
       try{await post();json(200,resetChatTurn(workspace,resetMatch[1]));}catch{json(400,{error:"Unable to reset chat"});}return;
+    }
+    const resendMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/queue/([0-9a-f-]{36})/resend$"));
+    if(req.method==="POST"&&resendMatch){
+      // Resend (chat trust sprint, Item 3): the failed bubble's
+      // own control - re-queues the SAME saved message over its
+      // original row, no retyping and no duplicate row. Same
+      // dashboard auth + X-SAM-Request discipline as every POST.
+      try{await post();json(200,resendFailedMessage(workspace,resendMatch[1],resendMatch[2]));}catch(e){json(400,{error:e instanceof Error?e.message:"Unable to resend message"});}return;
     }
     const runMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/run$"));
     if(runMatch && req.method==="GET"){

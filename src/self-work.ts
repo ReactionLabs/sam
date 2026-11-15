@@ -738,6 +738,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
     }
     case "turn-retry":
       return { key: "turn-retry", label: "turns needing a context-reset retry" };
+    case "malformed-completion":
+      return { key: "malformed-completion", label: "malformed model completions (tool calls failing validation; the summary names the check)" };
     case "heartbeat-failed": {
       const m = summary.match(/Heartbeat '([^']+)'/);
       const name = m ? m[1] : "unnamed";
