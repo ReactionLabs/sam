@@ -69,6 +69,7 @@ import { authoredSkills, curatorFindings, proposeAuthoredSkill, runSkillCurator,
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
+import { runDoctor } from "./doctor.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { recallMemory } from "./memory-recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
@@ -1041,10 +1042,13 @@ mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-de
     if(!decision.allowed)process.exitCode=1;
   });
 
-program.command("doctor").description("Check local runtime prerequisites").action(()=>{
-  const ready=configReadiness(parseSamConfig(process.env));
-  output({node:process.version,platform:process.platform,workspace:resolve(program.opts().workspace),modelReady:ready.modelReady,mcpReady:ready.mcpReady,status:"CLI, local IPC daemon, memory, approvals, operative registry and assignment leases available on one workspace database; configuration and MCP policy wired; agent execution not implemented"});
-});
+program.command("doctor").description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials")
+  .option("--fix [id]","Apply allowlisted fixes. Omit the id to apply every allowlisted fix for a current failure. An id off the allowlist is refused and nothing is changed.")
+  .action(async(o:{fix?:true|string})=>{
+    const report=await runDoctor(resolve(program.opts().workspace),{env:process.env,fix:o.fix===undefined?false:o.fix});
+    output(report);
+    if(report.checks.some(c=>c.status==="fail")||report.refused.length)process.exitCode=1;
+  });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
   try{output({missions:db.list().length,memories:mem.list().length,operatives:reg.list().length,daemon:"use sam daemon status"});}
