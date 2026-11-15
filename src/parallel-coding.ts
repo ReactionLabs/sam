@@ -676,13 +676,18 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       catch (e) { close("blocked", "The coordinator worktree could not be created: " + (e instanceof Error ? e.message : String(e))); continue; }
       for (const slice of job.slices) {
         if (slice.status !== "done") continue;
-        const merge = gitIn(mergedTree, ["merge", "--no-ff", "--no-edit", "-m", "sam: merge slice " + slice.name + " (" + job.title.slice(0, 60) + ")", slice.branch]);
+        // --no-ff writes a merge commit, so the identity has to ride
+        // the command the same way slice commits do. A runner with no
+        // global user.name (GitHub Actions) otherwise fails the merge
+        // and the empty conflict list used to be reported as a conflict.
+        const merge = gitIn(mergedTree, ["-c", "user.name=SAM", "-c", "user.email=sam@localhost", "merge", "--no-ff", "--no-edit", "-m", "sam: merge slice " + slice.name + " (" + job.title.slice(0, 60) + ")", slice.branch]);
         if (merge.ok) { job.merges.push({ slice: slice.name, ok: true, conflicts: [] }); continue; }
         const conflictProbe = gitIn(mergedTree, ["diff", "--name-only", "--diff-filter=U"]);
         const conflicts = conflictProbe.ok ? conflictProbe.out.split("\n").map(s => s.trim()).filter(Boolean) : [];
         gitIn(mergedTree, ["merge", "--abort"]);
         slice.status = "conflicted";
-        slice.error = "Merge conflict" + (conflicts.length ? " in: " + conflicts.join(", ") : "") + " - the slice's work stays on " + slice.branch + " for the owner to resolve.";
+        const detail = conflicts.length ? " in: " + conflicts.join(", ") : (merge.out ? ": " + merge.out.replace(/\s+/g, " ").slice(0, 180) : "");
+        slice.error = "Merge conflict" + detail + " - the slice's work stays on " + slice.branch + " for the owner to resolve.";
         job.merges.push({ slice: slice.name, ok: false, conflicts });
         recordActivity(root, job.actor, "parallel-merge", "Slice " + slice.name + " conflicted merging into " + job.branch + (conflicts.length ? " (" + conflicts.join(", ") + ")" : ""));
       }
