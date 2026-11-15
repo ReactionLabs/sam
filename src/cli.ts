@@ -849,17 +849,26 @@ program.command("talk").description("Interactive terminal conversation with conf
       }
     } finally { rl.close(); }
   });
-const daemon=program.command("daemon").description("Local-only SAM control daemon");
+const daemon=program.command("daemon").description("Local-only SAM control daemon (per-installation token required; the token is never printed)");
 daemon.command("serve").description("Run the daemon in the foreground").action(async()=>{
   output("SAM daemon listening in workspace "+resolve(program.opts().workspace));
   await serveDaemon(resolve(program.opts().workspace));
 });
 daemon.command("status").action(async()=>{
-  try{output(await requestDaemon(resolve(program.opts().workspace),"ping"));}
+  try{
+    const reply=await requestDaemon(resolve(program.opts().workspace),"ping");
+    output(reply);
+    if(!reply.ok)process.exitCode=1;
+  }
   catch(error){output({ok:false,reason:error instanceof Error?error.message:String(error)});process.exitCode=1;}
 });
 daemon.command("stop").action(async()=>{
-  output(await requestDaemon(resolve(program.opts().workspace),"stop"));
+  try{
+    const reply=await requestDaemon(resolve(program.opts().workspace),"stop");
+    output(reply);
+    if(!reply.ok)process.exitCode=1;
+  }
+  catch(error){output({ok:false,reason:error instanceof Error?error.message:String(error)});process.exitCode=1;}
 });
 
 const memory=program.command("memory").description("Durable mission memory (evidence, never authority over policy)");
