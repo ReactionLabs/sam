@@ -529,6 +529,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no preferences (which would silently drop every profile's standing law dressed as an empty store, so SAM would answer without its law), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a preference record (statements are the owner's words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation errors (Invalid preference statement, Invalid profile) still ledger nothing",
      "The full suite is green, including the preference store failure-ledger tests"]);
+  if (key.startsWith("capture-guard-failed:")) return base(
+    ["capture-guard.ts", "memory.ts", "episodes.ts", "compaction.ts", "cli.ts"],
+    "Capture guard store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the capture guard store (the CaptureGuardStore riding preferences.db under its own capture_suppressions table: the owner's standing do-not-store instructions) must open, read, and write instead of dying at that seam - while it is dead new suppressions stop being recorded (the capture seams swallow throws by design, so without this line nothing would count it), the episode and compaction flushes cannot consult the active list, and the MemoryStore backstop read dies on every memory write, with the seam unnamed.",
+    ["The next suppressions, active-list reads, revocations, and backstop checks resolve their guard again instead of capture-guard-failed lines",
+     "Exactly one capture-guard-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The guard still fails closed exactly as before: a failed read rethrows instead of folding the store as no suppressions (which would silently unbind the owner's standing do-not-store instruction dressed as an empty list), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a suppression record (needles are the owner's secret words, not failure data)",
+     "The backstop door's absent-file and no-table-yet shapes still read as no suppressions with no line, exactly as a fresh install expects, while validation errors (Invalid profile, Invalid suppression phrase) still ledger nothing, and the guard's own memory-suppressed and memory-suppression lines stay unclassified (the guard holding is the system working)",
+     "The full suite is green, including the capture guard store failure-ledger tests"]);
   if (key.startsWith("task-store-failed:")) return base(
     ["tasks.ts", "offline-runner.ts", "cli.ts"],
     "Task store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the task store (the TaskScheduler riding missions.db: the mission task plan with dependency ordering, fenced leases, heartbeat, and completion) must create its schema, read, and write instead of dying at that seam - while it is dead the CLI task doors and the offline runner die with the seam unnamed, and a leased task's completion can be lost with nothing counted.",
@@ -846,6 +854,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Preference store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "preference-store-failed:" + phase, label: "preference store failures (" + phase + " step)" };
+    }
+    case "capture-guard-failed": {
+      const m = summary.match(/^Capture guard store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "capture-guard-failed:" + phase, label: "capture guard store failures (" + phase + " step)" };
     }
     case "task-store-failed": {
       const m = summary.match(/^Task store ([a-z]+) failed/);

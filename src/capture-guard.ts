@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
 
 // Capture guard (Program H, self-knowledge item A - the keystone):
@@ -66,6 +66,74 @@ function prefsDbPath(root: string): string {
   return join(resolve(root), ".sam", "preferences.db");
 }
 
+// Failure visibility (gap found 2026-11-15, hourly run
+// 04:04 EST): CaptureGuardStore rides the same
+// preferences.db file as PreferenceStore under its own
+// class and table, so the preference-store guard does not
+// name it. Every touch opened the file raw: the
+// constructor's open (schema creation), add (the CLI
+// suppress door plus both capture seams), list / activeFor
+// (the episode and compaction flushes consult the active
+// list on every consolidation), revoke (the CLI door), and
+// the direct-DB backstop findSuppressionHitInDb, which
+// MemoryStore.add consults on every memory write. A dead
+// store threw with the seam unnamed - and the capture seams
+// swallow throws by design, so a dead guard would stop
+// recording new do-not-store instructions with nothing
+// counted, while any reader folding a dead store as "no
+// suppressions" would silently unbind the owner's standing
+// instruction dressed as an empty list. Now the touches
+// own their failure (the preferences / chats precedent,
+// adapted to this class): a failed touch ledgers ONE
+// capture-guard-failed line (the constructor's open at
+// phase write, because the open performs the schema
+// writes; list / activeFor and the backstop door at phase
+// read; add / revoke at phase write; actor sam; the
+// verbatim reason collapsed and capped; never any
+// suppression record - needles are the owner's secret
+// words, not failure data), tags the error, and rethrows
+// exactly, so every caller's handling is unchanged and
+// reads still fail closed. A touch already ledgered by an
+// inner door keeps its one line and gains no second.
+// Validation errors (Invalid profile, Invalid suppression
+// phrase) are not store failures and ledger nothing. The
+// backstop door's absent-file and no-table-yet shapes
+// still read as no suppressions, creating nothing.
+export type CaptureGuardPhase = "read" | "write";
+
+export function captureGuardFailureSummary(phase: CaptureGuardPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Capture guard store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordCaptureGuardFailure(root: string, phase: CaptureGuardPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "capture-guard-failed", captureGuardFailureSummary(phase, reason));
+}
+
+function tagCaptureGuardLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { captureGuardLedgered?: boolean }).captureGuardLedgered = true;
+  }
+}
+
+export function isCaptureGuardLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { captureGuardLedgered?: boolean }).captureGuardLedgered === true;
+}
+
+const CAPTURE_GUARD_VALIDATION = [/^Invalid profile$/, /^Invalid suppression phrase/];
+
+function isCaptureGuardValidation(error: unknown): boolean {
+  return error instanceof Error && CAPTURE_GUARD_VALIDATION.some(re => re.test(error.message));
+}
+
+function failCaptureGuard(root: string, phase: CaptureGuardPhase, error: unknown): never {
+  if (!isCaptureGuardLedgered(error) && !isCaptureGuardValidation(error)) recordCaptureGuardFailure(root, phase, error);
+  if (!isCaptureGuardValidation(error)) tagCaptureGuardLedgered(error);
+  throw error;
+}
+
 /** Normalize free text to a word stream: lowercase, punctuation
  *  becomes spacing, whitespace collapsed. Needles and content are
  *  compared in this space so case, quoting, and punctuation never
@@ -98,18 +166,31 @@ export function needleMatches(needle: string, content: string): boolean {
 
 export class CaptureGuardStore {
   private db: Database.Database;
+  private root: string;
   constructor(root: string) {
-    const dir = join(resolve(root), ".sam");
-    mkdirSync(dir, { recursive: true });
-    this.db = openDatabase(join(dir, "preferences.db"));
-    this.db.exec(`CREATE TABLE IF NOT EXISTS capture_suppressions (
+    this.root = resolve(root);
+    let db: Database.Database | undefined;
+    try {
+      const dir = join(this.root, ".sam");
+      mkdirSync(dir, { recursive: true });
+      db = openDatabase(join(dir, "preferences.db"));
+      db.exec(`CREATE TABLE IF NOT EXISTS capture_suppressions (
       id TEXT PRIMARY KEY, profile TEXT NOT NULL, needle TEXT NOT NULL,
       needle_key TEXT NOT NULL, source TEXT NOT NULL,
       status TEXT NOT NULL CHECK(status IN ('active','revoked')),
       created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS capture_suppressions_by_profile ON capture_suppressions(profile, status);`);
+    } catch (error) { try { db?.close(); } catch { /* the open already failed */ } failCaptureGuard(this.root, "write", error); }
+    this.db = db!;
+  }
+  private touch<T>(phase: CaptureGuardPhase, fn: () => T): T {
+    try { return fn(); }
+    catch (error) { failCaptureGuard(this.root, phase, error); }
   }
   add(profile: string, needle: string, source: string): { record: CaptureSuppression; created: boolean } {
+    return this.touch("write", () => this.addInner(profile, needle, source));
+  }
+  private addInner(profile: string, needle: string, source: string): { record: CaptureSuppression; created: boolean } {
     if (!validProfile(profile)) throw new Error("Invalid profile");
     const clean = needle.trim().replace(/\s+/g, " ");
     if (clean.length < 3 || clean.length > 200) throw new Error("Invalid suppression phrase (3 to 200 characters)");
@@ -125,15 +206,18 @@ export class CaptureGuardStore {
     return { record, created: true };
   }
   list(profile?: string, includeRevoked = false): CaptureSuppression[] {
+    return this.touch("read", () => {
     const statusSql = includeRevoked ? "" : " AND status = 'active'";
     return (profile
       ? this.db.prepare("SELECT id, profile, needle, source, status, created_at, updated_at FROM capture_suppressions WHERE profile = ?" + statusSql + " ORDER BY created_at").all(profile)
       : this.db.prepare("SELECT id, profile, needle, source, status, created_at, updated_at FROM capture_suppressions WHERE 1 = 1" + statusSql + " ORDER BY created_at").all()) as CaptureSuppression[];
+    });
   }
   activeFor(profile: string): CaptureSuppression[] { return this.list(profile); }
   revoke(id: string): boolean {
-    return this.db.prepare("UPDATE capture_suppressions SET status = 'revoked', updated_at = ? WHERE id = ? AND status = 'active'")
-      .run(new Date().toISOString(), id).changes === 1;
+    return this.touch("write", () =>
+      this.db.prepare("UPDATE capture_suppressions SET status = 'revoked', updated_at = ? WHERE id = ? AND status = 'active'")
+        .run(new Date().toISOString(), id).changes === 1);
   }
   close(): void { this.db.close(); }
 }
@@ -167,8 +251,16 @@ export class MemorySuppressedError extends Error {
  *  a fresh install has issued none. */
 export function findSuppressionHitInDb(dbPath: string, profiles: string[] | null, content: string): CaptureSuppression | null {
   if (!existsSync(dbPath)) return null;
-  const db = openDatabase(dbPath);
+  // The install root rides two levels up from the db path
+  // (<root>/.sam/preferences.db), so a dead backstop read
+  // ledgers its capture-guard-failed line in the install's
+  // own ledger and rethrows exactly; the absent-file shape
+  // above and the no-table-yet shape below still read as
+  // no suppressions and ledger nothing.
+  const root = resolve(join(dirname(dbPath), ".."));
+  let db: Database.Database | undefined;
   try {
+    db = openDatabase(dbPath);
     const has = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'capture_suppressions'").get();
     if (!has) return null;
     const rows = (profiles && profiles.length
@@ -176,7 +268,11 @@ export function findSuppressionHitInDb(dbPath: string, profiles: string[] | null
       : db.prepare("SELECT id, profile, needle, source, status, created_at, updated_at FROM capture_suppressions WHERE status = 'active'").all()) as CaptureSuppression[];
     for (const row of rows) if (needleMatches(row.needle, content)) return row;
     return null;
-  } finally { db.close(); }
+  } catch (error) {
+    failCaptureGuard(root, "read", error);
+    throw error; // unreachable: failCaptureGuard always throws; this satisfies the compiler's end-of-function check
+  }
+  finally { try { db?.close(); } catch { /* a dead handle needs no close */ } }
 }
 
 /** The profiles a memory scope answers to for suppression
@@ -314,9 +410,9 @@ export function extractSuppressions(text: string): string[] {
  *  them as suppressions for the profile. Returns the newly
  *  created records (deduped repeats return []). Never throws:
  *  the caller is a turn or a tick, and a guard failure must not
- *  break either - a throw is ledgered once as a
- *  memory-suppression failure through the caller's own failure
- *  line where it has one; here it simply yields []. */
+ *  break either - a store failure is ledgered once as a
+ *  capture-guard-failed line by the store's own touch before
+ *  it reaches this catch; here it simply yields []. */
 export function captureSuppressionsFromText(root: string, profile: string, text: string, source: string): CaptureSuppression[] {
   const created: CaptureSuppression[] = [];
   for (const needle of extractSuppressions(text)) {
