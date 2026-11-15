@@ -235,6 +235,62 @@ function parseSetupRecord(data: unknown): SetupRecord | null {
   const value = data as SetupRecord | null;
   return typeof value?.model === "string" && typeof value?.verifiedAt === "string" ? value : null;
 }
+
+// Setup store failure visibility (hourly run 2026-11-15
+// 15:04 EST): this store is the verified setup baseline -
+// the one row recording that this install's model route was
+// proven with a real completion - and every touch was
+// unguarded. readSetupRecord rides auth status (whose
+// setupVerified header is built from it), the dashboard
+// status payload and CLI overview (status.ts reads it
+// unguarded), and the CLI config views; saveSetupRecord
+// rides verifyAndSaveSetup, where a dead store after a
+// SUCCESSFUL verification would kill the setup flow with an
+// unnamed throw and no record the verification ever passed.
+// Now the store owns its touches (the telegram-state
+// precedent, helpers here because this module already
+// imports the ledger and is its own leaf for this seam): a
+// failed open/read/write ledgers ONE setup-store-failed
+// line (phase read for the read door, phase write for the
+// write door; actor sam; the verbatim reason collapsed and
+// capped; never any record content - the recorded endpoint
+// and the verification reply are the install's data) and
+// rethrows exactly, tagged so a catching caller records
+// nothing more for the same touch. The exists check stays
+// outside the seam: an absent store still reads as no
+// baseline with no line and creates nothing, and a torn row
+// payload still parses forgiving to null - only the store
+// touch is guarded. Verify-before-save is untouched: a
+// failed verification still saves nothing.
+export type SetupStorePhase = "read" | "write";
+
+export function setupStoreFailureSummary(phase: SetupStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Setup store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSetupStoreFailure(root: string, phase: SetupStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "setup-store-failed", setupStoreFailureSummary(phase, reason));
+}
+
+function tagSetupStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { setupStoreLedgered?: boolean }).setupStoreLedgered = true;
+  }
+}
+
+export function isSetupStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { setupStoreLedgered?: boolean }).setupStoreLedgered === true;
+}
+
+function failSetupStore(root: string, phase: SetupStorePhase, error: unknown): never {
+  if (!isSetupStoreLedgered(error)) recordSetupStoreFailure(root, phase, error);
+  tagSetupStoreLedgered(error);
+  throw error;
+}
+
 function openSetupStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -260,10 +316,12 @@ function setupStoreExists(root: string): boolean {
   return existsSync(setupDbPath(root)) || existsSync(setupPath(root));
 }
 function saveSetupRecord(root: string, record: SetupRecord): void {
-  const db = openSetupStore(root);
+  let db: Database.Database;
+  try { db = openSetupStore(root); } catch (error) { failSetupStore(root, "write", error); }
   try {
-    db.prepare("INSERT INTO setup_record (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO setup_record (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
+  } catch (error) { failSetupStore(root, "write", error); }
+  finally { db!.close(); }
 }
 
 // The store's read door: the verified baseline through the
@@ -272,12 +330,14 @@ function saveSetupRecord(root: string, record: SetupRecord): void {
 // creates nothing.
 export function readSetupRecord(root: string): SetupRecord | null {
   if (!setupStoreExists(root)) return null;
-  const db = openSetupStore(root);
+  let db: Database.Database;
+  try { db = openSetupStore(root); } catch (error) { failSetupStore(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM setup_record WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM setup_record WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return null;
     try { return parseSetupRecord(JSON.parse(row.data)); } catch { return null; }
-  } finally { db.close(); }
+  } catch (error) { failSetupStore(root, "read", error); }
+  finally { db!.close(); }
 }
 
 export async function verifyAndSaveSetup(root: string, env: NodeJS.ProcessEnv = process.env, complete?: Completer): Promise<{ verify: VerifyResult; saved: SetupRecord | null }> {
