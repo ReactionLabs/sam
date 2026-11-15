@@ -8,6 +8,7 @@ import { readActivity, recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
 import { readDashboardConfig } from "./dashboard-config.js";
 import { abortChatTurnRequests, bumpTurnGeneration, createTurnControl, OWNER_TURN_DEADLINE_MS } from "./turn-control.js";
+import { chatQueueTouch, chatQueueTouchAsync } from "./chat-queue-failure.js";
 import type { SteerProvider } from "./budgets.js";
 
 // Message bursts (Defect 2, Dip 2026-11-14: "i want to be able to fire
@@ -120,51 +121,63 @@ function ledger(root: string, actor: string, kind: string, summary: string): voi
 }
 
 export function listChatQueue(root: string, chatId: string, limit = 12): QueueItem[] {
-  const db = openStore(root);
-  try {
-    const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(chatId, limit) as Array<Record<string, unknown>>;
-    return rows.map(rowToItem).reverse();
-  } finally { db.close(); }
+  return chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?").all(chatId, limit) as Array<Record<string, unknown>>;
+      return rows.map(rowToItem).reverse();
+    } finally { db.close(); }
+  });
 }
 function queuedItems(root: string, chatId: string): QueueItem[] {
-  const db = openStore(root);
-  try {
-    const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? AND status = 'queued' ORDER BY created_at, rowid").all(chatId) as Array<Record<string, unknown>>;
-    return rows.map(rowToItem);
-  } finally { db.close(); }
+  return chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? AND status = 'queued' ORDER BY created_at, rowid").all(chatId) as Array<Record<string, unknown>>;
+      return rows.map(rowToItem);
+    } finally { db.close(); }
+  });
 }
 /** Take every queued item for the chat, in arrival order, marking them
  *  with the given settled status (folded into a starting turn, or
  *  steered into a running one). */
 function takeQueued(root: string, chatId: string, as: "folded" | "steered"): QueueItem[] {
-  const db = openStore(root);
-  try {
-    const now = new Date().toISOString();
-    return db.transaction(() => {
-      const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? AND status = 'queued' ORDER BY created_at, rowid").all(chatId) as Array<Record<string, unknown>>;
-      const items = rows.map(rowToItem);
-      const mark = db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?");
-      for (const item of items) mark.run(as, now, item.id);
-      return items.map(item => ({ ...item, status: as, settledAt: now }));
-    })();
-  } finally { db.close(); }
+  return chatQueueTouch(root, "write", () => {
+    const db = openStore(root);
+    try {
+      const now = new Date().toISOString();
+      return db.transaction(() => {
+        const rows = db.prepare("SELECT * FROM queue_items WHERE chat_id = ? AND status = 'queued' ORDER BY created_at, rowid").all(chatId) as Array<Record<string, unknown>>;
+        const items = rows.map(rowToItem);
+        const mark = db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?");
+        for (const item of items) mark.run(as, now, item.id);
+        return items.map(item => ({ ...item, status: as, settledAt: now }));
+      })();
+    } finally { db.close(); }
+  });
 }
 function setStatus(root: string, id: string, status: QueueItemStatus): void {
-  const db = openStore(root);
-  try { db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?").run(status, new Date().toISOString(), id); }
-  finally { db.close(); }
+  chatQueueTouch(root, "write", () => {
+    const db = openStore(root);
+    try { db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?").run(status, new Date().toISOString(), id); }
+    finally { db.close(); }
+  });
 }
 function claimRow(root: string, chatId: string): { claimedAt: string; cancelRequested: boolean; token: string } | null {
-  const db = openStore(root);
-  try {
-    const row = db.prepare("SELECT claimed_at, cancel_requested, token FROM turn_claims WHERE chat_id = ?").get(chatId) as { claimed_at: string; cancel_requested: number; token: string } | undefined;
-    return row ? { claimedAt: row.claimed_at, cancelRequested: row.cancel_requested === 1, token: String(row.token) } : null;
-  } finally { db.close(); }
+  return chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const row = db.prepare("SELECT claimed_at, cancel_requested, token FROM turn_claims WHERE chat_id = ?").get(chatId) as { claimed_at: string; cancel_requested: number; token: string } | undefined;
+      return row ? { claimedAt: row.claimed_at, cancelRequested: row.cancel_requested === 1, token: String(row.token) } : null;
+    } finally { db.close(); }
+  });
 }
 export function chatTurnActive(root: string, chatId: string): boolean {
-  if (drainsInFlight.has(chatId)) return true;
-  const claim = claimRow(root, chatId);
-  return !!claim && Date.now() - new Date(claim.claimedAt).getTime() < STALE_CLAIM_MS;
+  return chatQueueTouch(root, "read", () => {
+    if (drainsInFlight.has(chatId)) return true;
+    const claim = claimRow(root, chatId);
+    return !!claim && Date.now() - new Date(claim.claimedAt).getTime() < STALE_CLAIM_MS;
+  });
 }
 
 export interface EnqueueResult { id: string; status: QueueItemStatus; effect?: "nevermind" | "stop" | "status"; reply?: string }
@@ -175,6 +188,10 @@ export interface EnqueueResult { id: string; status: QueueItemStatus; effect?: "
  *  check during a running turn is answered by the runtime on the
  *  spot (the fast status lane) and likewise never waits on a turn. */
 export function enqueueChatMessage(root: string, input: { chatId: string; content: string; source?: string; deadlineMs?: number }): EnqueueResult {
+  return chatQueueTouch(root, "write", () => enqueueChatMessageInner(root, input));
+}
+
+function enqueueChatMessageInner(root: string, input: { chatId: string; content: string; source?: string; deadlineMs?: number }): EnqueueResult {
   const actor = actorForChat(root, input.chatId);
   const id = randomUUID();
   const now = new Date().toISOString();
@@ -226,7 +243,7 @@ export function enqueueChatMessage(root: string, input: { chatId: string; conten
  *  messages to the chat first, so the transcript order is the arrival
  *  order) plus the owner's stop flag when one is set. */
 function makeSteerProvider(root: string, chatId: string): SteerProvider {
-  return () => {
+  return () => chatQueueTouch(root, "write", () => {
     const db = openStore(root);
     let cancel = false;
     try {
@@ -242,7 +259,7 @@ function makeSteerProvider(root: string, chatId: string): SteerProvider {
     }
     if (!items.length && !cancel) return null;
     return { contents: items.map(item => item.content), cancel };
-  };
+  });
 }
 
 const drainsInFlight = new Set<string>();
@@ -260,6 +277,10 @@ export function kickChatDrain(root: string, chatId: string, deadlineMs?: number)
  *  (messages that arrived during the turn run as the next turn
  *  automatically - no re-send). */
 export async function drainChatQueue(root: string, chatId: string, opts?: { deadlineMs?: number }): Promise<void> {
+  return chatQueueTouchAsync(root, "write", () => drainChatQueueInner(root, chatId, opts));
+}
+
+async function drainChatQueueInner(root: string, chatId: string, opts?: { deadlineMs?: number }): Promise<void> {
   if (drainsInFlight.has(chatId)) return;
   drainsInFlight.add(chatId);
   const claimToken = randomUUID();
@@ -326,6 +347,10 @@ export interface ChatResetResult { wasActive: boolean; ranForMs: number | null; 
  *  is preserved. A press with nothing running and nothing
  *  queued is a quiet no-op. */
 export function resetChatTurn(root: string, chatId: string): ChatResetResult {
+  return chatQueueTouch(root, "write", () => resetChatTurnInner(root, chatId));
+}
+
+function resetChatTurnInner(root: string, chatId: string): ChatResetResult {
   const actor = actorForChat(root, chatId);
   const claim = claimRow(root, chatId);
   const wasActive = !!claim || drainsInFlight.has(chatId);
@@ -352,11 +377,12 @@ export function resetChatTurn(root: string, chatId: string): ChatResetResult {
 /** Dashboard startup: resume drains for chats whose queued messages
  *  outlived a restart. Returns the chats resumed. */
 export function resumeChatQueues(root: string): string[] {
-  const db = openStore(root);
-  let chatIds: string[] = [];
-  try {
-    chatIds = (db.prepare("SELECT DISTINCT chat_id FROM queue_items WHERE status = 'queued'").all() as Array<{ chat_id: string }>).map(r => r.chat_id);
-  } finally { db.close(); }
+  const chatIds = chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      return (db.prepare("SELECT DISTINCT chat_id FROM queue_items WHERE status = 'queued'").all() as Array<{ chat_id: string }>).map(r => r.chat_id);
+    } finally { db.close(); }
+  });
   for (const chatId of chatIds) kickChatDrain(root, chatId);
   return chatIds;
 }

@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { chatQueueTouch } from "./chat-queue-failure.js";
 
 // Interactive turn control (Dip, 2026-11-14, after Test Chat
 // 8d7f4341 burned dozens of model calls inside one turn while his
@@ -58,32 +59,38 @@ function openStore(root: string): Database.Database {
 }
 
 export function turnGeneration(root: string, chatId: string): number {
-  const db = openStore(root);
-  try {
-    const row = db.prepare("SELECT generation FROM turn_state WHERE chat_id = ?").get(chatId) as { generation: number } | undefined;
-    return row ? Number(row.generation) : 0;
-  } finally { db.close(); }
+  return chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const row = db.prepare("SELECT generation FROM turn_state WHERE chat_id = ?").get(chatId) as { generation: number } | undefined;
+      return row ? Number(row.generation) : 0;
+    } finally { db.close(); }
+  });
 }
 
 /** A reset stamps the chat: every turn that started under an
  *  earlier generation is invalid from this moment, wherever it
  *  runs. Returns the new generation. */
 export function bumpTurnGeneration(root: string, chatId: string): number {
-  const db = openStore(root);
-  try {
-    db.prepare("INSERT INTO turn_state (chat_id, generation, reset_at) VALUES (?, 1, ?) ON CONFLICT(chat_id) DO UPDATE SET generation = generation + 1, reset_at = excluded.reset_at")
-      .run(chatId, new Date().toISOString());
-    const row = db.prepare("SELECT generation FROM turn_state WHERE chat_id = ?").get(chatId) as { generation: number };
-    return Number(row.generation);
-  } finally { db.close(); }
+  return chatQueueTouch(root, "write", () => {
+    const db = openStore(root);
+    try {
+      db.prepare("INSERT INTO turn_state (chat_id, generation, reset_at) VALUES (?, 1, ?) ON CONFLICT(chat_id) DO UPDATE SET generation = generation + 1, reset_at = excluded.reset_at")
+        .run(chatId, new Date().toISOString());
+      const row = db.prepare("SELECT generation FROM turn_state WHERE chat_id = ?").get(chatId) as { generation: number };
+      return Number(row.generation);
+    } finally { db.close(); }
+  });
 }
 
 export function claimTokenFor(root: string, chatId: string): string | null {
-  const db = openStore(root);
-  try {
-    const row = db.prepare("SELECT token FROM turn_claims WHERE chat_id = ?").get(chatId) as { token: string } | undefined;
-    return row ? String(row.token) : null;
-  } finally { db.close(); }
+  return chatQueueTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const row = db.prepare("SELECT token FROM turn_claims WHERE chat_id = ?").get(chatId) as { token: string } | undefined;
+      return row ? String(row.token) : null;
+    } finally { db.close(); }
+  });
 }
 
 // Per-process registry of in-flight turn abort controllers, by

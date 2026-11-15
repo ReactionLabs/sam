@@ -560,6 +560,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no runs (which would silently empty the battery's whole score history dressed as a version that never ran), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a scorecard record (case evidence can carry the owner's words, not failure data)",
      "An absent store still reads as no runs with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (skipped, never fatal)",
      "The full suite is green, including the task battery store failure-ledger tests"]);
+  if (key.startsWith("chat-queue-failed:")) return base(
+    ["chat-queue.ts", "turn-control.ts", "chat-queue-failure.ts", "dashboard.ts"],
+    "Chat queue store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the chat queue store (.sam/chat-queue.db: the burst queue every owner message is accounted in, the turn claims, and the reset generations two modules share) must open, read, and write instead of dying at that seam - while it is dead owner messages strand queued with the dashboard folding the failure as no queue and no active turn, restart resume reads it as nothing to resume, and every turn's generation and claim checks die raw at their round boundaries.",
+    ["The next enqueues, drains, steers, resets, and generation checks resolve their queue again instead of chat-queue-failed lines",
+     "Exactly one chat-queue-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed touch rethrows instead of folding the store as an empty queue (which would silently drop the owner's queued messages dressed as nothing pending, the one loss this store exists to prevent), a touch already ledgered by an inner door is never recorded twice across either module's handle, and a failure line never carries a queue record (message content is the owner's words, not failure data)",
+     "A fresh install still reads as an empty queue with no line (this store's reads create the file by design, schema on every open), exactly as before",
+     "The full suite is green, including the chat queue store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -884,6 +892,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Task battery store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "task-battery-failed:" + phase, label: "task battery store failures (" + phase + " step)" };
+    }
+    case "chat-queue-failed": {
+      const m = summary.match(/^Chat queue store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "chat-queue-failed:" + phase, label: "chat queue store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);
