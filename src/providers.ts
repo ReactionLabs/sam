@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { resolveModelForRoute, tierForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
 import type { TurnRoute } from "./budgets.js";
@@ -128,6 +129,76 @@ function providersDbFile(root: string): string {
 // with neither file creates nothing. The P9 backup snapshots every
 // .sam/*.db generically, so the migrated store is carried with no
 // backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 00:04 EST): the provider registry holds one row per
+// file-configured provider - endpoint, key ENV NAME, and
+// models - and a profile's provider pin resolves its turns
+// through it. Every touch opened it raw: readFileProviders
+// rides listProviders, resolveTurnConnection on every pinned
+// turn, auth status, failover validation, the CLI, and
+// observability; the writes ride the CLI's add / update /
+// remove. A dead providers.db threw into whichever catch
+// wrapped the call with the seam unnamed, and no
+// provider-store-failed kind existed, so the class was
+// uncountable, and any reader folding a dead store as "no
+// file providers" would silently drop every provider pin
+// dressed as an empty registry. Now the store's touches own
+// their failure (the minis / failover precedent): a failed
+// touch ledgers ONE provider-store-failed line (phase read
+// for readFileProviders, write for add / update / remove;
+// actor sam; the verbatim reason collapsed and capped; never
+// any provider record - endpoints, key env names, and model
+// names are routing data, not failure data), tags the error,
+// and rethrows exactly, so every caller's handling is
+// unchanged and reads still fail closed. A touch already
+// ledgered by an inner door keeps its one line and gains no
+// second. Validation errors (bad id / keyEnv / endpoint /
+// model shape, reserved id, already exists, limit, the
+// env-provider removal refusal) are not store failures and
+// ledger nothing. An absent store still reads as the env
+// provider alone with no line and creates nothing, and torn
+// row payloads still parse forgiving - only the store touch
+// is guarded.
+export type ProviderStorePhase = "read" | "write";
+
+export function providerStoreFailureSummary(phase: ProviderStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Provider store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordProviderStoreFailure(root: string, phase: ProviderStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "provider-store-failed", providerStoreFailureSummary(phase, reason));
+}
+
+function tagProviderStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { providerStoreLedgered?: boolean }).providerStoreLedgered = true;
+  }
+}
+
+export function isProviderStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { providerStoreLedgered?: boolean }).providerStoreLedgered === true;
+}
+
+const PROVIDER_STORE_VALIDATION = [/^Invalid provider id/, /^Provider id "[^"]*" is reserved/, /^keyEnv must be/, /^Model endpoint must be/, /^Wildcard model endpoint forbidden$/, /^Invalid (model|cheap model|deep model)/, /^Provider already exists:/, /^Provider limit reached \(/, /^The environment provider is not stored here/];
+
+function isProviderStoreValidation(error: unknown): boolean {
+  return error instanceof Error && PROVIDER_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failProviderStore(root: string, phase: ProviderStorePhase, error: unknown): never {
+  if (!isProviderStoreLedgered(error) && !isProviderStoreValidation(error)) recordProviderStoreFailure(root, phase, error);
+  if (!isProviderStoreValidation(error)) tagProviderStoreLedgered(error);
+  throw error;
+}
+
+function openProvidersGuarded(root: string, phase: ProviderStorePhase): Database.Database {
+  try { return openProvidersStore(root); }
+  catch (error) { failProviderStore(root, phase, error); }
+}
+
 function openProvidersStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -198,13 +269,14 @@ function envProvider(env: NodeJS.ProcessEnv): ConfiguredProvider {
 
 export function readFileProviders(root: string): FileProvider[] {
   if (!storeExists(root)) return [];
-  const db = openProvidersStore(root);
+  const db = openProvidersGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM providers ORDER BY rowid").all() as Array<{ data: string }>;
     const items: FileProvider[] = [];
     for (const row of rows) { const provider = rowToFileProvider(row.data); if (provider) items.push(provider); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failProviderStore(root, "read", error); }
+  finally { db.close(); }
 }
 
 function toPublic(env: NodeJS.ProcessEnv, row: FileProvider): ConfiguredProvider {
@@ -236,13 +308,14 @@ export function addProvider(root: string, input: { id: string; endpoint: string;
   const cheapModel = input.cheapModel ? assertModel(input.cheapModel, "cheap model") : null;
   const deepModel = input.deepModel ? assertModel(input.deepModel, "deep model") : null;
   const row: FileProvider = { id, endpoint, keyEnv, model, cheapModel, deepModel };
-  const db = openProvidersStore(root);
+  const db = openProvidersGuarded(root, "write");
   try {
     if (findProviderRow(db, id)) throw new Error("Provider already exists: " + id);
     const { n } = db.prepare("SELECT COUNT(*) AS n FROM providers").get() as { n: number };
     if (n >= MAX_PROVIDERS) throw new Error("Provider limit reached (" + MAX_PROVIDERS + ")");
     db.prepare("INSERT INTO providers (id, data) VALUES (?, ?)").run(id, JSON.stringify(row));
-  } finally { db.close(); }
+  } catch (error) { failProviderStore(root, "write", error); }
+  finally { db.close(); }
   return toPublic(env, row);
 }
 
@@ -259,7 +332,7 @@ export function updateProvider(root: string, id: string, patch: { endpoint?: str
   const model = patch.model !== undefined ? assertModel(patch.model, "model") : undefined;
   const cheapModel = patch.cheapModel === undefined ? undefined : (patch.cheapModel ? assertModel(patch.cheapModel, "cheap model") : null);
   const deepModel = patch.deepModel === undefined ? undefined : (patch.deepModel ? assertModel(patch.deepModel, "deep model") : null);
-  const db = openProvidersStore(root);
+  const db = openProvidersGuarded(root, "write");
   try {
     const existing = findProviderRow(db, id);
     if (!existing) return null;
@@ -273,16 +346,18 @@ export function updateProvider(root: string, id: string, patch: { endpoint?: str
     };
     db.prepare("UPDATE providers SET data = ? WHERE id = ?").run(JSON.stringify(next), id);
     return toPublic(env, next);
-  } finally { db.close(); }
+  } catch (error) { failProviderStore(root, "write", error); }
+  finally { db.close(); }
 }
 
 export function removeProvider(root: string, id: string): boolean {
   if ((RESERVED_PROVIDER_IDS as readonly string[]).includes(id)) throw new Error("The environment provider is not stored here and cannot be removed");
   if (!storeExists(root)) return false;
-  const db = openProvidersStore(root);
+  const db = openProvidersGuarded(root, "write");
   try {
     return db.prepare("DELETE FROM providers WHERE id = ?").run(id).changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failProviderStore(root, "write", error); }
+  finally { db.close(); }
 }
 
 function modelForTier(row: { model: string | null; cheapModel: string | null; deepModel: string | null }, tier: ModelTier): string | null {
