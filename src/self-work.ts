@@ -481,6 +481,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The door still fails closed exactly as before: a failed read rethrows instead of folding the store as no bindings (which would silently close every signed door dressed as an empty registry), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a binding record (profile names and secret env names are door data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no bindings with no line, while validation errors (bad name / profile / secretEnv shape, duplicates, limit) still ledger nothing",
      "The full suite is green, including the event failure-ledger tests"]);
+  if (key.startsWith("failover-failed:")) return base(
+    ["failover.ts", "providers.ts", "agent-turn.ts", "cli.ts"],
+    "Failover store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the failover store (.sam/fallbacks.db) must open, read, and write instead of dying at that seam - this store holds each profile's ordered fallback provider+model routes, read on every turn's route build, so while it is dead turns die with the seam unnamed and the CLI fallbacks view dies raw.",
+    ["The next turns, route builds, and fallback writes resolve their routes again instead of failover-failed lines",
+     "Exactly one failover-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "Routing still fails closed exactly as before: a failed read rethrows instead of folding the store as no fallbacks (which would silently drop a profile's fallback routes dressed as an empty list, so a dead primary becomes fatal instead of failing over), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a route record (provider and model names are routing data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no fallbacks with no line, while validation errors (bad profile / provider / model shape, unknown provider, fallback limit) still ledger nothing",
+     "The full suite is green, including the failover failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -760,6 +768,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Event ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "event-failed:" + phase, label: "event store failures (" + phase + " step)" };
+    }
+    case "failover-failed": {
+      const m = summary.match(/^Failover ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "failover-failed:" + phase, label: "failover store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);

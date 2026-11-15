@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
 
@@ -47,6 +48,70 @@ function fallbacksDbFile(root: string): string { return join(resolve(root), ".sa
 // with neither file creates nothing. The P9 backup snapshots every
 // .sam/*.db generically, so the migrated store is carried with no
 // backup change.
+// Failure visibility (gap found 2026-11-14, hourly run
+// 21:04 EST): the failover store holds each profile's ordered
+// fallback provider+model routes, and every touch opened it
+// raw. fallbackRoutes is read on every turn's route build, so
+// a dead fallbacks.db threw into whichever catch wrapped the
+// turn with the seam unnamed, and no failover-failed kind
+// existed, so the class was uncountable, and any reader
+// folding a dead store as "no fallbacks" would silently drop
+// a profile's fallback routes dressed as an empty list. Now
+// the store's touches own their failure (the events /
+// connectors precedent): a failed touch ledgers ONE
+// failover-failed line (phase read for fallbackRoutes, write
+// for add / update / clear; actor sam; the verbatim reason
+// collapsed and capped; never any route record - provider
+// and model names are routing data, not failure data), tags
+// the error, and rethrows exactly, so every caller's handling
+// is unchanged and routing still fails closed. A touch
+// already ledgered by an inner door keeps its one line and
+// gains no second. Validation errors (bad profile / provider
+// / model shape, unknown provider, fallback limit) are not
+// store failures and ledger nothing. An absent store still
+// reads empty with no line and creates nothing, and torn row
+// payloads still parse forgiving - only the store touch is
+// guarded.
+export type FailoverPhase = "read" | "write";
+
+export function failoverFailureSummary(phase: FailoverPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Failover " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordFailoverFailure(root: string, phase: FailoverPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "failover-failed", failoverFailureSummary(phase, reason));
+}
+
+function tagFailoverLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { failoverLedgered?: boolean }).failoverLedgered = true;
+  }
+}
+
+export function isFailoverLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { failoverLedgered?: boolean }).failoverLedgered === true;
+}
+
+const FAILOVER_VALIDATION = [/^Invalid profile$/, /^Invalid provider id$/, /^Invalid model$/, /^Unknown provider "/, /^Fallback limit reached \(/];
+
+function isFailoverValidation(error: unknown): boolean {
+  return error instanceof Error && FAILOVER_VALIDATION.some(re => re.test(error.message));
+}
+
+function failFailover(root: string, phase: FailoverPhase, error: unknown): never {
+  if (!isFailoverLedgered(error) && !isFailoverValidation(error)) recordFailoverFailure(root, phase, error);
+  if (!isFailoverValidation(error)) tagFailoverLedgered(error);
+  throw error;
+}
+
+function openFallbacksGuarded(root: string, phase: FailoverPhase): Database.Database {
+  try { return openFallbacksStore(root); }
+  catch (error) { failFailover(root, phase, error); }
+}
+
 function openFallbacksStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -114,15 +179,16 @@ function validateRoute(root: string, route: FallbackRoute, env: NodeJS.ProcessEn
 
 export function fallbackRoutes(root: string, profile: string): FallbackRoute[] {
   if (!storeExists(root)) return [];
-  const db = openFallbacksStore(root);
+  const db = openFallbacksGuarded(root, "read");
   try { return findRoutesRow(db, profile) ?? []; }
+  catch (error) { failFailover(root, "read", error); }
   finally { db.close(); }
 }
 
 export function addFallbackRoute(root: string, profile: string, route: FallbackRoute, env: NodeJS.ProcessEnv = process.env): FallbackRoute[] {
   if (!ID_RE.test(profile)) throw new Error("Invalid profile");
   const clean = validateRoute(root, route, env);
-  const db = openFallbacksStore(root);
+  const db = openFallbacksGuarded(root, "write");
   try {
     const current = findRoutesRow(db, profile) ?? [];
     if (current.some(r => r.provider === clean.provider && r.model === clean.model)) return current;
@@ -130,7 +196,8 @@ export function addFallbackRoute(root: string, profile: string, route: FallbackR
     const next = [...current, clean];
     db.prepare("INSERT INTO fallbacks (profile, data) VALUES (?, ?) ON CONFLICT(profile) DO UPDATE SET data = excluded.data").run(profile, JSON.stringify(next));
     return next;
-  } finally { db.close(); }
+  } catch (error) { failFailover(root, "write", error); }
+  finally { db.close(); }
 }
 
 // The single-row patch door (the providers precedent): replaces one
@@ -146,7 +213,7 @@ export function updateFallbackRoutes(root: string, profile: string, routes: Fall
     if (!cleaned.some(r => r.provider === clean.provider && r.model === clean.model)) cleaned.push(clean);
   }
   if (cleaned.length > MAX_FALLBACKS) throw new Error("Fallback limit reached (" + MAX_FALLBACKS + ")");
-  const db = openFallbacksStore(root);
+  const db = openFallbacksGuarded(root, "write");
   try {
     const existing = findRoutesRow(db, profile);
     if (existing === null) return null;
@@ -156,18 +223,20 @@ export function updateFallbackRoutes(root: string, profile: string, routes: Fall
     }
     db.prepare("UPDATE fallbacks SET data = ? WHERE profile = ?").run(JSON.stringify(cleaned), profile);
     return cleaned;
-  } finally { db.close(); }
+  } catch (error) { failFailover(root, "write", error); }
+  finally { db.close(); }
 }
 
 export function clearFallbackRoutes(root: string, profile: string): boolean {
   if (!storeExists(root)) return false;
-  const db = openFallbacksStore(root);
+  const db = openFallbacksGuarded(root, "write");
   try {
     const existing = findRoutesRow(db, profile);
     if (existing === null) return false;
     db.prepare("DELETE FROM fallbacks WHERE profile = ?").run(profile);
     return true;
-  } finally { db.close(); }
+  } catch (error) { failFailover(root, "write", error); }
+  finally { db.close(); }
 }
 
 // Primary first, then each configured fallback that resolves to a
