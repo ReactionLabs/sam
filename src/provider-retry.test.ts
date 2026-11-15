@@ -16,7 +16,7 @@ import {
 import { RATE_LIMIT_GRACE_MESSAGE, rateLimitStatus } from "./rate-limit.js";
 import { OWNER_TURN_DEADLINE_MS } from "./turn-control.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
-import { runChatTurn } from "./agent-turn.js";
+import { runChatTurn, TURN_FAILURE_MESSAGE } from "./agent-turn.js";
 import { ChatStore } from "./chats.js";
 import { awaitChatQueue, enqueueChatMessage, listChatQueue } from "./chat-queue.js";
 
@@ -211,7 +211,7 @@ test("a persistent 429 still belongs to the grace path after its retries - never
   }
 });
 
-test("a 400 fails immediately - no retry, no note", async () => {
+test("a 400 fails immediately - no retry, no overload note", async () => {
   const root = scratch();
   const restoreEnv = installEnv();
   const oldFetch = globalThis.fetch;
@@ -226,10 +226,14 @@ test("a 400 fails immediately - no retry, no note", async () => {
     const peek = new ChatStore(root);
     const messages = peek.messages(chat.id);
     peek.close();
-    assert.equal(messages.filter(m => m.role === "assistant").length, 0, "no note for a failure that is not an overload");
+    // Chat trust sprint (2026-11-15): the overload NOTE stays
+    // overload-only, but a failed owner send is never silent -
+    // the chat carries the one general failure sentence instead.
+    assert.deepEqual(messages.filter(m => m.role === "assistant").map(m => m.content), [TURN_FAILURE_MESSAGE], "no overload note - the general failure note instead");
     const lines = ledger(root);
     assert.equal(lines.filter(l => l.kind === "provider-retry").length, 0);
     assert.equal(lines.filter(l => l.kind === "provider-overload").length, 0);
+    assert.equal(lines.filter(l => l.kind === "turn-failure-note").length, 1);
     assert.equal(lines.filter(l => l.kind === "turn-failed").length, 1);
   } finally {
     globalThis.fetch = oldFetch;

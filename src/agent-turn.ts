@@ -24,7 +24,7 @@ import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIM
 import { isProviderOverloadError, PROVIDER_OVERLOAD_MESSAGE } from "./provider-retry.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
-import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, type TurnControl } from "./turn-control.js";
+import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, turnDeadlineFallbackAnswer, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
 import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
@@ -50,11 +50,31 @@ const PROVENANCE_NOTE=" Owner messages may start with a provenance line [metadat
 // words never become preference, law, or confirmed fact.
 // Reactions never break a turn: a failed stamp is swallowed here,
 // the same discipline as recall and the session ledger.
+// The general turn-failure note (chat trust sprint, Dip live
+// defect 2026-11-15): the one plain sentence an owner chat turn
+// leaves behind when it dies of anything that is neither the
+// rate-limit grace nor the provider-overload note - a malformed
+// model completion, a dead route, a tool round that threw. The
+// failure classes with their own words keep them; every other
+// failed owner send lands here instead of silence. Plain words,
+// no machinery: what happened, the message is saved, how to get
+// the answer.
+export const TURN_FAILURE_MESSAGE="That turn hit a problem on my side and did not finish. Your message is saved here and nothing is lost. Tap Resend on your message, or send again, and I will pick it back up.";
 function joinPartial(base:string,next:string):string{
   if(!base)return next;
   if(!next)return base;
   if(/\s$/.test(base)||/^\s/.test(next))return base+next;
   return base+" "+next;
+}
+// The queue's stamping seam (chat trust sprint, Item 3): the
+// drain hands this callback in so every user row a turn saves is
+// recorded against the queue item it came from, in save order -
+// the link that lets a failed send decorate (and resend from)
+// its own bubble instead of rendering as a second one. A
+// stamping failure never breaks the turn it rides on.
+function notifyUserMessageSaved(opts:{onUserMessageSaved?:(messageId:string)=>void}|undefined,messageId:string):void{
+  if(!opts?.onUserMessageSaved)return;
+  try{opts.onUserMessageSaved(messageId);}catch{/* stamping never breaks a turn */}
 }
 function setReactionSafe(root:string,chatId:string,messageId:string,reaction:string|null):void{
   try{const db=new ChatStore(root);try{db.setReaction(chatId,messageId,reaction);}finally{db.close();}}catch{/* a reaction is garnish, never the meal */}
@@ -87,7 +107,7 @@ export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,erro
   }catch{/* best effort: the line lands under the core actor */}
   recordActivity(root,actor,"turn-failed",turnFailureSummary(chatId,route,error));
 }
-export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl}):Promise<string>{
+export async function runChatTurn(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl;existingUserMessageId?:string;onUserMessageSaved?:(messageId:string)=>void}):Promise<string>{
   try{
     return await runChatTurnInner(root,chatId,content,opts);
   }catch(error){
@@ -100,7 +120,7 @@ export async function runChatTurn(root:string,chatId:string,content:string,opts?
     throw error;
   }
 }
-async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl}):Promise<string>{
+async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{route?:TurnRoute;source?:unknown;surface?:ChatSurface;burst?:string[];steer?:SteerProvider;control?:TurnControl;existingUserMessageId?:string;onUserMessageSaved?:(messageId:string)=>void}):Promise<string>{
   const route=opts?.route??"chat";
   const source=opts?.source;
   const look=new ChatStore(root);let chatAgent:string|null=null;let profiles;let visitor=false;
@@ -168,19 +188,27 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // same user text resumes that row instead of starting the call over.
   let userMessageId:string|null=null;
   let resuming:{id:string;content:string}|null=null;
+  // A replayed turn (chat trust sprint, Item 3): the drain is
+  // re-driving a message whose row the first attempt already
+  // saved - the turn reuses that row, and the message is not
+  // captured a second time (it is the same words, not a new
+  // message).
+  let replayed=false;
   try{
     history=db.messages(chatId);
     const open=db.openPartial(chatId);
     const prevUser=[...history].reverse().find(m=>m.role==="user");
-    if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;}
-    else userMessageId=db.add(chatId,"user",content,source).id;
+    const replayedRow=opts?.existingUserMessageId?history.find(m=>m.id===opts.existingUserMessageId&&m.role==="user")??null:null;
+    if(replayedRow){replayed=true;userMessageId=replayedRow.id;}
+    else if(open&&prevUser&&prevUser.content===content){resuming={id:open.id,content:open.content};userMessageId=prevUser.id;notifyUserMessageSaved(opts,userMessageId);}
+    else{userMessageId=db.add(chatId,"user",content,source).id;notifyUserMessageSaved(opts,userMessageId);}
     if(!resuming)history=db.messages(chatId);
     // Message bursts (Defect 2): follow-ups that landed before this
     // turn started are stored as their own user rows, in arrival
     // order, right behind the primary message - the burst folds into
     // this turn as consecutive owner messages, the latest governing,
     // and every one of them is in the transcript.
-    if(opts?.burst?.length){for(const extra of opts.burst)db.add(chatId,"user",extra,source);history=db.messages(chatId);}
+    if(opts?.burst?.length){for(const extra of opts.burst){const added=db.add(chatId,"user",extra,source);notifyUserMessageSaved(opts,added.id);}history=db.messages(chatId);}
   }finally{db.close();}
   // Reactions (Dip, 2026-11-10): on a live owner chat turn the
   // owner's message gets an eyes stamp while SAM works and a heart
@@ -202,7 +230,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // background turn text is SAM's own prompting, not a fresh correction.
       let correctionNote="";
       const correction=detectCorrection(content);
-      if(!resuming&&correction&&(opts?.route??"chat")==="chat"){
+      if(!resuming&&!replayed&&correction&&(opts?.route??"chat")==="chat"){
         // Correction plumbing never breaks a turn - and a failed
         // routing is no longer silent either: tryRouteCorrection
         // ledgers one correction-failed line on a throw and
@@ -217,13 +245,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // so it binds this message's own preference capture below
       // and every later automatic write; suppressed finds never
       // reach the preference store.
-      if(!resuming)captureSuppressionsFromText(root,profileName,content,chatId);
-      if(!resuming)for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(content),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
+      if(!resuming&&!replayed)captureSuppressionsFromText(root,profileName,content,chatId);
+      if(!resuming&&!replayed)for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(content),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
       // Burst follow-ups are the owner's words too: their explicit
       // preferences capture the same way, through the same
       // suppression filter (correction routing stays one-per-turn
       // on the primary message).
-      if(!resuming)for(const extra of opts?.burst??[])for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(extra),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
+      if(!resuming&&!replayed)for(const extra of opts?.burst??[])for(const found of filterUnsuppressed(root,profileName,withoutCorrectedRules(extractPreferences(extra),correction)))prefs.note(profileName,found.statement,found.kind,chatId);
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName))+correctionNote;
     }else{
       lawBlock=lawPromptBlock(prefs.lawsFor(profileName));
@@ -272,7 +300,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // added only when the kept tail does not already carry it.
   const messages=[{role:"system" as const,content:systemContent+(resuming?" The last assistant message is a PARTIAL interrupted reply, not a finished answer. Continue it without repeating the saved text.":"")},
     ...(contextSummary?[{role:"system" as const,content:"Compacted summary of earlier turns in this chat (a durable memory flush of the folded turns was written before this summary replaced them in the prompt; the raw turns remain in the chat record):\n"+contextSummary}]:[]),
-    ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming})];
+    ...assembleTurnMessages({kept:keptHistory,currentId:userMessageId,currentContent:content,currentSource:source,resuming:!!resuming,resent:replayed})];
   // Context metering (Program H item D): the injected context
   // of THIS turn, measured at assembly in chars and words with
   // the memory-derived tiers broken out, lands in
@@ -335,6 +363,11 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // ledgers one line, so the record shows the hiccup; the
       // recovery is this turn's own success line below.
       provider.onProviderRetry=(info)=>{try{recordActivity(root,profileName,"provider-retry","Provider retry in chat "+chatId.slice(0,8)+": the model request failed (HTTP "+info.status+"), retry "+info.retry+" of "+info.limit+" after "+info.delayMs+"ms backoff");}catch{/* the ledger never breaks a turn */}};
+      // Malformed completions: each rejected draw ledgers one
+      // line with the check that failed and the sizes involved
+      // (never the content), so the class stays countable even
+      // when the redraw saves the turn.
+      provider.onMalformedCompletion=(info)=>{try{recordActivity(root,profileName,"malformed-completion","Malformed completion in chat "+chatId.slice(0,8)+": "+info.detail+" (attempt "+info.attempt+" of "+info.limit+"; nothing executed, the model redraws)");}catch{/* the ledger never breaks a turn */}};
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
@@ -414,6 +447,40 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
           }finally{store.close();}
         }catch{/* the note never breaks the failure path: the throw below still marks the message failed */}
         try{recordActivity(root,profileName,"provider-overload","Provider overloaded in chat "+chatId.slice(0,8)+": in-turn retries exhausted, the plain outage note is in the chat and the message stays marked failed, not lost (the raw provider error never reaches the owner)");}catch{/* the ledger never breaks a turn */}
+      }
+      // Every other failure of an owner chat turn (chat trust
+      // sprint, Dip live defect 2026-11-15): two of the owner's
+      // sends died on a malformed model completion - a class
+      // that is neither the rate-limit grace nor the provider
+      // overload above - and the chat said NOTHING: no reply, no
+      // note, just a failed tag on his message. A failed owner
+      // send must never be silent, whatever the cause: the chat
+      // gets one plain sentence saying the turn did not finish
+      // and the message is saved, then the throw proceeds
+      // exactly as before (turn-failed ledgers above the queue,
+      // the queue marks the message failed, not lost). Classes
+      // with their own words keep them: the overload branch
+      // above already noted its failure, the grace returned
+      // earlier, and a turn the deadline caught on the way here
+      // closes with the deadline's own fallback words, not this
+      // note. Same fences as the branches above: chat route
+      // only, never a visitor, machine routes keep the bare
+      // throw (their failure isolation is their contract). An
+      // OPEN PARTIAL exempts the turn: the salvaged text is the
+      // visible record and the resume seed (a killed stream's
+      // "Hello" is what the next send continues from), so the
+      // note never overwrites or appends beside it - the failed
+      // marker on the owner's bubble plus the partial carry the
+      // story, and a resend resumes from that text.
+      if(!visitor&&route==="chat"&&!isProviderOverloadError(error)&&partialId===null){
+        const noteText=control.deadlineExceeded()?turnDeadlineFallbackAnswer(content):TURN_FAILURE_MESSAGE;
+        try{
+          const store=new ChatStore(root);
+          try{
+            store.add(chatId,"assistant",noteText);
+          }finally{store.close();}
+        }catch{/* the note never breaks the failure path: the throw below still marks the message failed */}
+        try{recordActivity(root,profileName,"turn-failure-note","Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+(error instanceof Error?error.message:String(error)).slice(0,120));}catch{/* the ledger never breaks a turn */}
       }
       // A turn that dies mid-flight still spent what it spent; the
       // session ledger records it so the caps see the true total.

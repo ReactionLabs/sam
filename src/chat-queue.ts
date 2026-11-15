@@ -41,6 +41,12 @@ export type QueueItemStatus = "queued" | "folded" | "steered" | "dropped" | "con
 export interface QueueItem {
   id: string; chatId: string; content: string; source: string;
   status: QueueItemStatus; createdAt: string; settledAt: string | null;
+  // The chat_messages row this item's turn saved for it, stamped
+  // at save time (chat trust sprint, Item 3). The link is what
+  // lets a surface decorate the send's own bubble with its queue
+  // state - and resend it - instead of rendering the send twice.
+  // NULL on rows that predate the column.
+  messageId: string | null;
 }
 
 const STALE_CLAIM_MS = 15 * 60 * 1000;
@@ -100,6 +106,12 @@ function openStore(root: string): Database.Database {
   const db = openDatabase(dbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS queue_items (id TEXT PRIMARY KEY, chat_id TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, settled_at TEXT);" +
     "CREATE TABLE IF NOT EXISTS turn_claims (chat_id TEXT PRIMARY KEY, token TEXT NOT NULL, claimed_at TEXT NOT NULL, cancel_requested INTEGER NOT NULL DEFAULT 0);");
+  // Chat trust sprint (Item 3): queue_items gained message_id,
+  // the chat_messages row a turn saved for the item. Stores that
+  // predate the column get it added; their rows read NULL and
+  // the surfaces fall back to matching by content, as before.
+  const cols = db.prepare("PRAGMA table_info(queue_items)").all() as Array<{ name: string }>;
+  if (!cols.some(c => c.name === "message_id")) db.exec("ALTER TABLE queue_items ADD COLUMN message_id TEXT");
   return db;
 }
 function rowToItem(row: Record<string, unknown>): QueueItem {
@@ -107,6 +119,7 @@ function rowToItem(row: Record<string, unknown>): QueueItem {
     id: String(row.id), chatId: String(row.chat_id), content: String(row.content), source: String(row.source),
     status: String(row.status) as QueueItemStatus, createdAt: String(row.created_at),
     settledAt: row.settled_at === null || row.settled_at === undefined ? null : String(row.settled_at),
+    messageId: row.message_id === null || row.message_id === undefined ? null : String(row.message_id),
   };
 }
 function actorForChat(root: string, chatId: string): string {
@@ -160,6 +173,17 @@ function setStatus(root: string, id: string, status: QueueItemStatus): void {
   chatQueueTouch(root, "write", () => {
     const db = openStore(root);
     try { db.prepare("UPDATE queue_items SET status = ?, settled_at = ? WHERE id = ?").run(status, new Date().toISOString(), id); }
+    finally { db.close(); }
+  });
+}
+/** Stamp a queue item with the chat_messages row its turn just
+ *  saved (chat trust sprint, Item 3). Called from the two save
+ *  seams: the drain's onUserMessageSaved callback for folded
+ *  items, and the steer provider below for steered ones. */
+function setItemMessageId(root: string, id: string, messageId: string): void {
+  chatQueueTouch(root, "write", () => {
+    const db = openStore(root);
+    try { db.prepare("UPDATE queue_items SET message_id = ? WHERE id = ?").run(messageId, id); }
     finally { db.close(); }
   });
 }
@@ -254,7 +278,7 @@ function makeSteerProvider(root: string, chatId: string): SteerProvider {
     const items = takeQueued(root, chatId, "steered");
     if (items.length) {
       const store = new ChatStore(root);
-      try { for (const item of items) store.add(chatId, "user", item.content, item.source); }
+      try { for (const item of items) { const added = store.add(chatId, "user", item.content, item.source); setItemMessageId(root, item.id, added.id); } }
       finally { store.close(); }
     }
     if (!items.length && !cancel) return null;
@@ -300,11 +324,26 @@ async function drainChatQueueInner(root: string, chatId: string, opts?: { deadli
         // drain's claim: the interactive deadline, and reset
         // invalidation the moment the claim token stops matching.
         const control = createTurnControl(root, chatId, { claimToken, deadlineMs: opts?.deadlineMs ?? OWNER_TURN_DEADLINE_MS });
+        // Chat trust sprint (Item 3): an item that already has
+        // its message row (a resent failed send) re-drives over
+        // that row - the turn reuses it and no second copy of
+        // the same words is ever saved; a burst item with a row
+        // is likewise already in the transcript the turn reads,
+        // so it is not re-added either. Fresh items are stamped
+        // with the row their turn saves, in the order the turn
+        // reports the saves (primary first, then burst rows).
+        const stampTargets = items.filter(item => !item.messageId);
+        let stampIndex = 0;
         await runChatTurn(root, chatId, items[0].content, {
           source: items[0].source,
-          burst: items.slice(1).map(item => item.content),
+          burst: items.slice(1).filter(item => !item.messageId).map(item => item.content),
           steer: makeSteerProvider(root, chatId),
           control,
+          existingUserMessageId: items[0].messageId ?? undefined,
+          onUserMessageSaved: (messageId) => {
+            const target = stampTargets[stampIndex++];
+            if (target) setItemMessageId(root, target.id, messageId);
+          },
         });
       } catch {
         // runChatTurn already ledgered the failure (turn-failed); the
@@ -372,6 +411,78 @@ function resetChatTurnInner(root: string, chatId: string): ChatResetResult {
     ledger(root, actor, "turn-reset", "Owner reset chat " + chatId.slice(0, 8) + ": turn stopped" + (ranForMs !== null ? " after " + formatRunDuration(ranForMs) : "") + ", claim released on the press, " + abortedRequests + " in-flight request(s) aborted, " + cancelledQueued + " queued message(s) cancelled; nothing was deleted");
   }
   return { wasActive, ranForMs, cancelledQueued, abortedRequests };
+}
+
+/** Resend (chat trust sprint, Item 3): a failed owner message
+ *  goes back on the queue AS ITSELF - the same queue item, the
+ *  same saved chat_messages row - so the re-driven turn answers
+ *  under the original bubble and the transcript never gains a
+ *  second copy of the same words. Only a failed item can be
+ *  resent; anything else is refused by name. The item's
+ *  created_at moves to now: the resend is a new send act, and
+ *  the drain takes queued items in arrival order. */
+export function resendFailedMessage(root: string, chatId: string, itemId: string): QueueItem {
+  const item = chatQueueTouch(root, "write", () => {
+    const db = openStore(root);
+    try {
+      const row = db.prepare("SELECT * FROM queue_items WHERE id = ?").get(itemId) as Record<string, unknown> | undefined;
+      if (!row || String(row.chat_id) !== chatId) throw Error("Failed message not found");
+      const found = rowToItem(row);
+      if (found.status !== "failed") throw Error("Only a failed message can be resent");
+      const now = new Date().toISOString();
+      db.prepare("UPDATE queue_items SET status = 'queued', settled_at = NULL, created_at = ? WHERE id = ?").run(now, itemId);
+      return { ...found, status: "queued" as QueueItemStatus, settledAt: null, createdAt: now };
+    } finally { db.close(); }
+  });
+  ledger(root, actorForChat(root, chatId), "message-resent", "Owner resent a failed message in chat " + chatId.slice(0, 8) + "; the saved message is queued again over its original row - no second copy is saved");
+  kickChatDrain(root, chatId);
+  return item;
+}
+
+/** One send, one bubble (chat trust sprint, Item 1): fold the
+ *  queue's view of a chat into its message list before a surface
+ *  renders it. A queue item that has its message row - stamped
+ *  at save time, or matched here by content, source, and order
+ *  for rows that predate the stamp - DECORATES that row with its
+ *  status and id, and leaves the queue list: the send renders
+ *  exactly once, as its own bubble, wearing its state. Items
+ *  with no row in the transcript (still queued, cancelled or
+ *  dropped before ever running) stay in the queue list and
+ *  render as themselves, once. Matching is consumption-ordered:
+ *  items are processed in arrival order and each message row
+ *  takes at most one decoration, so two identical sends in a
+ *  row each land on their own bubble. */
+export function mergeQueueIntoMessages<T extends { id: string; role: string; content: string; source?: unknown; created_at: string }>(
+  messages: T[], queue: QueueItem[],
+): { messages: Array<T & { queueStatus?: QueueItemStatus; queueId?: string }>; queue: QueueItem[] } {
+  const byId = new Map(messages.map((m, i) => [m.id, i] as const));
+  const matched = new Set<string>();
+  const decorated = messages.map(m => ({ ...m })) as Array<T & { queueStatus?: QueueItemStatus; queueId?: string }>;
+  const remaining: QueueItem[] = [];
+  const attach = (index: number, item: QueueItem): void => {
+    matched.add(messages[index].id);
+    if (item.status === "queued" || item.status === "failed" || item.status === "steered" || item.status === "cancelled") {
+      decorated[index].queueStatus = item.status;
+      decorated[index].queueId = item.id;
+    }
+  };
+  for (const item of queue) {
+    if (item.messageId) {
+      const index = byId.get(item.messageId);
+      if (index !== undefined && !matched.has(messages[index].id)) { attach(index, item); continue; }
+      // The stamped row is outside this message list: a send
+      // still waiting or failed must surface once, from its
+      // queue row, rather than vanish.
+      if (item.status === "failed" || item.status === "queued") remaining.push(item);
+      continue;
+    }
+    if (item.status === "failed" || item.status === "steered") {
+      const index = decorated.findIndex((m, i) => !matched.has(messages[i].id) && m.role === "user" && m.content === item.content && String(m.source ?? "") === item.source && m.created_at >= item.createdAt);
+      if (index >= 0) { attach(index, item); continue; }
+    }
+    remaining.push(item);
+  }
+  return { messages: decorated, queue: remaining };
 }
 
 /** Dashboard startup: resume drains for chats whose queued messages

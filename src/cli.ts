@@ -107,7 +107,7 @@ import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { organizeChats } from "./chat-organize.js";
-import { resetChatTurn } from "./chat-queue.js";
+import { resendFailedMessage, resetChatTurn } from "./chat-queue.js";
 import { readDeliveryLedger } from "./worthiness.js";
 import { forceCompactChat, getCompaction, listCompactions } from "./compaction.js";
 import { classifyNote, patchNote, saveNote } from "./notes.js";
@@ -631,6 +631,7 @@ chats.command("react").argument("<chatId>").argument("<messageId>").argument("<e
 chats.command("read").argument("<id>").description("Messages plus this chat's action cards").action((id:string)=>output(chatView(program.opts().workspace,id)));
 chats.command("send").argument("<id>").argument("<message>").description("Run one real chat turn; any actions SAM proposes are printed with their ids for approval").action(async(id:string,message:string)=>{const ws=program.opts().workspace as string;const since=new Date().toISOString();const reply=await runChatTurn(ws,id,message,{source:"ts-cli"});output({reply,proposed:turnActions(ws,id,since)});});
 chats.command("reset").argument("<id>").description("Stop a chat's running turn cold (the dashboard Reset button's parity): aborts the in-flight model request where this process holds it, invalidates the turn so a late reply can never save, releases the claim on the spot, and cancels still-queued messages. Nothing is deleted; a status message lands in the chat").action((id:string)=>output(resetChatTurn(program.opts().workspace,id)));
+chats.command("resend").argument("<id>").argument("<item>").description("Resend a failed queued message (the dashboard failed bubble's Resend parity): the SAME saved message is queued again over its original chat row - no retyping, no duplicate message row - and the chat's drain re-drives it. Only a failed queue item can be resent; item ids are the queue ids on the chat's queue view").action((id:string,item:string)=>output(resendFailedMessage(program.opts().workspace,id,item)));
 chats.command("event").argument("<chat-id>").requiredOption("--agent <name>","Registered agent identifier").requiredOption("--kind <kind>","message, tool, result, assignment").requiredOption("--text <text>","Event body").action((id:string,o:{agent:string;kind:string;text:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.addEvent(id,o.agent,o.kind as "message"|"tool"|"result"|"assignment",o.text));}finally{db.close();}});
 const teams=program.command("team").description("Standing team: a lead routes a task to a role member, then a reviewer must approve it. The older research exchange remains when --chat and --objective are set");
 const teamMembers=teams.command("member").description("Standing members: each is a profile with a role, its own memory, a model pin, and a tool allowlist");

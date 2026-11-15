@@ -42,7 +42,7 @@ function keys(value: unknown): string[] {
  *  and steered update on their own. */
 export function chatThreadSignature(snapshot: LiveThreadSnapshot): string {
   return JSON.stringify({
-    messages: rows(snapshot.messages).map(m => [cell(m, "id"), cell(m, "role"), cell(m, "partial"), cell(m, "reaction"), cell(m, "content")]),
+    messages: rows(snapshot.messages).map(m => [cell(m, "id"), cell(m, "role"), cell(m, "partial"), cell(m, "reaction"), cell(m, "content"), cell(m, "queueStatus"), cell(m, "queueId")]),
     queue: rows(snapshot.queue).map(q => [cell(q, "id"), cell(q, "status")]),
     turnActive: snapshot.turnActive ? 1 : 0,
     events: rows(snapshot.events).map(e => [cell(e, "id"), cell(e, "content")]),

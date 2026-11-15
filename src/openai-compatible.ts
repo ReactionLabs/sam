@@ -4,6 +4,38 @@ import { isTransientHttpStatus, providerHttpStatus, TRANSIENT_RETRY_DELAYS_MS, T
 import { WORKSPACE_TOOLS } from "./workspace-tools.js";
 import { MEMORY_SEARCH_TOOL, validateToolTurn, type ToolMessage, type ToolTurn } from "./memory-tool.js";
 
+/** One tool call's arguments string, in characters. The bound is
+ * the whole-response bound (1,000,000 bytes, enforced on the
+ * stream below): arguments ride inside the response, so no single
+ * call can legitimately outgrow it, and the artifact tool's own
+ * content cap (ARTIFACT_CONTENT_MAX_BYTES, the same 1,000,000)
+ * refuses an oversized deliverable downstream. The old 4,000-char
+ * cap contradicted that contract outright - a tool whose whole
+ * purpose is delivering a complete page or document could never
+ * carry one, so a routine "make me a calculator" turn died on
+ * this validator (Dip live defect, 2026-11-15: two turns in a
+ * row, "Invalid tool call", no retry, no word to the owner). */
+export const TOOL_CALL_ARGUMENTS_MAX_CHARS = 1_000_000;
+/** Total attempts for a completion whose tool calls fail
+ * validation - the same three-attempt shape as the empty/unsafe
+ * budget. Nothing has executed for a malformed completion, so a
+ * fresh attempt is safe; models usually self-correct. */
+export const MALFORMED_COMPLETION_ATTEMPTS = 3;
+/** A completion arrived but its tool calls failed validation.
+ * The message stays the historical plain text; `detail` names
+ * WHICH check failed and the sizes involved - never any argument
+ * content - so the rejection is ledgerable and the next
+ * occurrence is pinnable instead of a bare "Invalid tool call"
+ * in a turn-failed line. */
+export class MalformedToolCallError extends Error {
+  readonly detail: string;
+  constructor(message: string, detail: string) {
+    super(message);
+    this.name = "MalformedToolCallError";
+    this.detail = detail;
+  }
+}
+
 /** MiniMax-class models sometimes leak their tool-call machinery into
  * the visible content as markup (<tool_call> spans, <invoke> spans,
  * <|tool_call|> tokens, stray think tags, the ]<]minimax token). The
@@ -153,6 +185,13 @@ export class OpenAICompatibleProvider implements ModelProvider {
   // recovery is the turn's own success line). Best-effort - a
   // failing sink never breaks a model call.
   onProviderRetry?: (info: { status: number; retry: number; limit: number; delayMs: number }) => void;
+  // Malformed completions (Dip live defect, 2026-11-15): when a
+  // completion's tool calls fail validation and
+  // completeConnectorTurn schedules a fresh attempt, the
+  // rejection is reported here - which check failed and the
+  // sizes, never the content - so the turn layer can ledger the
+  // class. Best-effort, like every sink on this class.
+  onMalformedCompletion?: (info: { detail: string; attempt: number; limit: number }) => void;
   // Turn control (turn-control.ts): a turn that must be stoppable
   // from outside - the interactive deadline, or the owner's Reset -
   // sets this signal, and every request below links its own abort
@@ -176,6 +215,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
   }
   private reportProviderRetry(status: number, retry: number, delayMs: number): void {
     try { this.onProviderRetry?.({ status, retry, limit: TRANSIENT_RETRY_LIMIT, delayMs }); } catch { /* accounting never breaks a turn */ }
+  }
+  private reportMalformedCompletion(detail: string, attempt: number): void {
+    try { this.onMalformedCompletion?.({ detail, attempt, limit: MALFORMED_COMPLETION_ATTEMPTS }); } catch { /* accounting never breaks a turn */ }
   }
   // The transient-retry backoff, riding the turn's abort
   // signal: resolves true when the wait elapsed, false when
@@ -308,6 +350,10 @@ export class OpenAICompatibleProvider implements ModelProvider {
     // not enough and the raw error reached the owner), so the fresh
     // attempt budget is three total. Nothing has executed for any of
     // these calls, so every retry is safe.
+    // Malformed completions (Dip live defect, 2026-11-15: two
+    // turns died on "Invalid tool call" with no retry and no word
+    // to the owner) ride the fresh-attempt class too, on their
+    // own counter: nothing executed, the model redraws.
     // Transient provider failures (provider-retry.ts, Dip live
     // defect 2026-11-15: a MiniMax 529 ate the owner's turn on the
     // spot) ride a SEPARATE bounded budget: an HTTP 429 or 5xx is
@@ -321,6 +367,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
     let lastError: unknown;
     let emptyAttempts = 0;
     let transientRetries = 0;
+    let malformedAttempts = 0;
     for (;;) {
       try { return await this.connectorTurnOnce(model, messages, tools); }
       catch (e) {
@@ -328,6 +375,22 @@ export class OpenAICompatibleProvider implements ModelProvider {
           lastError = e;
           emptyAttempts++;
           if (emptyAttempts < 3) continue;
+          throw lastError;
+        }
+        // A malformed completion (Dip live defect, 2026-11-15):
+        // the provider answered, but its tool calls failed
+        // validation - a call shaped wrong, arguments that are
+        // not a JSON object. Nothing has executed for it, so it
+        // belongs to the same fresh-attempt class as an empty:
+        // the model usually self-corrects on a second draw. The
+        // rejection is reported through onMalformedCompletion
+        // with its check and sizes, so the class is countable
+        // even when the retry saves the turn.
+        if (e instanceof MalformedToolCallError) {
+          lastError = e;
+          malformedAttempts++;
+          this.reportMalformedCompletion(e.detail, malformedAttempts);
+          if (malformedAttempts < MALFORMED_COMPLETION_ATTEMPTS) continue;
           throw lastError;
         }
         const status = providerHttpStatus(e);
@@ -390,19 +453,28 @@ export class OpenAICompatibleProvider implements ModelProvider {
       const content=rawContent===null?null:stripModelMarkup(rawContent);
       if(rawContent&&!content&&!(Array.isArray(msg.tool_calls)&&msg.tool_calls.length))throw Error("Unsafe model output");
       const raw=msg.tool_calls;
-      if(raw!==undefined&&!Array.isArray(raw))throw Error("Invalid tool calls");
+      if(raw!==undefined&&!Array.isArray(raw))throw new MalformedToolCallError("Invalid tool calls","tool_calls was not an array");
       // The cap is a sanity bound, not a workflow limit: SAM's own
       // guidance tells the model to batch independent calls in one
       // step, and a batch ask ("archive the other chats") legitimately
       // emits more than four. The old cap of 4 killed exactly that
       // turn with a raw error (owner defect 2026-11-10). The loops'
       // call budgets stub whatever overflows, gracefully.
-      if(Array.isArray(raw)&&raw.length>12)throw Error("Too many tool calls");
+      if(Array.isArray(raw)&&raw.length>12)throw new MalformedToolCallError("Too many tool calls",raw.length+" tool calls in one completion, over the cap of 12");
       const calls:Array<{id:string;name:string;args:Record<string,unknown>}>=[];
       for(const call of (raw??[]) as Array<{id?:unknown;type?:unknown;function?:{name?:unknown;arguments?:unknown}}>){
-        if(typeof call.id!=="string"||call.id.length>128||call.type!=="function"||typeof call.function?.name!=="string"||typeof call.function.arguments!=="string"||call.function.arguments.length>4000)throw Error("Invalid tool call");
-        const args:unknown=JSON.parse(call.function.arguments);
-        if(!args||typeof args!=="object"||Array.isArray(args))throw Error("Invalid tool arguments");
+        // Every rejection names its check and the sizes involved
+        // (never the content) on the error's detail, so the class
+        // is ledgerable instead of a bare "Invalid tool call".
+        if(typeof call.id!=="string")throw new MalformedToolCallError("Invalid tool call","a tool call id was not a string");
+        if(call.id.length>128)throw new MalformedToolCallError("Invalid tool call","a tool call id ran "+call.id.length+" chars, over the cap of 128");
+        if(call.type!=="function")throw new MalformedToolCallError("Invalid tool call","a tool call type was not \"function\"");
+        if(typeof call.function?.name!=="string")throw new MalformedToolCallError("Invalid tool call","a tool call carried no function name");
+        if(typeof call.function.arguments!=="string")throw new MalformedToolCallError("Invalid tool call","tool call "+call.function.name+" arguments were not a string");
+        if(call.function.arguments.length>TOOL_CALL_ARGUMENTS_MAX_CHARS)throw new MalformedToolCallError("Invalid tool call","tool call "+call.function.name+" arguments ran "+call.function.arguments.length+" chars, over the cap of "+TOOL_CALL_ARGUMENTS_MAX_CHARS);
+        let args:unknown;
+        try{args=JSON.parse(call.function.arguments);}catch{throw new MalformedToolCallError("Invalid tool arguments","tool call "+call.function.name+" arguments were not valid JSON");}
+        if(!args||typeof args!=="object"||Array.isArray(args))throw new MalformedToolCallError("Invalid tool arguments","tool call "+call.function.name+" arguments were not a JSON object");
         calls.push({id:call.id,name:call.function.name,args:args as Record<string,unknown>});
       }
       if(!content&&!calls.length)throw Error("Empty model response");
