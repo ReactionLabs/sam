@@ -616,6 +616,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no baseline (which would silently un-verify a verified install dressed as a first run), a touch already ledgered by the store is never recorded twice by a catching caller, and a failure line never carries any record content (the recorded endpoint and the verification reply are the install's data, not failure data)",
      "An absent store still reads as no baseline with no line and creates nothing, exactly as a fresh install expects, torn rows still parse forgiving (null, never fatal), and verify-before-save is untouched (a failed verification still saves nothing and ledgers nothing)",
      "The full suite is green, including the setup store failure-ledger tests"]);
+  if (key.startsWith("auth-probes-store-failed:")) return base(
+    ["auth-status.ts", "status.ts"],
+    "Auth probes store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the auth probes store (.sam/auth-probes.db: the one row holding the last probe run's verdicts) must open, read, and write instead of dying at that seam - while it is dead auth status, the dashboard status payload, and the CLI overview ride a dying read with the seam unnamed, and a reader folding it as no probes silently erases a failed chat route's latest verdict dressed as never-probed, so the --check contract passes a route it should fail.",
+    ["The next status reads, probe saves, and check verdicts resolve their probe verdicts again instead of auth-probes-store-failed lines",
+     "Exactly one auth-probes-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no probes (which would silently erase a failed verdict dressed as never-probed), a touch already ledgered by the store is never recorded twice by a catching caller, and a failure line never carries any probe record content (the recorded models, buckets, and reasons are the install's data, not failure data)",
+     "An absent store still reads as no probes with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (null, never fatal)",
+     "The full suite is green, including the auth probes store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -976,6 +984,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Setup store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "setup-store-failed:" + phase, label: "setup store failures (" + phase + " step)" };
+    }
+    case "auth-probes-store-failed": {
+      const m = summary.match(/^Auth probes store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "auth-probes-store-failed:" + phase, label: "auth probes store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);

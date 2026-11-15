@@ -166,11 +166,62 @@ function migrateLegacyProbes(db: Database.Database, root: string): void {
 function probeStoreExists(root: string): boolean {
   return existsSync(probeDbPath(root)) || existsSync(probePath(root));
 }
+
+// Failure visibility (gap found 2026-11-15, hourly run
+// 16:04 EST): this store is the last probe run's verdicts -
+// the record auth status, the --check contract, the
+// dashboard status payload, and the CLI overview read back
+// to decide whether a route still works - and every touch
+// was unguarded. Now the store owns its touches (the
+// setup-store precedent, helpers here because this module
+// already imports the ledger and is its own leaf for this
+// seam): a failed open/read/write ledgers ONE
+// auth-probes-store-failed line (phase read for the read
+// door, phase write for the write door; actor sam; the
+// verbatim reason collapsed and capped; never any probe
+// record content - the recorded models, buckets, and
+// reasons are the install's data) and rethrows exactly,
+// tagged so a catching caller records nothing more for the
+// same touch. The exists check stays outside the seam: an
+// absent store still reads as no probes with no line and
+// creates nothing, and a torn row payload still parses
+// forgiving to null - only the store touch is guarded.
+export type AuthProbesStorePhase = "read" | "write";
+
+export function authProbesStoreFailureSummary(phase: AuthProbesStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Auth probes store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordAuthProbesStoreFailure(root: string, phase: AuthProbesStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "auth-probes-store-failed", authProbesStoreFailureSummary(phase, reason));
+}
+
+function tagAuthProbesStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { authProbesStoreLedgered?: boolean }).authProbesStoreLedgered = true;
+  }
+}
+
+export function isAuthProbesStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { authProbesStoreLedgered?: boolean }).authProbesStoreLedgered === true;
+}
+
+function failAuthProbesStore(root: string, phase: AuthProbesStorePhase, error: unknown): never {
+  if (!isAuthProbesStoreLedgered(error)) recordAuthProbesStoreFailure(root, phase, error);
+  tagAuthProbesStoreLedgered(error);
+  throw error;
+}
+
 function saveProbeStore(root: string, store: ProbeStore): void {
-  const db = openProbeStore(root);
+  let db: Database.Database;
+  try { db = openProbeStore(root); } catch (error) { failAuthProbesStore(root, "write", error); }
   try {
-    db.prepare("INSERT INTO auth_probes (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(store));
-  } finally { db.close(); }
+    db!.prepare("INSERT INTO auth_probes (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(store));
+  } catch (error) { failAuthProbesStore(root, "write", error); }
+  finally { db!.close(); }
 }
 
 // The store's read door: the last probe run's verdicts through
@@ -179,12 +230,14 @@ function saveProbeStore(root: string, store: ProbeStore): void {
 // creates nothing.
 export function readProbeStore(root: string): ProbeStore | null {
   if (!probeStoreExists(root)) return null;
-  const db = openProbeStore(root);
+  let db: Database.Database;
+  try { db = openProbeStore(root); } catch (error) { failAuthProbesStore(root, "read", error); }
   try {
-    const row = db.prepare("SELECT data FROM auth_probes WHERE id = 1").get() as { data: string } | undefined;
+    const row = db!.prepare("SELECT data FROM auth_probes WHERE id = 1").get() as { data: string } | undefined;
     if (!row) return null;
     try { return parseProbeStore(JSON.parse(row.data)); } catch { return null; }
-  } finally { db.close(); }
+  } catch (error) { failAuthProbesStore(root, "read", error); }
+  finally { db!.close(); }
 }
 
 export function authStatus(root: string, env: NodeJS.ProcessEnv = process.env): AuthStatus {
