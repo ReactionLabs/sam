@@ -7,6 +7,7 @@ import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { codeRoot, defaultCodeRunner, type CodeRunner } from "./code.js";
+import { proposeAction } from "./actions.js";
 import { gitRepoRoot, isTaskBranch } from "./git-work.js";
 import { defaultEngineRunner, engineArgv, engineRunBinary, selectedEngineProvider, type EngineRunProvider, type EngineRunner, type EngineTask } from "./engine.js";
 import type { GoldfishChangeInput, GoldfishRecord } from "./goldfish.js";
@@ -367,6 +368,29 @@ export function queueParallelJob(root: string, input: QueueParallelInput, env: N
   insertParallelJob(root, job);
   recordActivity(root, input.actor, "parallel-queued", "Queued parallel job (" + job.slices.length + " slices, concurrency " + job.concurrency + ", engine " + provider + "): " + job.title);
   return job;
+}
+
+/**
+ * The only push door for a parallel job, shared by the CLI and the
+ * chat tool. It creates a git-push proposal on the ONE gate and
+ * returns. It does not call pushBranch, does not settle the
+ * proposal, and does not accept a branch from the caller: the
+ * branch is the finished job's own sam/par-* branch. An unfinished
+ * job has nothing to propose.
+ */
+export function proposeParallelPush(root: string, jobId: string): { status: "pending_owner_approval"; id: string; kind: "git-push"; branch: string } {
+  const job = getParallelJob(root, jobId);
+  if (!job) throw new Error("Unknown parallel job: " + jobId);
+  if (job.status !== "done" || !job.branch) throw new Error("Parallel job " + jobId + " is not a finished job with a branch to push (status: " + job.status + ")");
+  const proposal = proposeAction(root, {
+    actor: job.actor,
+    kind: "git-push",
+    title: "Push " + job.branch + " (" + job.title.slice(0, 80) + ")",
+    detail: JSON.stringify({ branch: job.branch }),
+    chatId: job.chatId,
+  });
+  if (proposal.status !== "pending") throw new Error("Parallel push left the gate in status " + proposal.status + " without an owner decision");
+  return { status: "pending_owner_approval", id: proposal.id, kind: "git-push", branch: job.branch };
 }
 
 // ---- execution -----------------------------------------------------------
