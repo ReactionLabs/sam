@@ -59,6 +59,77 @@ function eventsDbFile(root: string): string { return join(dir(root), "events.db"
 // creates nothing. The P9 backup snapshots every .sam/*.db
 // generically, so the migrated store is carried with no backup
 // change.
+// Failure visibility (gap found 2026-11-14, hourly run
+// 20:04 EST): the event store holds the signed-webhook
+// door's bindings - each naming a profile and the env NAME
+// holding its HMAC secret - plus the seen-id dedupe set that
+// stops a signed event waking a profile twice, and every
+// touch opened it raw. eventBindings is read on every accept
+// (the door server and the CLI accept ride it), readEventStore
+// is the snapshot door, bindEvent / unbindEvent /
+// updateEventBinding are the writes, and the seenIds read +
+// rememberId write ride every accepted event. A dead
+// events.db threw into whichever catch wrapped the call - the
+// door server's catch dresses it as a generic 502 "Event turn
+// failed", indistinguishable from a model failure - and no
+// event-failed kind existed, so the class was uncountable,
+// and any reader folding a dead store as "no bindings" would
+// silently close every signed door dressed as an empty
+// registry. Now the store's touches own their failure (the
+// connectors / channels precedent): a failed touch ledgers
+// ONE event-failed line (phase read for readEventStore /
+// eventBindings / seenIds, write for the mutation doors and
+// rememberId; actor sam; the verbatim reason collapsed and
+// capped; never any binding record - profile names and
+// secret env NAMES are door data, not failure data), tags
+// the error, and rethrows exactly, so every caller's handling
+// is unchanged and the door still fails closed. A touch
+// already ledgered by an inner door keeps its one line and
+// gains no second. Validation errors (bad name / profile /
+// secretEnv shape, duplicate, limit) are not store failures
+// and ledger nothing. An absent store still reads empty with
+// no line and creates nothing, and torn row payloads still
+// parse forgiving - only the store touch is guarded.
+export type EventPhase = "read" | "write";
+
+export function eventFailureSummary(phase: EventPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Event " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordEventFailure(root: string, phase: EventPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "event-failed", eventFailureSummary(phase, reason));
+}
+
+function tagEventLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { eventLedgered?: boolean }).eventLedgered = true;
+  }
+}
+
+export function isEventLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { eventLedgered?: boolean }).eventLedgered === true;
+}
+
+const EVENT_VALIDATION = [/^Invalid event name$/, /^Invalid profile$/, /^secretEnv must be/, /^Event binding already exists:/, /^Event binding limit reached$/];
+
+function isEventValidation(error: unknown): boolean {
+  return error instanceof Error && EVENT_VALIDATION.some(re => re.test(error.message));
+}
+
+function failEvent(root: string, phase: EventPhase, error: unknown): never {
+  if (!isEventLedgered(error) && !isEventValidation(error)) recordEventFailure(root, phase, error);
+  if (!isEventValidation(error)) tagEventLedgered(error);
+  throw error;
+}
+
+function openEventsGuarded(root: string, phase: EventPhase): Database.Database {
+  try { return openEventsStore(root); }
+  catch (error) { failEvent(root, phase, error); }
+}
+
 function openEventsStore(root: string): Database.Database {
   const d = dir(root);
   mkdirSync(d, { recursive: true, mode: 0o700 });
@@ -138,15 +209,17 @@ function readSeenIds(db: Database.Database): string[] {
 // creates nothing.
 export function readEventStore(root: string): { bindings: EventBinding[]; seenIds: string[] } {
   if (!storeExists(root)) return { bindings: [], seenIds: [] };
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "read");
   try { return { bindings: readBindings(db), seenIds: readSeenIds(db) }; }
+  catch (error) { failEvent(root, "read", error); }
   finally { db.close(); }
 }
 
 export function eventBindings(root: string): EventBinding[] {
   if (!storeExists(root)) return [];
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "read");
   try { return readBindings(db); }
+  catch (error) { failEvent(root, "read", error); }
   finally { db.close(); }
 }
 
@@ -155,23 +228,25 @@ export function bindEvent(root: string, input: EventBinding): EventBinding {
   if (!NAME_RE.test(input.profile)) throw new Error("Invalid profile");
   if (!ENV_RE.test(input.secretEnv)) throw new Error("secretEnv must be an environment variable NAME, never a secret value");
   const row: EventBinding = { name: input.name, profile: input.profile, secretEnv: input.secretEnv };
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "write");
   try {
     if (findBindingRow(db, row.name)) throw new Error("Event binding already exists: " + row.name);
     const { n } = db.prepare("SELECT COUNT(*) AS n FROM event_bindings").get() as { n: number };
     if (n >= MAX_BINDINGS) throw new Error("Event binding limit reached");
     db.prepare("INSERT INTO event_bindings (name, data) VALUES (?, ?)").run(row.name, JSON.stringify(row));
     return row;
-  } finally { db.close(); }
+  } catch (error) { failEvent(root, "write", error); }
+  finally { db.close(); }
 }
 
 export function unbindEvent(root: string, name: string): boolean {
   if (!storeExists(root)) return false;
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "write");
   try {
     const result = db.prepare("DELETE FROM event_bindings WHERE name = ?").run(name);
     return result.changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failEvent(root, "write", error); }
+  finally { db.close(); }
 }
 
 // The store's update door (the providers precedent): patch one
@@ -181,7 +256,7 @@ export function unbindEvent(root: string, name: string): boolean {
 // when no such binding exists.
 export function updateEventBinding(root: string, name: string, patch: { profile?: string; secretEnv?: string }): EventBinding | null {
   if (!storeExists(root)) return null;
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "write");
   try {
     const current = findBindingRow(db, name);
     if (!current) return null;
@@ -194,7 +269,8 @@ export function updateEventBinding(root: string, name: string, patch: { profile?
     if (!ENV_RE.test(next.secretEnv)) throw new Error("secretEnv must be an environment variable NAME, never a secret value");
     db.prepare("UPDATE event_bindings SET data = ? WHERE name = ?").run(JSON.stringify(next), name);
     return next;
-  } finally { db.close(); }
+  } catch (error) { failEvent(root, "write", error); }
+  finally { db.close(); }
 }
 
 export function signEvent(secret: string, rawBody: string): string {
@@ -223,12 +299,13 @@ export function eventPrompt(event: InboundEvent): string {
 
 function seenIds(root: string): string[] {
   if (!storeExists(root)) return [];
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "read");
   try { return readSeenIds(db); }
+  catch (error) { failEvent(root, "read", error); }
   finally { db.close(); }
 }
 function rememberId(root: string, id: string): void {
-  const db = openEventsStore(root);
+  const db = openEventsGuarded(root, "write");
   try {
     const apply = db.transaction((seenId: string) => {
       // Dedupe move: re-inserting an existing id moves it to the
@@ -241,7 +318,8 @@ function rememberId(root: string, id: string): void {
       }
     });
     apply(id);
-  } finally { db.close(); }
+  } catch (error) { failEvent(root, "write", error); }
+  finally { db.close(); }
 }
 
 function parseEvent(rawBody: string): InboundEvent {

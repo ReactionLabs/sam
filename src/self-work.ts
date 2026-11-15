@@ -473,6 +473,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "Authorization still fails closed exactly as before: a failed read rethrows instead of folding the store as no connectors (which would silently strip every connector pin and tool authorization dressed as an empty registry), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a connector record (URLs, credential names, and allowedTools are authorization data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no connectors with no line, while validation errors (bad name, URL allowlist refusals, duplicates, not-found) still ledger nothing",
      "The full suite is green, including the connector failure-ledger tests"]);
+  if (key.startsWith("event-failed:")) return base(
+    ["events.ts", "cli.ts"],
+    "Event store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the event store (.sam/events.db) must open, read, and write instead of dying at that seam - this store is the signed-webhook door's registry (every binding's profile and secret env name, plus the seen-id dedupe set), so while it is dead every accept dies at the read with the seam unnamed (the door server dresses it as a generic 502), and a lost dedupe write is how the same signed event wakes a profile twice.",
+    ["The next accepts, binding reads, and binding writes resolve their registry again instead of event-failed lines",
+     "Exactly one event-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The door still fails closed exactly as before: a failed read rethrows instead of folding the store as no bindings (which would silently close every signed door dressed as an empty registry), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a binding record (profile names and secret env names are door data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no bindings with no line, while validation errors (bad name / profile / secretEnv shape, duplicates, limit) still ledger nothing",
+     "The full suite is green, including the event failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -747,6 +755,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Connector ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "connector-failed:" + phase, label: "connector store failures (" + phase + " step)" };
+    }
+    case "event-failed": {
+      const m = summary.match(/^Event ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "event-failed:" + phase, label: "event store failures (" + phase + " step)" };
     }
     case "chat-citation-failed": {
       const m = summary.match(/^Chat citation ([a-z]+) failed/);
