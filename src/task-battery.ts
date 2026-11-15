@@ -498,6 +498,64 @@ export function taskBatteryText(run: TaskBatteryRun): string {
   return lines.join("\n");
 }
 
+// Failure visibility (gap found 2026-11-15, hourly run
+// 08:04 EST): the task battery arrived with the Grok Sprint 4
+// merge train AFTER the store census closed, and its store is
+// the one new store that train brought in unguarded. Every
+// touch opened .sam/task-battery.db raw: openStore (mkdir,
+// symlink check, schema creation) plus recordTaskBattery (the
+// scorecard INSERT every `sam battery run` ends with) and
+// listTaskBatteryRuns / readTaskBattery (the `battery show`
+// and `battery versions` CLI doors). A dead store threw with
+// the seam unnamed, and any reader folding it as "no runs"
+// would silently empty the battery's whole score history
+// dressed as a version that never ran - in the store that
+// exists to prove "Sam got better" is a number. Now the
+// touches own their failure (the census precedent): a failed
+// touch ledgers ONE task-battery-failed line (openStore plus
+// the insert at phase write, because the open performs the
+// schema writes; the list/read at phase read; actor sam; the
+// verbatim reason collapsed and capped; never any scorecard
+// record - case evidence can carry the owner's words), tags
+// the error, and rethrows exactly, so every caller's handling
+// is unchanged and reads still fail closed. A touch already
+// ledgered by an inner door (read rides list) gains no
+// second line. An absent store still reads as no runs,
+// creating nothing, and torn rows still parse forgiving.
+export type TaskBatteryPhase = "read" | "write";
+
+export function taskBatteryFailureSummary(phase: TaskBatteryPhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Task battery store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordTaskBatteryFailure(root: string, phase: TaskBatteryPhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "task-battery-failed", taskBatteryFailureSummary(phase, reason));
+}
+
+function tagTaskBatteryLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { taskBatteryLedgered?: boolean }).taskBatteryLedgered = true;
+  }
+}
+
+export function isTaskBatteryLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { taskBatteryLedgered?: boolean }).taskBatteryLedgered === true;
+}
+
+function failTaskBattery(root: string, phase: TaskBatteryPhase, error: unknown): never {
+  if (!isTaskBatteryLedgered(error)) recordTaskBatteryFailure(root, phase, error);
+  tagTaskBatteryLedgered(error);
+  throw error;
+}
+
+function batteryTouch<T>(root: string, phase: TaskBatteryPhase, fn: () => T): T {
+  try { return fn(); }
+  catch (error) { failTaskBattery(resolve(root), phase, error); }
+}
+
 function batteryDbPath(root: string): string { return join(resolve(root), ".sam", "task-battery.db"); }
 
 function parseRun(data: unknown): TaskBatteryRun | null {
@@ -524,28 +582,32 @@ function openStore(root: string): Database.Database {
 /** Append one run. Versions are not overwritten: a new version is
  *  a new row, and a repeat of the same version is another row. */
 export function recordTaskBattery(root: string, run: TaskBatteryRun): void {
-  const db = openStore(root);
-  try {
-    db.prepare("INSERT INTO task_battery (version, at, data) VALUES (?, ?, ?)").run(run.version, run.at, JSON.stringify(run));
-  } finally { db.close(); }
+  batteryTouch(root, "write", () => {
+    const db = openStore(root);
+    try {
+      db.prepare("INSERT INTO task_battery (version, at, data) VALUES (?, ?, ?)").run(run.version, run.at, JSON.stringify(run));
+    } finally { db.close(); }
+  });
 }
 
 export function listTaskBatteryRuns(root: string, version?: string): TaskBatteryRun[] {
   if (!existsSync(batteryDbPath(root))) return [];
-  const db = openStore(root);
-  try {
-    const rows = (version
-      ? db.prepare("SELECT data FROM task_battery WHERE version = ? ORDER BY id").all(version)
-      : db.prepare("SELECT data FROM task_battery ORDER BY id").all()) as Array<{ data: string }>;
-    const runs: TaskBatteryRun[] = [];
-    for (const row of rows) {
-      try {
-        const parsed = parseRun(JSON.parse(row.data));
-        if (parsed) runs.push(parsed);
-      } catch { /* a torn row is skipped, never fatal */ }
-    }
-    return runs;
-  } finally { db.close(); }
+  return batteryTouch(root, "read", () => {
+    const db = openStore(root);
+    try {
+      const rows = (version
+        ? db.prepare("SELECT data FROM task_battery WHERE version = ? ORDER BY id").all(version)
+        : db.prepare("SELECT data FROM task_battery ORDER BY id").all()) as Array<{ data: string }>;
+      const runs: TaskBatteryRun[] = [];
+      for (const row of rows) {
+        try {
+          const parsed = parseRun(JSON.parse(row.data));
+          if (parsed) runs.push(parsed);
+        } catch { /* a torn row is skipped, never fatal */ }
+      }
+      return runs;
+    } finally { db.close(); }
+  });
 }
 
 /** The newest stored run for a version, or null when that version

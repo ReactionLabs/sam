@@ -552,6 +552,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no tasks (which would silently drop the mission's whole plan dressed as an empty list), a touch already ledgered is never recorded twice, and a failure line never carries a task record (objectives are the owner's plan words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, while validation and data errors (Task objective required, Mission does not exist, Mission is terminal, Dependency must belong to mission, Invalid worker, the lease / completion timestamp refusals) still ledger nothing, and a handle-only construction with no install root still rethrows bare, never dressed as ledgered",
      "The full suite is green, including the task store failure-ledger tests"]);
+  if (key.startsWith("task-battery-failed:")) return base(
+    ["task-battery.ts", "cli.ts"],
+    "Task battery store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the task battery store (.sam/task-battery.db: the versioned Sprint 4 scorecards the `sam battery` doors quote as the record of whether Sam's job performance improved or held) must open, read, and write instead of dying at that seam - while it is dead a battery run's scorecard is lost at the final insert with the seam unnamed, and the show / versions doors die raw.",
+    ["The next battery runs record their scorecards again instead of task-battery-failed lines, and the show / versions reads return them",
+     "Exactly one task-battery-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no runs (which would silently empty the battery's whole score history dressed as a version that never ran), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a scorecard record (case evidence can carry the owner's words, not failure data)",
+     "An absent store still reads as no runs with no line and creates nothing, exactly as a fresh install expects, and torn rows still parse forgiving (skipped, never fatal)",
+     "The full suite is green, including the task battery store failure-ledger tests"]);
   if (key.startsWith("correction-failed:")) return base(
     ["corrections.ts", "agent-turn.ts"],
     "Live-turn correction routing stops failing: '" + label + "' has ledgered " + n + " failures, and an owner's correction in a live chat must reach the P1 gate as a proposed law (and apply to that reply through the correction note) instead of dying at the routing - while it is dead SAM answers without following the correction and without acknowledging a proposal, the P6 contract failing with no trace; the consolidation scan can re-propose later but cannot restore the in-turn application that was lost.",
@@ -871,6 +879,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Task store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "task-store-failed:" + phase, label: "task store failures (" + phase + " step)" };
+    }
+    case "task-battery-failed": {
+      const m = summary.match(/^Task battery store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "task-battery-failed:" + phase, label: "task battery store failures (" + phase + " step)" };
     }
     case "answer-judge-failed": {
       const m = summary.match(/^Answer judge ([a-z]+) failed/);
