@@ -390,7 +390,7 @@ contextAuditCmd.command("show").description("The last recorded context audit, or
 const loopAuditCmd=program.command("loop-audit").description("The loop audit (HARNESS INTELLIGENCE item 3): SAM's turn loop scored in code - no model call - with functional checks over the real loop machinery (the verification gate over a synthetic ledger, the chat-turn verification note, the repeated-failure repair guard's signature and stub, route-tiered budgets, the open-loop store coming due on schedule, and the honest budget / loader / retry endings) plus the live loop state (verification state, open and due loops); a run records in .sam/loop-audit.db so loop changes are measured before/after");
 loopAuditCmd.command("run").description("Run the audit now over the live loop machinery and stores, record it, and print the scorecard as plain text (this is the sam-loop-audit script job's stdout)").action(()=>output(loopAuditText(runLoopAudit(program.opts().workspace))));
 loopAuditCmd.command("show").description("The last recorded loop audit, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readLoopAudit(program.opts().workspace)));
-const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 25 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
+const evalBatteryCmd=program.command("eval-battery").description("The behavior eval battery (HARNESS INTELLIGENCE item 4): 26 realistic Dip tasks - inquiry questions, memory recall, gated proposals, coding tasks, honest-limit cases - executed in code against the real machinery in scratch state (no model call), compared against the previous recorded run; a run records in .sam/eval-battery.db so a prompt or harness change ships only if the battery improves or holds");
 evalBatteryCmd.command("run").description("Run the battery now against the real machinery, record it with its verdict against the previous run, and print the scorecard as plain text (this is the sam-eval-battery script job's stdout)").action(async()=>output(evalBatteryText(await runEvalBattery(program.opts().workspace))));
 evalBatteryCmd.command("show").description("The last recorded eval battery, or null when none has ever run (a pure read: creates nothing)").action(()=>output(readEvalBattery(program.opts().workspace)));
 const vaultCmd=program.command("vault").description("The SAM vault (Dip ruling 2026-11-12): an owner-only store for the few keys SAM's hands may need, kept outside the SAM home and outside .sam (the backup never carries it, the workspace readers never reach it; directory 0700, store 0600). A credential is referenced by NAME only: the executor injects its value into a child process at run time - the consumers are git-clone and the owner-approved git-push, which gain the credential for their declared hosts over HTTPS via askpass, and a vault-bound MCP connector (sam pair), whose executor resolves the value at call time into its Authorization header alone - and every deposit, removal, and use is ledgered with name, purpose, and outcome, never the value. Deposit is operator-only: the value arrives from an env var, a file, or stdin, never from argv and never from a chat; no command here ever prints a value");
@@ -852,10 +852,18 @@ daemon.command("stop").action(async()=>{
 });
 
 const memory=program.command("memory").description("Durable mission memory (evidence, never authority over policy)");
-memory.command("add").argument("<kind>").argument("<content>").requiredOption("--source <source>","Provenance for this record").option("--mission <code>","Mission code to attach this record to").action((kind:string,content:string,options:{source:string,mission?:string})=>{
+memory.command("add").argument("<kind>").argument("<content>").requiredOption("--source <source>","Provenance for this record").option("--mission <code>","Mission code to attach this record to").option("--aliases <list>","Comma-separated topic aliases: the other wordings this record's topic is asked about in (Q1 semantic recall)").action((kind:string,content:string,options:{source:string,mission?:string,aliases?:string})=>{
   const mem=new MemoryStore(dbPath()); const missions=store();
-  try{ const missionId=options.mission?missionOrThrow(missions,options.mission).id:undefined; output(mem.add({missionId,kind:kind as MemoryKind,content,source:options.source})); }
+  try{ const missionId=options.mission?missionOrThrow(missions,options.mission).id:undefined; output(mem.add({missionId,kind:kind as MemoryKind,content,source:options.source,aliases:options.aliases?options.aliases.split(",").map(s=>s.trim()).filter(Boolean):undefined})); }
   finally{mem.close();missions.close();}
+});
+memory.command("aliases").argument("<id>").argument("[phrases...]").option("--clear","Remove all aliases from the record").description("Read or replace a memory record's topic aliases (Q1): with no phrases it reads them back; with phrases it replaces the set; --clear empties it").action((id:string,phrases:string[],options:{clear?:boolean})=>{
+  const mem=new MemoryStore(dbPath());
+  try{
+    if(options.clear){ output(mem.setAliases(id,[])); return; }
+    if(!phrases.length){ const rec=mem.get(id); output(rec?{id:rec.id,aliases:rec.aliases}:null); return; }
+    output(mem.setAliases(id,phrases));
+  } finally{mem.close();}
 });
 memory.command("list").option("--mission <code>","Only records for this mission").action((options:{mission?:string})=>{
   const mem=new MemoryStore(dbPath()); const missions=store();

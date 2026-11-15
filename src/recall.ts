@@ -119,7 +119,110 @@ export function fitRecallBlock(header: string, sections: RecallSection[], cap = 
 // already promises: recall never breaks a turn, a failed seam
 // drops only its own section, and a total failure returns ""
 // exactly as an empty memory does.
-export type RecallPhase = "assemble" | "list" | "loops" | "search";
+export type RecallPhase = "assemble" | "list" | "loops" | "search" | "semantic";
+
+// Local semantic recall (QUEUED NEXT Q1, Dip 2026-11-14).
+// No embedding service: nothing about a memory record leaves
+// this machine. The semantic path is deterministic and local -
+// a record's hand-written topic aliases (weighted highest), a
+// small built-in synonym lexicon, and light stemming over the
+// record's content tokens - scored over the SAME scoped list
+// the keyword path is fenced to (visibleScopes via store.list),
+// so scope discipline is identical by construction. The
+// keyword FTS path stays as the cheap fallback and the merge
+// keeps its hits first; semantic hits only ADD records the
+// exact words would have missed.
+export const RECALL_SYNONYMS: string[][] = [
+  ["car", "automobile", "vehicle", "auto"],
+  ["service", "servicing", "maintenance", "repair", "repairs"],
+  ["coffee", "cortado", "espresso", "latte"],
+  ["money", "cost", "price", "pricing", "billing", "charge", "fee"],
+  ["buy", "purchase", "order", "ordered"],
+  ["call", "phone", "ring"],
+  ["meeting", "call", "appointment", "session"],
+  ["email", "mail", "message"],
+  ["kid", "son", "child", "boy"],
+  ["job", "work", "task", "gig"],
+  ["house", "home"],
+  ["quick", "fast", "rapid"],
+  ["big", "large", "huge"],
+  ["start", "begin", "launch"],
+  ["finish", "complete", "done", "end"],
+  ["fix", "repair", "mend"],
+  ["show", "display", "present"],
+  ["ask", "question", "inquiry"],
+  ["lead", "inquiry", "prospect"],
+  ["morning", "breakfast"],
+  ["drink", "beverage"],
+  ["doctor", "physician", "clinic"],
+  ["lawyer", "attorney", "counsel"],
+  ["photo", "picture", "image", "screenshot"],
+  ["video", "clip", "recording"],
+  ["ship", "deliver", "send", "mail"],
+  ["schedule", "calendar", "agenda"],
+  ["pay", "paid", "payment", "invoice"],
+  ["sign", "signature", "signed"],
+  ["dog", "puppy"],
+  ["cat", "kitten"],
+];
+const SYNONYM_OF = new Map<string, string[]>();
+for (const group of RECALL_SYNONYMS) for (const word of group) SYNONYM_OF.set(word, group);
+
+export function stemToken(raw: string): string {
+  let w = raw.toLowerCase();
+  if (w.endsWith("'s")) w = w.slice(0, -2);
+  if (w.length > 5 && w.endsWith("ing")) w = w.slice(0, -3);
+  else if (w.length > 4 && w.endsWith("ed")) w = w.slice(0, -2);
+  else if (w.length > 4 && w.endsWith("es")) w = w.slice(0, -2);
+  else if (w.length > 3 && w.endsWith("s")) w = w.slice(0, -1);
+  return w;
+}
+export function semanticTokens(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.toLowerCase().split(/[^a-z0-9']+/)) {
+    if (raw.length < 3 || STOPWORDS.has(raw)) continue;
+    out.push(raw);
+  }
+  return out;
+}
+/** Query tokens expanded with their synonym group, all stemmed. */
+export function expandedQueryStems(message: string): Set<string> {
+  const stems = new Set<string>();
+  for (const raw of semanticTokens(message)) {
+    stems.add(stemToken(raw));
+    for (const syn of SYNONYM_OF.get(raw) ?? []) stems.add(stemToken(syn));
+  }
+  return stems;
+}
+export function semanticScore(record: MemoryRecord, message: string, queryStems: Set<string>): number {
+  const normalizedMessage = " " + message.toLowerCase().replace(/[^a-z0-9]+/g, " ") + " ";
+  let score = 0;
+  for (const alias of record.aliases ?? []) {
+    const phrase = alias.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (phrase && normalizedMessage.includes(" " + phrase + " ")) score += 6;
+    for (const raw of semanticTokens(alias)) if (queryStems.has(stemToken(raw))) score += 3;
+  }
+  for (const raw of semanticTokens(record.content)) if (queryStems.has(stemToken(raw))) score += 1;
+  return score;
+}
+/** Semantic hits over the scoped store list, best first.
+ *  A record needs a real signal: an alias phrase hit, two
+ *  alias-token hits, or three content-token hits - a single
+ *  shared content word is the keyword path's territory and
+ *  too weak to dress as semantics. Scan is capped at the
+ *  newest 500 scoped records so a big store stays cheap. */
+export function semanticRecallHits(store: Pick<MemoryStore, "list">, message: string, scopes: string[], limit = 5): MemoryRecord[] {
+  const queryStems = expandedQueryStems(message);
+  if (!queryStems.size) return [];
+  const scored: Array<{ record: MemoryRecord; score: number }> = [];
+  for (const record of store.list(undefined, scopes).slice(0, 500)) {
+    if (record.source.startsWith("episode:")) continue;
+    const score = semanticScore(record, message, queryStems);
+    if (score >= 3) scored.push({ record, score });
+  }
+  scored.sort((a, b) => b.score - a.score || (b.record.created_at ?? "").localeCompare(a.record.created_at ?? ""));
+  return scored.slice(0, limit).map(s => s.record);
+}
 
 export function recallFailureSummary(actor: string, phase: RecallPhase, reason: string): string {
   const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
@@ -201,7 +304,15 @@ export function buildRecallBlock(root: string, opts: { actor: string; message: s
     if (episodes.length) sections.push({ heading: "Recent episodes:", lines: episodes.map(r => line(r, 380)), priority: 2 });
     const terms = recallTerms(opts.message);
     if (terms.length) {
-      const hits = searchRecallHits(root, opts.actor, store, terms.join(" OR "), scopes, error => fail("search", error));
+      const keywordHits = searchRecallHits(root, opts.actor, store, terms.join(" OR "), scopes, error => fail("search", error));
+      // Semantic path merged in: keyword hits keep their order
+      // (the cheap fallback is also the most literal signal),
+      // semantic hits add what rewording would have missed.
+      let semanticHits: MemoryRecord[] = [];
+      try { semanticHits = semanticRecallHits(store, opts.message, scopes); }
+      catch (error) { fail("semantic", error); }
+      const seen = new Set(keywordHits.map(r => r.id));
+      const hits = [...keywordHits, ...semanticHits.filter(r => !seen.has(r.id))].slice(0, 5);
       if (hits.length) sections.push({ heading: "Records relevant to this message:", lines: hits.map(r => line(r, 300)), priority: 3 });
     }
     if (!sections.length) return "";

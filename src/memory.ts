@@ -9,8 +9,37 @@ export type MemoryKind = "observation" | "decision" | "failure" | "procedure";
 export interface MemoryRecord {
   id:string; mission_id:string|null; kind:MemoryKind; content:string;
   source:string; source_hash:string; created_at:string; archived_at:string|null;
-  scope:string;
+  scope:string; aliases:string[];
 }
+// Topic aliases (QUEUED NEXT Q1, Dip 2026-11-14): a small
+// hand-written index of the OTHER wordings a record's topic is
+// asked about in ("morning drink order" for a cortado record).
+// Aliases are data on the record, never instructions; recall's
+// local semantic path matches them so a reworded topic still
+// surfaces. Validation keeps them phrase-shaped and bounded.
+export const MEMORY_ALIAS_MAX=8;
+export function validateMemoryAliases(input:unknown):string[] {
+  if(input===undefined||input===null)return [];
+  if(!Array.isArray(input))throw new Error("Invalid memory aliases: expected a list of phrases");
+  if(input.length>MEMORY_ALIAS_MAX)throw new Error("Invalid memory aliases: at most "+MEMORY_ALIAS_MAX+" per record");
+  const out:string[]=[]; const seen=new Set<string>();
+  for(const raw of input){
+    if(typeof raw!=="string")throw new Error("Invalid memory alias: phrases are text");
+    const clean=raw.replace(/\s+/g," ").trim();
+    if(clean.length<3||clean.length>60||!/^[a-zA-Z0-9][a-zA-Z0-9 '&-]*$/.test(clean))throw new Error("Invalid memory alias: \""+clean.slice(0,40)+"\" (3-60 chars, words, spaces, hyphens)");
+    const key=clean.toLowerCase();
+    if(seen.has(key))continue;
+    seen.add(key); out.push(clean);
+  }
+  return out;
+}
+function parseAliases(raw:unknown):string[] {
+  if(Array.isArray(raw))return raw.filter((a):a is string=>typeof a==="string");
+  if(typeof raw!=="string"||!raw.trim())return [];
+  try{ const parsed:unknown=JSON.parse(raw); return Array.isArray(parsed)?parsed.filter((a):a is string=>typeof a==="string"):[]; }catch{ return []; }
+}
+type RawRecord=Omit<MemoryRecord,"aliases">&{aliases?:unknown};
+function toRecord(row:RawRecord):MemoryRecord { return {...row,aliases:parseAliases(row.aliases)}; }
 // Memory levels: "core" is the operator SAM's own memory. "profile:<name>" is
 // one profile's private memory, invisible to every other profile. "link:<id>"
 // is a link group's shared memory, visible to exactly that group's members.
@@ -64,9 +93,12 @@ export class MemoryStore {
     if(!columns.some(c=>c.name==="scope")){
       this.db.exec("ALTER TABLE memory_records ADD COLUMN scope TEXT NOT NULL DEFAULT 'core'");
     }
+    if(!columns.some(c=>c.name==="aliases")){
+      this.db.exec("ALTER TABLE memory_records ADD COLUMN aliases TEXT NOT NULL DEFAULT '[]'");
+    }
     this.db.exec("CREATE INDEX IF NOT EXISTS memory_scope_idx ON memory_records(scope,created_at)");
   }
-  add(input:{missionId?:string;kind:MemoryKind;content:string;source:string;scope?:string}):MemoryRecord {
+  add(input:{missionId?:string;kind:MemoryKind;content:string;source:string;scope?:string;aliases?:string[]}):MemoryRecord {
     if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind. Choose observation, decision, failure, or procedure.");
     if(!input.content.trim() || !input.source.trim())throw new Error("Memory requires content and provenance");
     if(input.content.length>100_000)throw new Error("Memory exceeds size limit");
@@ -85,39 +117,52 @@ export class MemoryStore {
     // doors let it surface.
     const suppressionHit=findSuppressionHitInDb(join(dirname(this.path),"preferences.db"),suppressionProfilesForScope(scope),input.content);
     if(suppressionHit)throw new MemorySuppressedError(suppressionHit);
+    const aliases=validateMemoryAliases(input.aliases);
     const record:MemoryRecord={
       id:randomUUID(),mission_id:input.missionId??null,kind:input.kind,
       content:input.content,source:input.source,
       source_hash:createHash("sha256").update(input.source+"\n"+input.content).digest("hex"),
-      created_at:new Date().toISOString(),archived_at:null,scope
+      created_at:new Date().toISOString(),archived_at:null,scope,aliases
     };
     this.db.prepare(`INSERT INTO memory_records
-      (id,mission_id,kind,content,source,source_hash,created_at,archived_at,scope)
-      VALUES (@id,@mission_id,@kind,@content,@source,@source_hash,@created_at,@archived_at,@scope)`).run(record);
+      (id,mission_id,kind,content,source,source_hash,created_at,archived_at,scope,aliases)
+      VALUES (@id,@mission_id,@kind,@content,@source,@source_hash,@created_at,@archived_at,@scope,@aliases)`)
+      .run({...record,aliases:JSON.stringify(aliases)});
     return record;
+  }
+  /** Replace a record's topic aliases (the editable door for
+   *  the Q1 index). Returns the updated record, or null when
+   *  no such record exists. Validation errors throw. */
+  setAliases(id:string,aliases:string[]):MemoryRecord|null {
+    const clean=validateMemoryAliases(aliases);
+    const existing=this.get(id);
+    if(!existing)return null;
+    this.db.prepare("UPDATE memory_records SET aliases=? WHERE id=?").run(JSON.stringify(clean),id);
+    return {...existing,aliases:clean};
   }
   list(missionId?:string,scopes?:string[]):MemoryRecord[] {
     const scopeSql=scopes&&scopes.length?" AND scope IN ("+scopes.map(()=>"?").join(",")+")":"";
     const scopeArgs=scopes&&scopes.length?scopes:[];
-    return (missionId
+    const rows=(missionId
       ?this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL AND mission_id=?"+scopeSql+" ORDER BY created_at DESC").all(missionId,...scopeArgs)
-      :this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL"+scopeSql+" ORDER BY created_at DESC").all(...scopeArgs)) as MemoryRecord[];
+      :this.db.prepare("SELECT * FROM memory_records WHERE archived_at IS NULL"+scopeSql+" ORDER BY created_at DESC").all(...scopeArgs)) as RawRecord[];
+    return rows.map(toRecord);
   }
   search(query:string,limit=20,scopes?:string[]):MemoryRecord[] {
     if(!query.trim())return [];
     if(!Number.isInteger(limit)||limit<1||limit>100)throw new Error("Invalid result limit");
     const scopeSql=scopes&&scopes.length?" AND m.scope IN ("+scopes.map(()=>"?").join(",")+")":"";
     // FTS5 parameter binding prevents query text becoming SQL.
-    return this.db.prepare(`SELECT m.* FROM memory_search s
+    return (this.db.prepare(`SELECT m.* FROM memory_search s
       JOIN memory_records m ON m.rowid=s.rowid
       WHERE memory_search MATCH ? AND m.archived_at IS NULL${scopeSql}
-      ORDER BY bm25(memory_search),m.created_at DESC LIMIT ?`).all(query,...(scopes&&scopes.length?scopes:[]),limit) as MemoryRecord[];
+      ORDER BY bm25(memory_search),m.created_at DESC LIMIT ?`).all(query,...(scopes&&scopes.length?scopes:[]),limit) as RawRecord[]).map(toRecord);
   }
   get(id:string):MemoryRecord|null {
     // Includes archived records: patch/supersession validation needs to
     // distinguish "no such record" from "already retired".
-    const row=this.db.prepare("SELECT * FROM memory_records WHERE id=?").get(id) as MemoryRecord|undefined;
-    return row??null;
+    const row=this.db.prepare("SELECT * FROM memory_records WHERE id=?").get(id) as RawRecord|undefined;
+    return row?toRecord(row):null;
   }
   archive(id:string):boolean {
     return this.db.prepare("UPDATE memory_records SET archived_at=? WHERE id=? AND archived_at IS NULL")
