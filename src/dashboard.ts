@@ -22,6 +22,7 @@ import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
 import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
 import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, resetChatTurn, resumeChatQueues } from "./chat-queue.js";
+import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -83,6 +84,20 @@ function chatStoreAgents(workspace:string){const db=new ChatStore(workspace);try
 // The build id lives in status.ts (dashboardBuildId) so the status
 // payload is identical on every door; this server stamps it into the
 // served page, whose poll compares the two.
+
+// The thread document the chat GET and the live stream both serve.
+// Garnish stores (citations, sources, artifacts, the queue) never
+// take the thread down; a missing chat still throws from messages().
+function loadChatThread(workspace:string,chatId:string){
+  const db=new ChatStore(workspace);
+  try{
+    let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,chatId);}catch{/* citations are garnish: a dead citation store never takes the thread down */}
+    let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,chatId);}catch{/* sources are garnish the same way */}
+    let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,chatId);}catch{/* artifacts are garnish the same way */}
+    let queue:unknown[]=[];let turnActive=false;try{queue=listChatQueue(workspace,chatId);turnActive=chatTurnActive(workspace,chatId);}catch{/* the queue view is garnish the same way */}
+    return {messages:db.messages(chatId),events:db.events(chatId),actions:listActions(workspace).filter(a=>a.chatId===chatId),citations,sources,artifacts,queue,turnActive};
+  }finally{db.close();}
+}
 
 export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
@@ -192,9 +207,54 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         else json(200,panelFiles(workspace,profile));
       }catch{json(500,{error:"Panel unavailable"});}return;
     }
+    // Live chat (Sprint 4 item 1). One Server-Sent Events stream for
+    // the open chat. The payload is the same document as GET. It is
+    // written when the thread signature changes, plus a comment
+    // heartbeat so a quiet chat does not look disconnected. The
+    // check runs only while a browser is listening.
+    const liveMatch=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})/live$"));
+    if(liveMatch && req.method==="GET"){
+      const chatId=liveMatch[1];
+      let snapshot:ReturnType<typeof loadChatThread>;
+      try{snapshot=loadChatThread(workspace,chatId);}catch{json(404,{error:"Chat not found"});return;}
+      res.writeHead(200,{
+        "Content-Type":"text/event-stream; charset=utf-8",
+        "Cache-Control":"no-cache, no-transform",
+        "Connection":"keep-alive",
+        "X-Accel-Buffering":"no",
+      });
+      req.socket?.setNoDelay(true);
+      let closed=false;
+      res.on("close",()=>{closed=true;});
+      const write=(chunk:string)=>{
+        if(closed||res.writableEnded||res.destroyed)return false;
+        try{res.write(chunk);return true;}catch{closed=true;return false;}
+      };
+      let lastSig="";
+      let lastBeat=Date.now();
+      const publish=(next:ReturnType<typeof loadChatThread>)=>{
+        const sig=chatThreadSignature(next);
+        const now=Date.now();
+        if(sig!==lastSig){lastSig=sig;lastBeat=now;return write(sseThreadEvent(next));}
+        if(now-lastBeat>=CHAT_LIVE_HEARTBEAT_MS){lastBeat=now;return write(": ping\n\n");}
+        return true;
+      };
+      if(!write("retry: "+CHAT_LIVE_RETRY_MS+"\n\n")||!publish(snapshot)){if(!res.writableEnded)res.end();return;}
+      void (async()=>{
+        try{
+          while(!closed){
+            await new Promise(r=>setTimeout(r,CHAT_LIVE_POLL_MS));
+            if(closed)break;
+            try{snapshot=loadChatThread(workspace,chatId);}catch{break;}
+            if(!publish(snapshot))break;
+          }
+        }finally{if(!res.writableEnded){try{res.end();}catch{/* the client already left */}}}
+      })();
+      return;
+    }
     const match=req.url?.match(new RegExp("^/api/"+token+"/chats/([0-9a-f-]{36})(/messages)?$"));
     if(match && req.method==="GET" && !match[2]){
-      const db=new ChatStore(workspace);try{let citations:Record<string,ResolvedCitation>={};try{citations=citationViewsForChat(workspace,match[1]);}catch{/* citations are garnish: a dead citation store never takes the thread down */}let sources:Record<string,RunSource[]>={};try{sources=sourceViewsForChat(workspace,match[1]);}catch{/* sources are garnish the same way */}let artifacts:ArtifactSummary[]=[];try{artifacts=artifactsForChat(workspace,match[1]);}catch{/* artifacts are garnish the same way */}let queue:unknown[]=[];let turnActive=false;try{queue=listChatQueue(workspace,match[1]);turnActive=chatTurnActive(workspace,match[1]);}catch{/* the queue view is garnish the same way */}json(200,{messages:db.messages(match[1]),events:db.events(match[1]),actions:listActions(workspace).filter(a=>a.chatId===match[1]),citations,sources,artifacts,queue,turnActive});}catch{json(404,{error:"Chat not found"});}finally{db.close();}return;
+      try{json(200,loadChatThread(workspace,match[1]));}catch{json(404,{error:"Chat not found"});}return;
     }
     if(match && req.method==="POST" && match[2]){
       // Message bursts (Defect 2): a message is accepted at any time,

@@ -80,12 +80,17 @@ test("dashboard page: copy/paste path hardened for touch (defect 2026-11-09 18:0
   // destroyed the copy button on every live reply. It updates through
   // the bubble setter, and the setter keeps the copy closure current.
   // Defect 2 (2026-11-14): send() no longer awaits a reply at all - it
-  // queues the message and the queue watch re-renders the thread from
+  // queues the message and the open chat re-renders the thread from
   // the chat payload, so replies arrive through the same bubble()
   // construction (and its copy closure) as history does.
+  // Sprint 4 item 1: that re-render rides one EventSource on the
+  // chat's live stream, not a 2s poll that stops when the turn looks idle.
   assert.doesNotMatch(dashboardHtml,/lastElementChild\.textContent/);
   assert.match(dashboardHtml,/function renderThreadData\(data\)/);
-  assert.match(dashboardHtml,/startQueueWatch\(\)/);
+  assert.match(dashboardHtml,/function followLive\(id\)/);
+  assert.match(dashboardHtml,/new EventSource\(api\+'\/chats\/'\+id\+'\/live'\)/);
+  assert.match(dashboardHtml,/textContent='steered'/);
+  assert.doesNotMatch(dashboardHtml,/setInterval\(pollThread/);
   assert.match(dashboardHtml,/setText\(next\)\{holder\.text=next/);
   // Team (agent) messages carry the same affordance.
   assert.match(dashboardHtml,/copyButton\(\(\)=>event\.content\)/);
@@ -149,9 +154,9 @@ test("dashboard page: calm presentation and working state (sprint 3 item 6)", ()
   assert.match(dashboardHtml, /const WORK_FRAMES=\['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'\]/);
   assert.match(dashboardHtml, /const WORK_VERBS=\['Thinking','Reading','Considering','Weighing','Drafting','Checking'\]/);
   assert.match(dashboardHtml, /Thought for /);
-  // Defect 2 (2026-11-14): the working bubble is the queue watch's,
-  // shown while the chat's turn is active, and replies land through
-  // the thread re-render - same braille wait, same setters.
+  // The working bubble is shown while the chat's turn is active,
+  // and replies land through the live thread re-render - same braille
+  // wait, same setters.
   assert.match(dashboardHtml, /workBubble\.beginWork\(\)/);
   assert.match(dashboardHtml, /setText\(next\)\{holder\.text=next/);
   assert.match(dashboardHtml, /renderThreadData\(data\)/);
