@@ -121,7 +121,30 @@ export class OpenAICompatibleProvider implements ModelProvider {
   // When set, connector completions request a stream and report the
   // visible text so far. JSON responses (tests, non-streaming hosts)
   // still parse, and report once.
+  //
+  // Reasoning channel separation (Dip, live, twice on 2026-11-14):
+  // this callback is the ANSWER channel, and it only ever carries
+  // the text of a completion that ended the turn (no tool calls),
+  // reported once, at that completion's end, markup-stripped. It is
+  // never called while a healthy stream is still arriving and never
+  // for a tool-call completion: mid-stream, nobody can know whether
+  // the text so far is the answer or the reasoning in front of a
+  // tool call - and the mid-stream snapshot is exactly how raw
+  // reasoning reached the owner's screen, rendered as a bubble
+  // while the turn worked underneath it. The one exception is
+  // stream DEATH (salvageKilledStream): what already arrived is
+  // reported once, at the death, routed by the disposition known
+  // at that moment, so a killed answer stays resumable instead of
+  // vanishing - the turn layer's strip and reply guard still judge
+  // it before it persists.
   onPartial?: (accumulated: string) => void;
+  // The narration channel, the answer channel's counterpart: when a
+  // completion carries tool calls AND text, that text is
+  // turn-internal narration (the model's process talk in front of
+  // its calls), and it is reported here instead of onPartial. The
+  // turn layer ledgers its size and drops it; it must never be
+  // persisted as message content or rendered on any surface.
+  onNarration?: (text: string) => void;
   // Turn control (turn-control.ts): a turn that must be stoppable
   // from outside - the interactive deadline, or the owner's Reset -
   // sets this signal, and every request below links its own abort
@@ -221,6 +244,32 @@ export class OpenAICompatibleProvider implements ModelProvider {
       throw error;
     } finally { clearTimeout(timer); unlinkAbort(); }
   }
+  // Stream-death salvage (the resume contract, pre-dating the
+  // channel separation): when a streamed completion's transport
+  // dies mid-flight - socket hang up, provider cut - the text that
+  // already arrived is the turn's partial, and the next turn
+  // resumes from it instead of losing the answer's first half.
+  // Routing follows the same disposition rule as a completed
+  // completion, judged on what the death left behind: tool calls
+  // already assembled make the text narration (narration channel,
+  // counted and dropped); no calls yet make it answer-so-far,
+  // reported on the answer channel, where the turn layer applies
+  // its markup strip and the reply guard before anything persists.
+  // Only SSE bodies salvage - a JSON body cut mid-flight is
+  // unparseable and contributes nothing. Best-effort throughout:
+  // salvage never masks the error that killed the stream.
+  private salvageKilledStream(chunks:Uint8Array[]):void{
+    if(!this.onPartial&&!this.onNarration)return;
+    try{
+      const raw=Buffer.concat(chunks).toString("utf8");
+      if(!raw.trim()||raw.trimStart().startsWith("{"))return;
+      const assembled=assembleSse(raw);
+      const visible=stripModelMarkup(assembled.content);
+      if(!visible)return;
+      if(assembled.toolCalls.length){try{this.onNarration?.(visible);}catch{/* the narration sink never breaks a turn */}}
+      else{try{this.onPartial?.(visible);}catch{/* persistence never breaks the read */}}
+    }catch{/* salvage never masks the real error */}
+  }
   /** Bounded dashboard connector tool turn. Only host-supplied tool definitions are advertised. */
   async completeConnectorTurn(model:string,messages:Array<Record<string,unknown>>,tools:Array<Record<string,unknown>>):Promise<{content:string|null;calls:Array<{id:string;name:string;args:Record<string,unknown>}>}>{
     // An empty completion (no content, no tool calls) is a known
@@ -257,28 +306,34 @@ export class OpenAICompatibleProvider implements ModelProvider {
       if(!response.ok)throw Error("Model connector request failed (HTTP "+response.status+")");
       const reader=response.body?.getReader();if(!reader)throw Error("Empty model response");
       const chunks:Uint8Array[]=[];let length=0;
-      let reported="";
-      const decoder=new TextDecoder();
+      // No reporting while a healthy stream is still arriving (see
+      // onPartial): the stream is buffered whole, and channel
+      // routing happens once the completion's disposition - answer
+      // or narration - is known at its end. A read that FAILS is
+      // the stream's death, not its middle: the remains are
+      // salvaged once (salvageKilledStream) and the error rethrows
+      // exactly as before. A deliberate stop salvages nothing -
+      // when the turn control's signal has aborted (the owner's
+      // Reset, the turn deadline), that turn has its own closing
+      // behavior and a salvaged partial would fight it.
       try{for(;;){
-        const {done,value}=await reader.read();if(done)break;length+=value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(value);
-        if(stream&&this.onPartial){
-          const raw=decoder.decode(Buffer.concat(chunks));
-          if(!raw.trimStart().startsWith("{")){
-            const snap=assembleSse(raw).content;
-            if(snap&&snap!==reported){reported=snap;try{this.onPartial(snap);}catch{/* persistence never breaks the read */}}
-          }
-        }
+        const step=await reader.read().catch((readError:unknown)=>{if(!this.abortSignal?.aborted)this.salvageKilledStream(chunks);throw readError;});
+        if(step.done)break;length+=step.value.byteLength;if(length>1000000)throw Error("Model response too large");chunks.push(step.value);
       }}finally{reader.releaseLock();}
       const rawText=Buffer.concat(chunks).toString("utf8");
       const data=(stream&&!rawText.trimStart().startsWith("{")?payloadFromSse(assembleSse(rawText)):JSON.parse(rawText)) as {choices?:Array<{message?:{content?:unknown;tool_calls?:unknown}}>};
-      if(stream&&this.onPartial){
-        const visible=typeof data.choices?.[0]?.message?.content==="string"?data.choices[0].message.content:"";
-        if(visible&&visible!==reported){try{this.onPartial(visible);}catch{/* persistence never breaks the read */}}
-      }
       this.reportUsage(data, model);
       const msg=data.choices?.[0]?.message;
       if(!msg)throw Error("Invalid model response");
       const rawContent=typeof msg.content==="string"?msg.content:null;
+      // An unterminated think span means the completion is all
+      // reasoning with its closing tag missing: stripModelMarkup
+      // would keep the prose and call it content. The tool-turn
+      // path already refuses this shape; the connector path now
+      // refuses it too, into the retry class above - a
+      // reasoning-only completion is a provider hiccup to retry,
+      // never text to show the owner.
+      if(rawContent&&/<think>/i.test(rawContent)&&!/<\/think>/i.test(rawContent))throw Error("Unsafe model output");
       const content=rawContent===null?null:stripModelMarkup(rawContent);
       if(rawContent&&!content&&!(Array.isArray(msg.tool_calls)&&msg.tool_calls.length))throw Error("Unsafe model output");
       const raw=msg.tool_calls;
@@ -298,6 +353,16 @@ export class OpenAICompatibleProvider implements ModelProvider {
         calls.push({id:call.id,name:call.function.name,args:args as Record<string,unknown>});
       }
       if(!content&&!calls.length)throw Error("Empty model response");
+      // Channel routing, the structural rule: a completion that
+      // carries tool calls is a working round, and any text riding
+      // it is turn-internal narration - it goes to the narration
+      // channel (ledgered by size upstream, then dropped) and can
+      // never reach the partial/message path. Only a completion
+      // that ends the turn (no calls) produces reply text, and
+      // only its text is reported on the answer channel, once,
+      // here at the completion's end.
+      if(calls.length&&content){try{this.onNarration?.(content);}catch{/* the narration sink never breaks a turn */}}
+      else if(content){try{this.onPartial?.(content);}catch{/* persistence never breaks the read */}}
       return {content:content||null,calls};
     }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw Error("Model connector network error");throw e;}finally{clearTimeout(timer);unlinkAbort();}
   }

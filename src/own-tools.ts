@@ -767,6 +767,10 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
   // Failover may only happen before any tool runs. The moment this
   // round has tool calls, later provider errors stay on this route.
   if(guard)guard.toolsStarted=true;
+  // Reasoning channel separation: this completion carried calls, so
+  // its content is turn-internal narration. It joins the model's own
+  // prompt history (the model needs its thread) and NOTHING else -
+  // never the reply, never a partial, never a message.
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   // Classify in order (budget + tier stubs are loop-local and instant),
   // then run the round's real calls CONCURRENTLY (S4 latency: independent

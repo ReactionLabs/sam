@@ -290,6 +290,12 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       totalWords:messages.reduce((n,m)=>n+countWords(m.content),0)});
   }catch{/* the meter never breaks a turn */}
   let partialId:string|null=resuming?.id??null;
+  // Reasoning channel separation: narration the provider withheld
+  // from the message path this turn, counted by size only. The
+  // words are never recorded anywhere; one ledger line after the
+  // routes loop reports the totals.
+  let narrationChars=0;
+  let narrationRounds=0;
   let reply="";
   let answered=false;
   let graceSpoke=false;
@@ -303,13 +309,21 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",MODEL_REQUEST_TIMEOUT_MS);
       provider.abortSignal=control.signal;
       const tier=conn.tier;
+      // Narration sink: tool-round text arrives here, never at
+      // onPartial. Counted, then dropped - the ledger line after
+      // the routes loop carries the totals, never the words.
+      provider.onNarration=(text)=>{narrationChars+=text.length;narrationRounds++;};
       provider.onPartial=(accumulated)=>{
         const visible=stripModelMarkup(accumulated);
         if(!visible)return;
-        // Reply guard, render seam: a draft that reads as process
-        // narration is never persisted as a partial, so it never
-        // renders as a bubble while the turn works. The final
-        // answer is judged on its own full text at the save seam.
+        // The provider only ever reports answer-channel text now
+        // (a call-free completion's text, at its end), so a
+        // partial can only ever hold answer text. The reply guard
+        // still watches this seam as the last net: a draft that
+        // reads as process narration is never persisted as a
+        // partial, so it never renders as a bubble while the turn
+        // works. The final answer is judged on its own full text
+        // at the save seam.
         if(isReasoningNarration(visible))return;
         const text=resuming?joinPartial(resuming.content,visible):visible;
         try{const store=new ChatStore(root);try{partialId=store.savePartial(chatId,partialId,text);}finally{store.close();}}catch{/* a partial write never breaks the read */}
@@ -377,6 +391,11 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     }
   }
   if(!answered)throw Error("Model not configured");
+  // The narration this turn withheld, ledgered once, by size
+  // only: the class stays countable (a turn whose model narrates
+  // heavily shows up here) without the words ever landing in a
+  // record the owner can open.
+  if(narrationRounds>0){try{recordActivity(root,profileName,"narration-channel","Withheld "+narrationChars+" chars of tool-round narration across "+narrationRounds+" round(s) from the message path in chat "+chatId.slice(0,8)+": narration is turn-internal and never becomes a message");}catch{/* the ledger never breaks a turn */}}
   // The final save verifies the turn is still current: a reset
   // that landed while the last synthesis composed discards the
   // reply here, before any of it can reach the transcript.

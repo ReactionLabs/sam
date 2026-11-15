@@ -168,6 +168,10 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
   // Failover may only happen before any tool runs. Tool calls commit
   // this route; a later provider error must not replay them elsewhere.
   if(guard)guard.toolsStarted=true;
+  // Reasoning channel separation: this completion carried calls, so
+  // its content is turn-internal narration. It joins the model's own
+  // prompt history (the model needs its thread) and NOTHING else -
+  // never the reply, never a partial, never a message.
   messages.push({role:"assistant",content:turn.content,tool_calls:turn.calls.map(c=>({id:c.id,type:"function",function:{name:c.name,arguments:JSON.stringify(c.args)}}))});
   // Classify in order, then run the round's real calls CONCURRENTLY
   // (S4 latency: independent results requested in one step cost the
