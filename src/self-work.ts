@@ -656,6 +656,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The fence still fails closed exactly as before: a failed read rethrows instead of folding the store as no allowlists (which would silently unrestrict every fenced profile dressed as the pre-allowlist behavior), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries an allowlist record (profile names and skill lists are fence data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no allowlists with no line and creates nothing, while validation errors (Invalid profile, Unknown skill(s)) still ledger nothing and torn rows still parse forgiving",
      "The full suite is green, including the skill allowlists store failure-ledger tests"]);
+  if (key.startsWith("tool-loads-store-failed:")) return base(
+    ["tool-tiers.ts", "own-tools.ts", "connector-chat.ts"],
+    "Tool loads store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the tool loads store (.sam/tool-loads.db) must open, read, and write instead of dying at that seam - this store is the per-chat loaded set for deferred tool tiering (one row per chat holding that chat's loaded-names JSON, so a tool loaded once stays loaded for that chat's session), read by every tiered chat turn on both loops for its current loaded set and written when the loader records a load or rotates a re-load, so while it is dead tiered turns die with the seam unnamed, and a reader folding it as no loads would silently unload every tool a chat already loaded dressed as a fresh session, so the model pays loader rounds again and windowed tools fall out with no trace it happened.",
+    ["The next tiered turns, loader records, and re-load rotations resolve their loaded sets again instead of tool-loads-store-failed lines",
+     "Exactly one tool-loads-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no loads (which would silently unload every tool a chat already loaded dressed as a fresh session), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a loaded-set record (chat ids and tool names are session data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no loads with no line and creates nothing, while torn rows still parse forgiving and a malformed legacy file still imports nothing and ledgers nothing",
+     "The full suite is green, including the tool loads store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1075,6 +1083,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Skill allowlists store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "skill-allowlists-store-failed:" + phase, label: "skill allowlists store failures (" + phase + " step)" };
+    }
+    case "tool-loads-store-failed": {
+      const m = summary.match(/^Tool loads store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "tool-loads-store-failed:" + phase, label: "tool loads store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, renameSync, mkdirSync, lstatSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { recordActivity } from "./activity.js";
 
 /**
  * Deferred tool loading (Harness Implementation Order item 4, Dip
@@ -294,6 +295,68 @@ function loadsDbFile(root: string): string { return join(resolve(root), ".sam", 
 // loads nothing new writes nothing and creates no store.
 // The P9 backup snapshots every .sam/*.db generically, so
 // the migrated store is carried with no backup change.
+// Tool-loads store failure visibility (gap found 2026-11-16,
+// hourly run 01:04): the store above is the per-chat loaded
+// set every tiered turn rides - loadedTools feeds the current
+// loaded set on both chat loops (own-tools and
+// connector-chat), recordToolLoad persists a fresh load, and
+// touchToolLoads rotates a re-load back into the window -
+// and every touch opened it raw. A dead tool-loads.db threw
+// into whichever catch wrapped the turn with the seam
+// unnamed, and no tool-loads-store-failed kind existed, so
+// the class was uncountable, and any reader folding a dead
+// store as "no loads" would silently unload every tool a
+// chat already loaded dressed as a fresh session - the
+// model pays loader rounds again and windowed tools fall
+// out, with no trace it happened. Now the store's touches
+// own their failure (the skill-authors precedent, helpers
+// in this module): a failed touch ledgers ONE
+// tool-loads-store-failed line (phase read for loadedTools,
+// write for the touchToolLoads / recordToolLoad mutations;
+// actor sam; the verbatim reason collapsed and capped;
+// never any loaded-set record - chat ids and tool names
+// are session data, not failure data), tags the error, and
+// rethrows exactly, so every caller's handling is unchanged
+// and reads still fail closed. A touch already ledgered by
+// an inner door keeps its one line and gains no second
+// (recordToolLoad's and touchToolLoads' current-set reads
+// ride loadedTools). The exists check stays outside the
+// seam: an absent store still reads as no loads with no
+// line and creates nothing, and torn row payloads still
+// parse forgiving - only the store touch is guarded.
+export type ToolLoadsStorePhase = "read" | "write";
+
+export function toolLoadsStoreFailureSummary(phase: ToolLoadsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Tool loads store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordToolLoadsStoreFailure(root: string, phase: ToolLoadsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "tool-loads-store-failed", toolLoadsStoreFailureSummary(phase, reason));
+}
+
+function tagToolLoadsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { toolLoadsStoreLedgered?: boolean }).toolLoadsStoreLedgered = true;
+  }
+}
+
+export function isToolLoadsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { toolLoadsStoreLedgered?: boolean }).toolLoadsStoreLedgered === true;
+}
+
+function failToolLoadsStore(root: string, phase: ToolLoadsStorePhase, error: unknown): never {
+  if (!isToolLoadsStoreLedgered(error)) recordToolLoadsStoreFailure(root, phase, error);
+  tagToolLoadsStoreLedgered(error);
+  throw error;
+}
+
+function openToolLoadsGuarded(root: string, phase: ToolLoadsStorePhase): Database.Database {
+  try { return openToolLoadsStore(root); }
+  catch (error) { failToolLoadsStore(root, phase, error); }
+}
 function openToolLoadsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -335,11 +398,12 @@ function parseLoadedNames(data: string): string[] {
 
 export function loadedTools(root: string, chatId: string): string[] {
   if (!toolLoadsStoreExists(root)) return [];
-  const db = openToolLoadsStore(root);
+  const db = openToolLoadsGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM tool_loads WHERE chat_id = ?").get(chatId) as { data: string } | undefined;
     return row ? parseLoadedNames(row.data) : [];
-  } finally { db.close(); }
+  } catch (error) { failToolLoadsStore(root, "read", error); }
+  finally { db.close(); }
 }
 
 /** Rotate already-loaded names to the newest end of the stored
@@ -354,11 +418,12 @@ export function touchToolLoads(root: string, chatId: string, names: string[]): v
   if (!wanted.length) return;
   const next = [...current.filter(n => !wanted.includes(n)), ...wanted];
   if (next.every((n, i) => n === current[i])) return;
-  const db = openToolLoadsStore(root);
+  const db = openToolLoadsGuarded(root, "write");
   try {
     db.prepare("INSERT INTO tool_loads (chat_id, data) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET data = excluded.data")
       .run(chatId, JSON.stringify(next));
-  } finally { db.close(); }
+  } catch (error) { failToolLoadsStore(root, "write", error); }
+  finally { db.close(); }
 }
 
 export function recordToolLoad(root: string, chatId: string, requested: string[], validNames: Set<string>): { loaded: string[]; unknown: string[] } {
@@ -370,11 +435,12 @@ export function recordToolLoad(root: string, chatId: string, requested: string[]
     if (!current.has(name)) { current.add(name); loaded.push(name); }
   }
   if (loaded.length) {
-    const db = openToolLoadsStore(root);
+    const db = openToolLoadsGuarded(root, "write");
     try {
       db.prepare("INSERT INTO tool_loads (chat_id, data) VALUES (?, ?) ON CONFLICT(chat_id) DO UPDATE SET data = excluded.data")
         .run(chatId, JSON.stringify([...current]));
-    } finally { db.close(); }
+    } catch (error) { failToolLoadsStore(root, "write", error); }
+    finally { db.close(); }
   }
   return { loaded, unknown };
 }
