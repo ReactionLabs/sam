@@ -138,6 +138,82 @@ function engineDbFile(root: string): string { return join(resolve(root), ".sam",
 // audits stay read-only. The P9 backup snapshots every
 // .sam/*.db generically, so the migrated store is carried with
 // no backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 19:04 EST): the engine store holds the managed
+// coding-engine queue - each run's actor, chat, spec,
+// status, engine output, recorded changes, verification,
+// review, and C4 git state - and every touch opened it
+// raw. listEngineTasks rides engineStatus (the dashboard
+// status payload, the morning brief, the CLI overview,
+// self-audit, and the eval battery); getEngineTask and
+// the row writes ride the heartbeat drain's transitions,
+// updateEngineTask, the ONE gate's engine executor, and
+// the CLI engine verbs. A dead engine.db threw into
+// whichever catch wrapped the call with the seam unnamed,
+// and no engine-store-failed kind existed (engine-failed
+// is the drain's run-outcome class, a different seam;
+// engine-connection-store-failed is the separate
+// route-marker store, already guarded), so the class was
+// uncountable, and any reader folding a dead store as
+// "no tasks" would silently empty the managed-run queue
+// dressed as an idle engine - a queued run's record gone
+// while its branch sandbox and the owner's approval
+// assume it still waits. Now the store's touches own
+// their failure (the coding precedent): a failed touch
+// ledgers ONE engine-store-failed line (phase read for
+// listEngineTasks / getEngineTask, write for
+// insertEngineTask / updateEngineTaskRow and every
+// mutation door riding them; actor sam; the verbatim
+// reason collapsed and capped; never any task record -
+// specs, outputs, and results are the owner's words, not
+// failure data), tags the error, and rethrows exactly, so
+// every caller's handling is unchanged and reads still
+// fail closed. A touch already ledgered by an inner door
+// keeps its one line and gains no second. Validation
+// errors (actor / spec / chat / queue-full refusals) are
+// not store failures and ledger nothing. An absent store
+// still reads empty with no line and creates nothing, and
+// torn row payloads still parse forgiving - only the
+// store touch is guarded.
+export type EngineStorePhase = "read" | "write";
+
+export function engineStoreFailureSummary(phase: EngineStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Engine store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordEngineStoreFailure(root: string, phase: EngineStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "engine-store-failed", engineStoreFailureSummary(phase, reason));
+}
+
+function tagEngineStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { engineStoreLedgered?: boolean }).engineStoreLedgered = true;
+  }
+}
+
+export function isEngineStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { engineStoreLedgered?: boolean }).engineStoreLedgered === true;
+}
+
+const ENGINE_STORE_VALIDATION = [/^Invalid actor$/, /^Invalid engine task spec$/, /^A chat is required$/, /^Engine queue is full$/];
+
+function isEngineStoreValidation(error: unknown): boolean {
+  return error instanceof Error && ENGINE_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failEngineStore(root: string, phase: EngineStorePhase, error: unknown): never {
+  if (!isEngineStoreLedgered(error) && !isEngineStoreValidation(error)) recordEngineStoreFailure(root, phase, error);
+  if (!isEngineStoreValidation(error)) tagEngineStoreLedgered(error);
+  throw error;
+}
+
+function openEngineGuarded(root: string, phase: EngineStorePhase): Database.Database {
+  try { return openEngineStore(root); }
+  catch (error) { failEngineStore(root, phase, error); }
+}
 function openEngineStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   const db = openDatabase(engineDbFile(root));
@@ -171,30 +247,34 @@ function rowToTask(data: string): EngineTask | null {
 }
 export function listEngineTasks(root: string): EngineTask[] {
   if (!existsSync(engineDbFile(root)) && !existsSync(engineFile(root))) return [];
-  const db = openEngineStore(root);
+  const db = openEngineGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM engine_tasks ORDER BY rowid").all() as Array<{ data: string }>;
     const items: EngineTask[] = [];
     for (const row of rows) { const task = rowToTask(row.data); if (task) items.push(task); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failEngineStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function getEngineTask(root: string, id: string): EngineTask | null {
   if (!existsSync(engineDbFile(root)) && !existsSync(engineFile(root))) return null;
-  const db = openEngineStore(root);
+  const db = openEngineGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM engine_tasks WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToTask(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failEngineStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertEngineTask(root: string, item: EngineTask): void {
-  const db = openEngineStore(root);
+  const db = openEngineGuarded(root, "write");
   try { db.prepare("INSERT INTO engine_tasks (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  catch (error) { failEngineStore(root, "write", error); }
   finally { db.close(); }
 }
 function updateEngineTaskRow(root: string, item: EngineTask): void {
-  const db = openEngineStore(root);
+  const db = openEngineGuarded(root, "write");
   try { db.prepare("UPDATE engine_tasks SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  catch (error) { failEngineStore(root, "write", error); }
   finally { db.close(); }
 }
 // The store's update door (the updateBackgroundTask /
