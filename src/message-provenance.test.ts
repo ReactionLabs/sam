@@ -15,8 +15,8 @@ function scratch(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
-test("message source normalizes to the five clients or unknown", () => {
-  assert.deepEqual([...MESSAGE_SOURCES], ["dashboard", "rust-cli", "ts-cli", "telegram", "api"]);
+test("message source normalizes to the named clients or unknown", () => {
+  assert.deepEqual([...MESSAGE_SOURCES], ["dashboard", "rust-cli", "ts-cli", "telegram", "api", "voice"]);
   for (const source of MESSAGE_SOURCES) assert.equal(sourceFromApiBody(source), source);
   assert.equal(sourceFromApiBody(undefined), "api");
   assert.equal(sourceFromApiBody("not-a-client"), "unknown");

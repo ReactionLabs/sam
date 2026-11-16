@@ -14,10 +14,11 @@ import { sessionCapStatus } from "./session-caps.js";
 import { RateLimiter } from "./mini-door.js";
 import {
   findOrCreateMember, listApiTokens, memberDoorPaused, memberForApiToken, memberForSession, memberThinkBlock, memberView,
-  mintApiToken, mintMagicToken, redeemMagicToken, removeMemberKey, revokeApiToken, revokeSession,
-  setMemberKey, setMemberKeySource,
+  mintApiToken, mintMagicToken, redeemMagicToken, removeMemberKey, removeMemberVoiceKey, revokeApiToken, revokeSession,
+  setMemberKey, setMemberKeySource, setMemberVoiceKey,
   type Member,
 } from "./members.js";
+import { mintVoiceSession, saveVoiceTranscript, VOICE_KEY_MISSING } from "./member-voice.js";
 import { sendMagicLinkEmail } from "./member-mail.js";
 import {
   createMemberHeartbeat, deleteMemberHeartbeat, memberFileKind, memberFileView, memberHeartbeats,
@@ -102,6 +103,9 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
   const linkLimiter = new RateLimiter(10, 3600_000, 0);
   const redeemLimiter = new RateLimiter(30, 3600_000, 0);
   const messageLimiter = new RateLimiter(120, 3600_000, 0);
+  // Voice sessions: each mint spends the member's own key on an
+  // OpenAI call, so the door keeps mints to a human pace.
+  const voiceLimiter = new RateLimiter(20, 3600_000, 0);
   resumeChatQueues(workspace);
 
   function memberChats(member: Member): Array<{ id: string; title: string; updatedAt: string }> {
@@ -251,6 +255,46 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
       }
       if (path === "/me/key" && req.method === "DELETE") {
         sendJson(res, 200, { member: removeMemberKey(workspace, member) });
+        return;
+      }
+      // --- The voice key: a second slot beside the chat key. An
+      // OpenAI key buys real-time voice only; it vaults under its
+      // own credential name and the view reports presence, never
+      // the value (members.ts). ---
+      if (path === "/me/voice-key" && req.method === "POST") {
+        const body = await readJson(req);
+        try {
+          const next = setMemberVoiceKey(workspace, member, String(body.apiKey ?? ""));
+          sendJson(res, 200, { member: next });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "That key could not be saved." });
+        }
+        return;
+      }
+      if (path === "/me/voice-key" && req.method === "DELETE") {
+        sendJson(res, 200, { member: removeMemberVoiceKey(workspace, member) });
+        return;
+      }
+      // --- Voice session mint: the door spends the member's own
+      // OpenAI key server-side and hands the browser ONLY the
+      // ephemeral secret, the model, and the expiry. The chat must
+      // be the member's own (404 like everywhere in this door);
+      // a member with no voice key gets the plain reason and the
+      // code the app turns into a Settings pointer. ---
+      if (path === "/me/voice/session" && req.method === "POST") {
+        if (!voiceLimiter.allow("voice:" + member.id)) { sendJson(res, 429, { error: "A lot of calls in a short time. Give it a minute." }); return; }
+        const body = await readJson(req);
+        const chatId = typeof body.chatId === "string" ? body.chatId : "";
+        if (!chatId || !ownsChat(member, chatId)) { sendJson(res, 404, { error: "No such chat." }); return; }
+        try {
+          const session = await mintVoiceSession(workspace, member, chatId);
+          sendJson(res, 200, { session });
+        } catch (error) {
+          const code = (error as { code?: string })?.code;
+          const message = error instanceof Error ? error.message : "Voice could not start. Try again.";
+          if (code === VOICE_KEY_MISSING) sendJson(res, 400, { error: message, code });
+          else sendJson(res, 502, { error: message });
+        }
         return;
       }
       if (path === "/me/key-source" && req.method === "POST") {
@@ -420,7 +464,7 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
         } finally { store.close(); }
         return;
       }
-      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset)?$/);
+      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset|\/voice-transcript)?$/);
       if (chatMatch) {
         const chatId = chatMatch[1];
         const sub = chatMatch[2] ?? "";
@@ -454,6 +498,25 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
           }
           const result = enqueueChatMessage(workspace, { chatId, content: content.slice(0, 20000), source: "member-app" });
           sendJson(res, result.status === "queued" ? 202 : 200, result);
+          return;
+        }
+        if (sub === "/voice-transcript" && req.method === "POST") {
+          // A finished call lands its words here: the transcript
+          // becomes real chat rows (provenance "voice"), so the
+          // conversation continues in text. Ownership was checked
+          // above and again inside saveVoiceTranscript. A long
+          // call outgrows the standard body cap, so this route
+          // reads with a bigger one (the store caps what lands).
+          const raw = await readBody(req, 512_000).catch(() => "");
+          let body: Record<string, unknown> = {};
+          try { body = raw.trim() ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { body = {}; }
+          const entries = Array.isArray(body.entries) ? body.entries as Array<{ role: "user" | "assistant"; content: string }> : [];
+          try {
+            const result = saveVoiceTranscript(workspace, member, chatId, entries);
+            sendJson(res, 200, result);
+          } catch {
+            sendJson(res, 404, { error: "No such chat." });
+          }
           return;
         }
         if (sub === "/reset" && req.method === "POST") {

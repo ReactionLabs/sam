@@ -6,7 +6,7 @@
 // turns that are not a client (heartbeat, background, a door) are
 // unknown.
 
-export const MESSAGE_SOURCES = ["dashboard", "rust-cli", "ts-cli", "telegram", "api"] as const;
+export const MESSAGE_SOURCES = ["dashboard", "rust-cli", "ts-cli", "telegram", "api", "voice"] as const;
 export type MessageSource = typeof MESSAGE_SOURCES[number];
 export type StoredMessageSource = MessageSource | "unknown";
 

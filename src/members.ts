@@ -76,6 +76,7 @@ export interface Member {
   status: "active" | "disabled";
   provider: MemberProviderConfig | null;
   keyName: string | null;
+  voiceKeyName: string | null;
   keySource: MemberKeySource;
   billing: { stripeCustomerId: string | null };
 }
@@ -95,6 +96,7 @@ export interface MemberView {
   createdAt: string;
   status: "active" | "disabled";
   hasKey: boolean;
+  hasVoiceKey: boolean;
   provider: MemberProviderConfig | null;
   keySource: MemberKeySource;
   managed: ManagedStatus;
@@ -168,6 +170,7 @@ function rowToMember(data: string): Member | null {
       status: m.status === "disabled" ? "disabled" : "active",
       provider: m.provider && typeof m.provider === "object" ? m.provider : null,
       keyName: typeof m.keyName === "string" ? m.keyName : null,
+      voiceKeyName: typeof m.voiceKeyName === "string" ? m.voiceKeyName : null,
       keySource: m.keySource === "managed" ? "managed" : "own",
       billing: { stripeCustomerId: m.billing && typeof m.billing.stripeCustomerId === "string" ? m.billing.stripeCustomerId : null },
     };
@@ -232,7 +235,7 @@ function createMember(root: string, email: string): { member: Member; created: b
   }
   const person = personFromEmail(email);
   spawnMini(root, { name: profile, person, instructions: memberInstructions(person) });
-  const member: Member = { id, email, profile, person, createdAt: new Date().toISOString(), status: "active", provider: null, keyName: null, keySource: "own", billing: { stripeCustomerId: null } };
+  const member: Member = { id, email, profile, person, createdAt: new Date().toISOString(), status: "active", provider: null, keyName: null, voiceKeyName: null, keySource: "own", billing: { stripeCustomerId: null } };
   const db = openMembersGuarded(root, "write");
   try { saveMemberRow(db, member); }
   catch (error) { failMemberStore(root, "write", error); }
@@ -374,11 +377,19 @@ export function memberHasKey(root: string, member: Member): boolean {
   if (!member.keyName) return false;
   return listVaultCredentials(root).some(c => c.name === member.keyName);
 }
+export function memberVoiceKeyName(member: Member): string {
+  return "member-" + member.id.slice(0, 8) + "-voice-key";
+}
+export function memberHasVoiceKey(root: string, member: Member): boolean {
+  if (!member.voiceKeyName) return false;
+  return listVaultCredentials(root).some(c => c.name === member.voiceKeyName);
+}
 export function memberView(root: string, member: Member, env: NodeJS.ProcessEnv = process.env): MemberView {
   return {
     id: member.id, email: member.email, profile: member.profile, person: member.person,
     createdAt: member.createdAt, status: member.status,
     hasKey: memberHasKey(root, member),
+    hasVoiceKey: memberHasVoiceKey(root, member),
     provider: member.provider,
     keySource: member.keySource,
     managed: memberManagedStatus(root, member, env),
@@ -561,6 +572,45 @@ export function removeMemberKey(root: string, member: Member): MemberView {
   catch (error) { failMemberStore(root, "write", error); }
   finally { db.close(); }
   recordActivity(root, member.profile, "member-key-removed", "The member removed their model key");
+  return memberView(root, next);
+}
+
+// --- The voice key: a second, separate key slot ---------------------
+// Real-time voice rides OpenAI's Realtime API, so a member who
+// wants to TALK to their SAM brings an OpenAI key alongside their
+// chat key (Dip ruling 2026-11-16: "real time voice with their
+// chat GPT token at least"). Same posture as the chat key, its own
+// vault credential: stored under its own name, never returned,
+// never logged, and it leaves the vault only inside the door's
+// server-side call that mints a short-lived voice session secret
+// (member-voice.ts). The browser never sees this key - it receives
+// only the ephemeral secret the mint hands back.
+
+export function setMemberVoiceKey(root: string, member: Member, apiKey: string): MemberView {
+  if (member.status !== "active") throw new Error("Account is disabled");
+  const value = typeof apiKey === "string" ? apiKey.trim() : "";
+  if (!value) throw new Error("Paste your OpenAI key first.");
+  const voiceKeyName = memberVoiceKeyName(member);
+  setVaultCredential(root, "member-door", voiceKeyName, value, {
+    purpose: "OpenAI voice key for member profile " + member.profile + " (real-time voice sessions, spent only on their calls)",
+    hosts: ["api.openai.com"],
+  });
+  const next: Member = { ...member, voiceKeyName };
+  const db = openMembersGuarded(root, "write");
+  try { saveMemberRow(db, next); }
+  catch (error) { failMemberStore(root, "write", error); }
+  finally { db.close(); }
+  recordActivity(root, member.profile, "member-voice-key-set", "The member added their OpenAI voice key");
+  return memberView(root, next);
+}
+export function removeMemberVoiceKey(root: string, member: Member): MemberView {
+  if (member.voiceKeyName) removeVaultCredential(root, "member-door", member.voiceKeyName);
+  const next: Member = { ...member, voiceKeyName: null };
+  const db = openMembersGuarded(root, "write");
+  try { saveMemberRow(db, next); }
+  catch (error) { failMemberStore(root, "write", error); }
+  finally { db.close(); }
+  recordActivity(root, member.profile, "member-voice-key-removed", "The member removed their OpenAI voice key");
   return memberView(root, next);
 }
 
