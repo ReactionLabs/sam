@@ -5,6 +5,8 @@ import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
+import { MEMBER_PROVIDER_ID, managedConfig, memberConnection, memberForProfile, memberManagedStatus } from "./members.js";
+import { tierForRoute } from "./model-routing.js";
 
 // Model failover (sprint item 2). A profile's primary route is its
 // provider+model pin (or the environment provider when it has none).
@@ -243,6 +245,51 @@ export function clearFallbackRoutes(root: string, profile: string): boolean {
 // different provider+model. The caller decides whether a dead primary
 // is fatal (no fallbacks) or worth trying the next route.
 export function turnRoutes(root: string, env: NodeJS.ProcessEnv, profileName: string, profile: { provider?: string | null; model?: string | null } | null, route: TurnRoute): TurnConnection[] {
+  // Member accounts (Mission Control) route ONLY on the member's
+  // own key: one route, endpoint and model from the member record,
+  // the key resolved from the vault by name at call time. The house
+  // environment key is never a member route, and a member with no
+  // key gets an unavailable route whose reason is plain words the
+  // app can show as-is. Fallback files do not apply to members -
+  // their key is the whole arrangement.
+  const member = memberForProfile(root, profileName);
+  if (member) {
+    if (member.keySource === "managed") {
+      // Managed path: the house provider, metered per account
+      // against config caps. The meter is the session-cap ledger
+      // summed over the member's own chats; when it is spent the
+      // route is unavailable with plain words, and the member's
+      // own key remains one switch away.
+      const cfg = managedConfig(env);
+      if (!cfg.enabled) {
+        return [{
+          providerId: MEMBER_PROVIDER_ID, endpoint: null, keyEnv: "", key: "absent",
+          model: null, tier: tierForRoute(route), source: "profile",
+          unavailable: "Running on our key is not open yet. Add your own key and SAM is ready today.",
+        }];
+      }
+      const status = memberManagedStatus(root, member, env);
+      if (status.spent) {
+        return [{
+          providerId: MEMBER_PROVIDER_ID, endpoint: null, keyEnv: "", key: "absent",
+          model: null, tier: tierForRoute(route), source: "profile",
+          unavailable: "Today's included usage is used up. Add your own key to keep going, or come back tomorrow.",
+        }];
+      }
+      return [resolveTurnConnection(root, env, null, route)];
+    }
+    const conn = memberConnection(root, member);
+    if ("unavailable" in conn) {
+      return [{
+        providerId: MEMBER_PROVIDER_ID, endpoint: null, keyEnv: "", key: "absent",
+        model: null, tier: tierForRoute(route), source: "profile", unavailable: conn.unavailable,
+      }];
+    }
+    return [{
+      providerId: MEMBER_PROVIDER_ID, endpoint: conn.endpoint, keyEnv: "", key: "present",
+      model: conn.model, tier: tierForRoute(route), source: "profile", vaultKey: conn.vaultKey,
+    }];
+  }
   const primary = resolveTurnConnection(root, env, profile, route);
   const out: TurnConnection[] = [primary];
   const seen = new Set([primary.providerId + "\n" + (primary.model ?? "")]);

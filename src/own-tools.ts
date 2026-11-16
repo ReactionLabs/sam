@@ -31,6 +31,7 @@ import { cloneIntoCodeRoot, codeCommandNames, codeFileExists, codeRoot, codeWrit
 import { runSense, sensesStatus, type SenseName } from "./senses.js";
 import { buildBrief } from "./brief.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
+import { isMemberProfile } from "./members.js";
 
 // SAM's own tools: the other half of the tool loop. MCP connectors reach OUT to
 // a person's data services; these reach IN to SAM itself - its leveled memory
@@ -368,7 +369,52 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
   }catch{return {error:"Linked exchange failed"};}
   finally{collabInFlight.delete(guard);}
 }
+// Member fence (Mission Control, Dip ruling 2026-11-15): a member
+// account's SAM gets a real but bounded hand - its own memory,
+// chats, artifacts, notes, web reading, background handoffs, and
+// proposals the MEMBER approves in their own app. Everything that
+// touches the machine itself (the code root, coding loops, worker
+// pools, the owner's mailbox and brief, skill installs, links to
+// other profiles) is refused at dispatch, keyed by ACTOR so chat,
+// background, and heartbeat turns are all fenced the same way. The
+// catalog filter in the chat loop keeps refused tools out of the
+// member's tool list entirely; this dispatch check is the wall
+// behind it.
+export const MEMBER_TOOL_ALLOWLIST: ReadonlySet<string> = new Set([
+  "sam_memory_search", "sam_memory_list", "sam_search_chats", "sam_manage_chats",
+  "sam_artifact", "sam_save_note", "sam_patch_note", "sam_open_loop", "sam_react",
+  "sam_list_skills", "sam_read_skill", "sam_reach", "sam_handoff_task", "sam_propose_action",
+]);
+// Proposal kinds a member's SAM may raise: self-scoped kinds only.
+// Code, git, spawning, pairing, delegating, and skill installs are
+// the operator's world, never a member's - not even with the
+// member's own approval, because approval here is the member's and
+// the blast radius is the host's.
+const MEMBER_PROPOSAL_KINDS: ReadonlySet<string> = new Set(["note", "law", "draft", "heartbeat"]);
+export function memberToolRefusal(root: string, actor: string, name: string, args: Record<string, unknown>): { error: string } | null {
+  if (!isMemberProfile(root, actor)) return null;
+  if (!MEMBER_TOOL_ALLOWLIST.has(name)) {
+    return { error: "That tool is not part of a member SAM's hand. Work with the tools you have: your memory, your chats, artifacts, notes, web reading, background handoffs, and proposals." };
+  }
+  if (name === "sam_propose_action") {
+    const kind = typeof args.kind === "string" ? args.kind : "";
+    if (!MEMBER_PROPOSAL_KINDS.has(kind)) {
+      return { error: "A member SAM may only propose a note, a law change, a draft, or a scheduled check-in. That kind of proposal belongs to the operator." };
+    }
+    if (kind === "heartbeat") {
+      // A heartbeat runs turns for the profile named in its detail;
+      // a member's heartbeat may only ever name the member.
+      let profile = "";
+      try { profile = String((JSON.parse(typeof args.detail === "string" ? args.detail : "{}") as { profile?: unknown }).profile ?? ""); } catch { profile = ""; }
+      if (profile !== actor) return { error: "A member's scheduled check-in can only run for their own SAM." };
+    }
+  }
+  return null;
+}
+
 export async function executeOwnToolAsync(root:string,actor:string,name:string,args:Record<string,unknown>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,userMessageId?:string):Promise<unknown>{
+  const refusal=memberToolRefusal(root,actor,name,args);
+  if(refusal)return refusal;
   const result=await executeOwnToolAsyncInner(root,actor,name,args,runTurn,chatId,userMessageId);
   // Source citations (Dip ruling 2026-11-14): a source-bearing
   // result is registered against this reply's run and annotated
@@ -605,6 +651,8 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
   }catch{return {error:"Tool failed"};}
 }
 export function executeOwnTool(root:string,actor:string,name:string,args:Record<string,unknown>,chatId?:string,userMessageId?:string):unknown{
+  const refusal=memberToolRefusal(root,actor,name,args);
+  if(refusal)return refusal;
   const result=executeOwnToolInner(root,actor,name,args,chatId,userMessageId);
   // Source citations (Dip ruling 2026-11-14): same registration +
   // annotation seam as the async dispatch above.
@@ -661,7 +709,8 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
  // onlyTools is the child-turn allowlist: a helper cannot call a tool
  // its parent did not hand it. Omitted means the full own-tool set.
  const allow=onlyTools?new Set(onlyTools):null;
- const allDefs=ownToolsFor(root).filter(def=>!allow||allow.has(toolNameOf(def)));
+ const memberActor=isMemberProfile(root,actor);
+ const allDefs=ownToolsFor(root).filter(def=>(!allow||allow.has(toolNameOf(def)))&&(!memberActor||MEMBER_TOOL_ALLOWLIST.has(toolNameOf(def))));
  const ephemeralLoaded=new Set<string>();
  const currentLoaded=()=>new Set([...(chatId?loadedTools(root,chatId):[]),...ephemeralLoaded]);
  const initialPartition=partitionTools(allDefs,currentLoaded());
