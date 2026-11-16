@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
@@ -11,9 +11,30 @@ import { recordActivity } from "./activity.js";
 // no record carries no restriction; a note is how the owner teaches SAM the
 // boundaries person by person. Notes are owner words (CLI / owner surfaces),
 // never something a chat or a visitor can set.
+//
+// The Address Book (Dip, 2026-11-16): the same store is also SAM's people
+// file, modeled on Mita's people files. A record may carry who the person
+// is to the owner (relationship, only ever in the owner's own words -
+// never guessed), contact details the owner actually gave, fact lines
+// learned in conversation (notes), a special flag for the inner circle,
+// and mention bookkeeping (first / last mentioned, the source chats each
+// fact came from). The store stays the source of truth; every mutation
+// re-renders the human-readable face - .sam/address-book/<slug>.md per
+// person plus an INDEX.md ordered by closeness, special people first -
+// in the same act, so the files can never drift from the store. Unknown
+// fields stay absent: a card never invents a relationship or a detail.
 export interface Contact {
   name: string; display: string; note: string; noDraft: boolean;
   createdAt: string; updatedAt: string;
+  relationship?: string;
+  email?: string;
+  phone?: string;
+  handles?: string[];
+  notes?: string[];
+  special?: boolean;
+  firstMentionedAt?: string;
+  lastMentionedAt?: string;
+  sourceChats?: string[];
 }
 function contactsPath(root: string): string { return join(resolve(root), ".sam", "contacts.json"); }
 function contactsDbFile(root: string): string { return join(resolve(root), ".sam", "contacts.db"); }
@@ -44,6 +65,7 @@ function openContactsStore(root: string): Database.Database {
   if (lstatSync(dir).isSymbolicLink()) throw new Error("Unsafe SAM state directory");
   const db = openDatabase(contactsDbFile(root));
   db.exec("CREATE TABLE IF NOT EXISTS contacts (name TEXT PRIMARY KEY, data TEXT NOT NULL)");
+  db.exec("CREATE TABLE IF NOT EXISTS contact_offers (name TEXT PRIMARY KEY, state TEXT NOT NULL, at TEXT NOT NULL)");
   migrateLegacyContacts(db, root);
   return db;
 }
@@ -176,6 +198,7 @@ export function updateContact(root: string, name: string, patch: Partial<Contact
     if (!current) return null;
     const next: Contact = { ...current, ...patch, name: current.name };
     updateContactRow(root, next);
+    renderAddressBookQuietly(root);
     return next;
   } catch (error) { failContact(root, "write", error); }
 }
@@ -185,26 +208,86 @@ export function getContact(root: string, name: string): Contact | null {
   try { return findContactRow(root, slug); }
   catch (error) { failContact(root, "read", error); }
 }
-export function upsertContact(root: string, input: { name: string; note?: string; noDraft?: boolean }): Contact {
+export interface ContactUpsertInput {
+  name: string;
+  note?: string;
+  noDraft?: boolean;
+  relationship?: string;
+  email?: string;
+  phone?: string;
+  handles?: string[];
+  /** Fact lines to APPEND to the person's notes (never a replace). */
+  notes?: string[];
+  special?: boolean;
+  /** The chat this save came from: stamps the mention + source. */
+  sourceChat?: string;
+}
+function cleanField(value: string | undefined, cap: number, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  const clean = value.trim();
+  if (clean.length > cap) throw new Error("Invalid contact " + label);
+  return clean ? clean : undefined;
+}
+export function upsertContact(root: string, input: ContactUpsertInput): Contact {
   const display = (input.name ?? "").trim();
   const slug = contactSlug(display);
   if (!slug || display.length > 120) throw new Error("Invalid contact name");
   const note = (input.note ?? "").trim();
   if (note.length > 2000) throw new Error("Invalid contact note");
+  const relationship = cleanField(input.relationship, 200, "relationship");
+  const email = cleanField(input.email, 200, "email");
+  const phone = cleanField(input.phone, 60, "phone");
+  let handles: string[] | undefined;
+  if (input.handles !== undefined) {
+    handles = input.handles.map(h => (h ?? "").trim()).filter(Boolean);
+    if (handles.length > 10 || handles.some(h => h.length > 120)) throw new Error("Invalid contact handles");
+    if (!handles.length) handles = undefined;
+  }
+  let newNotes: string[] | undefined;
+  if (input.notes !== undefined) {
+    newNotes = input.notes.map(n => (n ?? "").trim()).filter(Boolean);
+    if (newNotes.some(n => n.length > 1000)) throw new Error("Invalid contact fact note");
+    if (!newNotes.length) newNotes = undefined;
+  }
   const now = new Date().toISOString();
   try {
     const found = findContactRow(root, slug);
     if (found) {
       if (input.note !== undefined) found.note = note;
       if (input.noDraft !== undefined) found.noDraft = !!input.noDraft;
+      if (relationship !== undefined) found.relationship = relationship;
+      if (email !== undefined) found.email = email;
+      if (phone !== undefined) found.phone = phone;
+      if (handles !== undefined) found.handles = handles;
+      if (input.special !== undefined) found.special = !!input.special;
+      if (newNotes) found.notes = [...(found.notes ?? []), ...newNotes].slice(-100);
+      if (!found.firstMentionedAt) found.firstMentionedAt = found.createdAt;
+      if (input.sourceChat) {
+        found.lastMentionedAt = now;
+        const chats = new Set(found.sourceChats ?? []);
+        chats.add(input.sourceChat);
+        found.sourceChats = [...chats].slice(-20);
+      }
       found.display = display; found.updatedAt = now;
       updateContactRow(root, found);
       recordActivity(root, "owner", "contact", "Updated contact " + slug + (found.noDraft ? " (no drafts)" : ""));
+      renderAddressBookQuietly(root);
       return found;
     }
-    const contact: Contact = { name: slug, display, note, noDraft: !!input.noDraft, createdAt: now, updatedAt: now };
+    const contact: Contact = {
+      name: slug, display, note, noDraft: !!input.noDraft, createdAt: now, updatedAt: now,
+      firstMentionedAt: now, lastMentionedAt: now,
+      ...(relationship ? { relationship } : {}),
+      ...(email ? { email } : {}),
+      ...(phone ? { phone } : {}),
+      ...(handles ? { handles } : {}),
+      ...(newNotes ? { notes: newNotes } : {}),
+      ...(input.special !== undefined ? { special: !!input.special } : {}),
+      ...(input.sourceChat ? { sourceChats: [input.sourceChat] } : {}),
+    };
     insertContactRow(root, contact);
     recordActivity(root, "owner", "contact", "Added contact " + slug + (contact.noDraft ? " (no drafts)" : ""));
+    renderAddressBookQuietly(root);
     return contact;
   } catch (error) { failContact(root, "write", error); }
 }
@@ -219,10 +302,129 @@ export function removeContact(root: string, name: string): boolean {
   } catch (error) { failContact(root, "write", error); }
   finally { db!.close(); }
   recordActivity(root, "owner", "contact", "Removed contact " + slug);
+  renderAddressBookQuietly(root);
   return true;
 }
 // The one hard rule a note can carry: this person never gets a draft.
 export function draftBlockedFor(root: string, name: string): Contact | null {
   const contact = getContact(root, name);
   return contact && contact.noDraft ? contact : null;
+}
+
+// ----------------------------------------------------------------
+// Address Book: offer bookkeeping + the people-file face of the store.
+// ----------------------------------------------------------------
+
+// The one-time offer (the ambiguous-case fallback): when a person
+// comes up with a possible-but-unclear fact, SAM may offer ONCE to
+// save them. The offer and the owner's answer are recorded here, in
+// the same store, so "never offer again after a no" is a fact the
+// runtime can check, not a hope about the model's memory. A person
+// with an entry needs no offer; a person with no entry and no row
+// here has never been offered.
+export type ContactOfferState = "offered" | "declined";
+export function contactOfferState(root: string, name: string): ContactOfferState | null {
+  const slug = contactSlug(name);
+  if (!slug || !storeExists(root)) return null;
+  try {
+    const db = openContactsStore(root);
+    try {
+      const row = db.prepare("SELECT state FROM contact_offers WHERE name = ?").get(slug) as { state: string } | undefined;
+      return row && (row.state === "offered" || row.state === "declined") ? row.state : null;
+    } finally { db.close(); }
+  } catch (error) { failContact(root, "read", error); }
+}
+export function recordContactOffer(root: string, name: string, state: ContactOfferState): void {
+  const slug = contactSlug(name);
+  if (!slug) throw new Error("Invalid contact name");
+  try {
+    const db = openContactsStore(root);
+    try {
+      db.prepare("INSERT INTO contact_offers (name, state, at) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET state = excluded.state, at = excluded.at")
+        .run(slug, state, new Date().toISOString());
+    } finally { db.close(); }
+  } catch (error) { failContact(root, "write", error); }
+}
+
+// Closeness order for every people surface (index, list, recall):
+// special people first, then most recently mentioned, then name.
+export function addressBookOrder(items: Contact[]): Contact[] {
+  const stamp = (c: Contact): string => c.lastMentionedAt ?? c.updatedAt ?? c.createdAt ?? "";
+  return [...items].sort((a, b) =>
+    Number(b.special ?? false) - Number(a.special ?? false)
+    || stamp(b).localeCompare(stamp(a))
+    || a.display.localeCompare(b.display));
+}
+
+export function addressBookDir(root: string): string { return join(resolve(root), ".sam", "address-book"); }
+export function personFilePath(root: string, slug: string): string { return join(addressBookDir(root), slug + ".md"); }
+
+function day(iso: string | undefined): string { return iso ? iso.slice(0, 10) : ""; }
+export function renderPersonFile(contact: Contact): string {
+  const lines: string[] = ["# " + contact.display + (contact.special ? " ★" : ""), ""];
+  if (contact.special) lines.push("★ Special: inner circle", "");
+  if (contact.relationship) lines.push("- Relationship: " + contact.relationship);
+  if (contact.email) lines.push("- Email: " + contact.email);
+  if (contact.phone) lines.push("- Phone: " + contact.phone);
+  if (contact.handles?.length) lines.push("- Handles: " + contact.handles.join(", "));
+  const first = contact.firstMentionedAt ?? contact.createdAt;
+  if (first) lines.push("- First mentioned: " + day(first));
+  const last = contact.lastMentionedAt ?? contact.updatedAt;
+  if (last) lines.push("- Last mentioned: " + day(last));
+  if (contact.sourceChats?.length) lines.push("- Source chats: " + contact.sourceChats.join(", "));
+  if (contact.notes?.length) {
+    lines.push("", "## Notes", "");
+    for (const fact of contact.notes) lines.push("- " + fact);
+  }
+  if (contact.note || contact.noDraft) {
+    lines.push("", "## Permission note", "");
+    if (contact.note) lines.push(contact.note);
+    if (contact.noDraft) lines.push("NO DRAFTS: never draft anything to this person.");
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
+}
+export function renderAddressBookIndex(items: Contact[]): string {
+  const lines: string[] = [
+    "# Address Book",
+    "",
+    "The owner's people file: one page per person, closest first. ★ marks the special people, the inner circle, and they sit on top.",
+    "",
+  ];
+  if (!items.length) lines.push("No one is in the Address Book yet. People land here as they come up in conversation, with the facts the owner actually stated.");
+  for (const contact of addressBookOrder(items)) {
+    const detail = [contact.relationship, contact.email ?? contact.phone].filter(Boolean).join(" · ");
+    lines.push("- " + (contact.special ? "★ " : "") + "**" + contact.display + "**" + (detail ? " — " + detail : "") + " (" + contact.name + ".md)");
+  }
+  return lines.join("\n") + "\n";
+}
+// The files are generated, never hand-edited by any code path: a
+// render rewrites every person's page plus the index from the
+// store's current rows and deletes pages whose person is gone, so
+// the directory can never drift from the store. The CLI export
+// verb and every store mutation ride this one door.
+export function writeAddressBook(root: string): { dir: string; people: number } {
+  const items = listContacts(root);
+  const dir = addressBookDir(root);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const keep = new Set<string>(["INDEX.md"]);
+  for (const contact of items) {
+    keep.add(contact.name + ".md");
+    writeFileSync(personFilePath(root, contact.name), renderPersonFile(contact), { mode: 0o600 });
+  }
+  writeFileSync(join(dir, "INDEX.md"), renderAddressBookIndex(items), { mode: 0o600 });
+  for (const entry of readdirSync(dir)) {
+    if (entry.endsWith(".md") && !keep.has(entry)) { try { unlinkSync(join(dir, entry)); } catch { /* a stale page that will not die is untidy, not fatal */ } }
+  }
+  return { dir, people: items.length };
+}
+// Mutations re-render in the same act; a render failure never
+// unmakes the store write (the store is the truth), but it is
+// never silent either: one address-book-failed line, and the CLI
+// export verb is the standing repair.
+function renderAddressBookQuietly(root: string): void {
+  try { writeAddressBook(root); }
+  catch (error) {
+    const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim() || "unknown error";
+    try { recordActivity(root, "sam", "address-book-failed", ("Address Book write failed: " + reason).slice(0, 200)); } catch { /* the ledger never breaks a write */ }
+  }
 }

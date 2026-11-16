@@ -166,6 +166,23 @@ export function describeToolSources(name: string, args: Record<string, unknown>,
       if (!rec || typeof rec.text !== "string") return [];
       return [{ kind: "doc", descriptor: "morning brief (sam_brief)" }];
     }
+    case "sam_address_book": {
+      // The Address Book (2026-11-16): a recall (show) grounds the
+      // person's entry, a list grounds the index - the reply cites
+      // the people file it actually read. A save is an action and
+      // grounds nothing, exactly like every other write.
+      const action = argStr("action");
+      if (action === "show" && rec && rec.found === true) {
+        const display = typeof rec.display === "string" ? rec.display : argStr("name");
+        const slug = typeof rec.slug === "string" ? rec.slug : "";
+        if (!display) return [];
+        return [{ kind: "doc", descriptor: capDescriptor("Address Book entry: " + display + (slug ? " (.sam/address-book/" + slug + ".md)" : "")) }];
+      }
+      if (action === "list") {
+        return [{ kind: "doc", descriptor: "Address Book index (.sam/address-book/INDEX.md)" }];
+      }
+      return [];
+    }
     default:
       return [];
   }
