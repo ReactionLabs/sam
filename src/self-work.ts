@@ -640,6 +640,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The registry still fails closed exactly as before: a failed read rethrows instead of folding the store as no authored skills (which would silently orphan SAM's own skills from the registry that alone lets SAM patch them, so the next patch proposal would refuse SAM's own playbook as someone else's), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries an authored record (names, actors, and stamps are the install's data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no authored skills with no line, while validation errors (skill-draft shape and secret-scan refusals) still ledger nothing",
      "The full suite is green, including the skill authors store failure-ledger tests"]);
+  if (key.startsWith("skill-curator-store-failed:")) return base(
+    ["skill-author.ts", "heartbeat.ts", "status.ts", "cli.ts"],
+    "Skill curator store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the skill curator store (.sam/skill-curator.db) must open, read, and write instead of dying at that seam - this store is the curator's findings state (one row: lastRun, the changed-set hash, and the findings), read by the dashboard status payload and the CLI overview and written by every heartbeat consolidation tick, the CLI curator verb, and the sam-curator script job, so while it is dead curator reads die with the seam unnamed on the direct paths, and a reader folding it as no findings would silently hide standing findings dressed as a clean library, or reset the prior hash every tick so a standing set re-ledgers every 15 minutes.",
+    ["The next curator runs, status reads, and CLI skills views resolve their findings state again instead of skill-curator-store-failed lines",
+     "Exactly one skill-curator-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no findings (which would silently hide standing findings dressed as a clean library), consolidation still ledgers its own consolidate-failed:curator sub-step line when a tick hits the dead store (one line at each seam, each exactly once), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a finding record (details and suggested patches quote skill descriptions, the install's data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no state with no line and creates nothing, while torn rows still parse forgiving",
+     "The full suite is green, including the skill curator store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1049,6 +1057,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Skill authors store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "skill-authors-store-failed:" + phase, label: "skill authors store failures (" + phase + " step)" };
+    }
+    case "skill-curator-store-failed": {
+      const m = summary.match(/^Skill curator store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "skill-curator-store-failed:" + phase, label: "skill curator store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);

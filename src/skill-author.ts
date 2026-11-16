@@ -560,6 +560,79 @@ function curatorDbFile(root: string): string { return join(resolve(root), ".sam"
 // with neither file creates nothing. The P9 backup snapshots
 // every .sam/*.db generically, so the migrated store is carried
 // with no backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 23:04 EST): the skill curator store holds the
+// curator's findings state - lastRun, the changed-set
+// hash, and the findings themselves - and every touch
+// opened it raw. curatorFindings rides status.ts (the
+// dashboard status payload and the CLI overview) and
+// the CLI skills curator-findings verb; runSkillCurator
+// rides every heartbeat consolidation tick, the CLI
+// curator verb, and the sam-curator script job. A dead
+// skill-curator.db threw into whichever catch wrapped
+// the call with the seam unnamed (consolidation's own
+// catch ledgers consolidate-failed:curator, a different
+// seam - the sub-step, not the store - so the class was
+// countable on that one path only), and no
+// skill-curator-store-failed kind existed, so direct
+// status and CLI reads died uncounted, and any reader
+// folding a dead store as "no findings" would hide
+// standing findings dressed as a clean library - or,
+// inside runSkillCurator, reset the prior hash every
+// tick so a standing finding set re-ledgers every 15
+// minutes, the exact nagging the hash exists to
+// prevent. Now the store's touches own their failure
+// (the skill-authors precedent): a failed touch
+// ledgers ONE skill-curator-store-failed line (phase
+// read for readCuratorState, write for runSkillCurator's
+// persist; actor sam; the verbatim reason collapsed and
+// capped; never any finding record - details and
+// suggested patches quote skill descriptions, the
+// install's data, not failure data), tags the error,
+// and rethrows exactly, so every caller's handling is
+// unchanged (consolidation still ledgers its own
+// sub-step line when a tick hits the dead store - one
+// line at each seam, each exactly once) and reads
+// still fail closed. A touch already ledgered by an
+// inner door keeps its one line and gains no second
+// (runSkillCurator's prior-state read rides
+// readCuratorState). An absent store still reads as
+// no state with no line and creates nothing, and torn
+// row payloads still parse forgiving - only the store
+// touch is guarded.
+export type SkillCuratorStorePhase = "read" | "write";
+
+export function skillCuratorStoreFailureSummary(phase: SkillCuratorStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Skill curator store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSkillCuratorStoreFailure(root: string, phase: SkillCuratorStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "skill-curator-store-failed", skillCuratorStoreFailureSummary(phase, reason));
+}
+
+function tagSkillCuratorStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { skillCuratorStoreLedgered?: boolean }).skillCuratorStoreLedgered = true;
+  }
+}
+
+export function isSkillCuratorStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { skillCuratorStoreLedgered?: boolean }).skillCuratorStoreLedgered === true;
+}
+
+function failSkillCuratorStore(root: string, phase: SkillCuratorStorePhase, error: unknown): never {
+  if (!isSkillCuratorStoreLedgered(error)) recordSkillCuratorStoreFailure(root, phase, error);
+  tagSkillCuratorStoreLedgered(error);
+  throw error;
+}
+
+function openCuratorGuarded(root: string, phase: SkillCuratorStorePhase): Database.Database {
+  try { return openCuratorStore(root); }
+  catch (error) { failSkillCuratorStore(root, phase, error); }
+}
 function openCuratorStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -601,11 +674,12 @@ function curatorStoreExists(root: string): boolean {
 // install with no store at all creates nothing.
 export function readCuratorState(root: string): CuratorState | null {
   if (!curatorStoreExists(root)) return null;
-  const db = openCuratorStore(root);
+  const db = openCuratorGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM skill_curator WHERE id = 1").get() as { data: string } | undefined;
     return row ? rowToCuratorState(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failSkillCuratorStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function curatorFindings(root: string): CuratorFinding[] {
   return readCuratorState(root)?.findings ?? [];
@@ -620,10 +694,11 @@ export function runSkillCurator(root: string): { findings: CuratorFinding[]; cha
   const priorHash = readCuratorState(root)?.hash ?? "";
   const changed = hash !== priorHash;
   const state: CuratorState = { lastRun: new Date().toISOString(), hash, findings };
-  const db = openCuratorStore(root);
+  const db = openCuratorGuarded(root, "write");
   try {
     db.prepare("INSERT INTO skill_curator (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(state));
-  } finally { db.close(); }
+  } catch (error) { failSkillCuratorStore(root, "write", error); }
+  finally { db.close(); }
   if (changed && findings.length) {
     recordActivity(root, "sam", "skill-curator", "Skill curator flagged " + findings.length + " issue(s): " + findings.map(f => f.kind + " (" + f.skills.join(", ") + ")").join("; ").slice(0, 300));
   }
