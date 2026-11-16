@@ -15,7 +15,8 @@ import { listActions, decideAction } from "./actions.js";
 import { recordActivity } from "./activity.js";
 import type { Preference } from "./preferences.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from "./dashboard-config.js";
 import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } from "./chat-citations.js";
 import { autotitleChat } from "./chat-title.js";
@@ -106,6 +107,8 @@ function loadChatThread(workspace:string,chatId:string){
   }finally{db.close();}
 }
 
+const DASHBOARD_FONT_DIR=join(dirname(fileURLToPath(import.meta.url)),"..","fonts");
+const DASHBOARD_FONT_FILES=new Set(["lilita-one-400.woff2","libre-franklin-400.woff2","libre-franklin-500.woff2","libre-franklin-600.woff2","libre-franklin-800.woff2","ibm-plex-mono-400.woff2","ibm-plex-mono-500.woff2","ibm-plex-mono-600.woff2","vt323-400.woff2"]);
 export async function serveDashboard(root:string,port=4317):Promise<void>{
   if(!Number.isInteger(port)||port<1024||port>65535)throw new Error("Invalid dashboard port");
   const workspace=resolve(root);
@@ -385,6 +388,17 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
     // bookmark /sam (the Rust CLI, a reloaded page) get the current token URL.
     if(req.url==="/sam"||req.url==="/sam/"){res.writeHead(302,{Location:"/dashboard/"+token});res.end();return;}
     if(req.url===`/dashboard/${token}`){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(dashboardHtml.replaceAll("__SAM_BUILD_ID__",dashboardBuildId));return;}
+    // Design Bible typefaces (self-hosted, OFL): the page's
+    // @font-face URLs resolve to /dashboard/fonts/<file>. The
+    // allowlist is the nine shipped files and nothing else - no
+    // path ever leaves the fonts folder, and a font file carries
+    // no data, so this route needs no token.
+    if(req.url&&req.url.startsWith("/dashboard/fonts/")){
+      const name=req.url.slice("/dashboard/fonts/".length);
+      if(!DASHBOARD_FONT_FILES.has(name)){res.writeHead(404);res.end();return;}
+      try{const data=readFileSync(join(DASHBOARD_FONT_DIR,name));res.setHeader("Content-Type","font/woff2");res.setHeader("Cache-Control","public, max-age=31536000, immutable");res.end(data);}catch{res.writeHead(404);res.end();}
+      return;
+    }
     // Artifact reading view at the stable, token-free path
     // /artifact/<uuid>: the link survives dashboard token rotation the
     // same way /sam does, and the unguessable id is the capability, as

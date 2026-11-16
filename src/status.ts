@@ -57,6 +57,7 @@ import { readLoopAudit } from "./loop-audit.js";
 import { readEvalBattery } from "./eval-battery.js";
 import { answerJudgeSummary, type AnswerJudgeSummary } from "./answer-judge.js";
 import { vaultStatus } from "./vault.js";
+import { listBackups } from "./backup.js";
 import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 // One status payload (fix-list item 3). The dashboard route /api/status
@@ -162,6 +163,30 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     models: modelRoutingTable(),
     usage: usageSummary(root),
     usageToday: usageToday(root),
+    // Security & readiness (Dip ruling 2026-11-15): the controls
+    // Sam already has, stated from the stores themselves - vault
+    // metadata only (names and purposes, never a value) and the
+    // backup shelf (the workspace's backup folder, or one beside
+    // it). A dead
+    // store degrades its row to absent instead of taking the
+    // payload down; the panel reads "not found" as itself.
+    readiness: (() => {
+      let vault: { held: number; names: string[] } = { held: 0, names: [] };
+      try { const vs = vaultStatus(root); vault = { held: vs.credentials.length, names: vs.credentials.map(c => c.name) }; } catch { /* ledgered in the vault */ }
+      let backups: { count: number; newest: { archive: string; created_at: string; bytes: number } | null } = { count: 0, newest: null };
+      try {
+        // The shelf the operator actually keeps: the workspace's own
+        // backup folder first, then a backups folder beside the
+        // workspace (the box layout: home and backups as siblings
+        // under one root). An empty first shelf never masks real
+        // archives sitting in the second.
+        let shelf = listBackups(join(root, "backups"));
+        if (!shelf.length) { try { shelf = listBackups(join(root, "..", "backups")); } catch { /* no sibling shelf */ } }
+        const newest = shelf.length ? shelf[shelf.length - 1] : null;
+        backups = { count: shelf.length, newest: newest ? { archive: newest.archive, created_at: newest.created_at, bytes: newest.bytes } : null };
+      } catch { /* no shelf readable: the row says so */ }
+      return { vault, backups };
+    })(),
     drafts: listDrafts(root).slice(-20),
     artifacts,
     contacts: listContacts(root),
