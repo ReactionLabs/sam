@@ -3,6 +3,7 @@ import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { executeOwnToolAsync, OWN_TOOLS, ownToolsChat } from "./own-tools.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, partitionTools, toolNameOf } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { turnRoutes } from "./failover.js";
@@ -522,6 +523,29 @@ function openSubagent(root: string, input: SpawnInput): Subagent {
   return item;
 }
 
+// Sub-agent failures carry their cause (gap found 2026-11-16,
+// hourly run 14:04 EST): driveSubagent's catch took
+// error.message alone over a child chat turn that can die on
+// transport, and that one bare message fed three records -
+// the subagent-failed activity line, the helper's stored
+// result, and the finishLoop journal fold - so a child dying
+// on an undici failure read "fetch failed" in all three and
+// named nothing. The reason now composes through errorReason
+// (the 04:04 bridge seam): the cause chain is walked bounded
+// and deduped, errno-style codes are appended, and bot-token
+// segments are redacted, so a child dying on a DNS failure
+// names the lookup in all three records in the same shape.
+// Causeless errors read byte-identically, a non-Error throw
+// keeps the existing "Sub-agent failed" fallback, and the
+// helper's prompt never enters any failure record.
+export function subagentFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Sub-agent failed";
+}
+
+export function subagentFailedSummary(id: string, error: unknown): string {
+  return "Sub-agent " + id.slice(0, 8) + " failed: " + subagentFailureReason(error).slice(0, 180);
+}
+
 async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Promise<Subagent> {
   try {
     const env = opts?.env ?? process.env;
@@ -557,7 +581,7 @@ async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Pr
     if (item.chatId && item.quiet && !item.parentId) await postFoldedAnswer(root, item, opts?.fold, env);
     return item;
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Sub-agent failed";
+    const message = subagentFailureReason(error);
     const latest = read(root).find(s => s.id === item.id);
     if (latest?.status === "cancelled") {
       item.status = "cancelled";
@@ -570,7 +594,7 @@ async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Pr
     item.finishedAt = new Date().toISOString();
     put(root, item);
     finishLoop(root, item.loopId, "failed", message);
-    recordActivity(root, item.profile, "subagent-failed", "Sub-agent " + item.id.slice(0, 8) + " failed: " + message.slice(0, 180));
+    recordActivity(root, item.profile, "subagent-failed", subagentFailedSummary(item.id, error));
     throw error;
   } finally {
     live.delete(item.id);
