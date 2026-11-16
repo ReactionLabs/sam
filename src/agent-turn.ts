@@ -113,6 +113,22 @@ export function turnFailureSummary(chatId:string,route:TurnRoute,error:unknown):
   // still never enters the line.
   return "Turn failed in chat "+chatId.slice(0,8)+" ("+route+"): "+errorReason(error);
 }
+export function turnFailureNoteSummary(chatId:string,error:unknown):string{
+  // The note line's reason rides the same seam (gap found
+  // 2026-11-16, hourly run 17:04 EST): it took error.message
+  // alone, so a turn dying on transport in the note branch
+  // ledgered the bare wrapper beside a turn-failed line that
+  // (since 09:04) names the cause - the same death, two
+  // lines, one diagnosable and one not. errorReason walks
+  // the cause chain (bounded, deduped), appends errno-style
+  // codes, redacts bot-token segments, and collapses
+  // whitespace; causeless errors and plain strings read
+  // byte-identically, and the 120-char reason cap and the
+  // prefix are exactly the old shape. The note text posted
+  // into the chat is untouched - the raw error still never
+  // reaches the owner; this line is the internal record.
+  return "Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+errorReason(error).slice(0,120);
+}
 export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,error:unknown):void{
   let actor="sam";
   try{
@@ -494,7 +510,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
             store.add(chatId,"assistant",noteText);
           }finally{store.close();}
         }catch{/* the note never breaks the failure path: the throw below still marks the message failed */}
-        try{recordActivity(root,profileName,"turn-failure-note","Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+(error instanceof Error?error.message:String(error)).slice(0,120));}catch{/* the ledger never breaks a turn */}
+        try{recordActivity(root,profileName,"turn-failure-note",turnFailureNoteSummary(chatId,error));}catch{/* the ledger never breaks a turn */}
       }
       // A turn that dies mid-flight still spent what it spent; the
       // session ledger records it so the caps see the true total.
