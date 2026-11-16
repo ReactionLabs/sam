@@ -122,7 +122,9 @@ test("dashboard page: sidebar sections actually navigate (owner defect 2026-11-0
   assert.match(dashboardHtml,/matchMedia\('\(max-width:820px\)'\)/);
   assert.match(dashboardHtml,/setView\('activity'\)/);
   assert.match(dashboardHtml,/classList\.add\('flash'\)/);
-  assert.match(dashboardHtml,/\.info\.flash\{box-shadow:0 0 0 2px #e8ae65\}/);
+  // Pin migrated 2026-11-15 (Mission Control reskin): the flash ring
+  // is the Bible focus color, Mustard, not the old restyle's tan.
+  assert.match(dashboardHtml,/\.info\.flash\{box-shadow:0 0 0 2px #D5AC40\}/);
   // The Skills block renders readable rows, not a JSON dump.
   assert.match(dashboardHtml,/No skills installed yet/);
   assert.doesNotMatch(dashboardHtml,/\['missions','skills','schedules','logs'\]/);
@@ -144,10 +146,14 @@ test("dashboard page: skill visibility + reaction badges surface (2026-11-10)", 
 test("dashboard page: calm presentation and working state (sprint 3 item 6)", () => {
   // The saturated user bubble is gone. One quiet accent, hairline
   // layers, and a composer that floats over the thread.
+  // Pin migrations 2026-11-15 (Mission Control reskin, Design Bible):
+  // the accent token now defers to the theme's primary-ground role,
+  // and the operator bubble is the Bible's Burnt Orange panel with
+  // Ink text (Bible section 8.2) instead of the old restyle's brown.
   assert.doesNotMatch(dashboardHtml, /#0864cc/i);
-  assert.match(dashboardHtml, /--accent:#c6b59a/);
+  assert.match(dashboardHtml, /--accent:var\(--sam-orange\)/);
   assert.match(dashboardHtml, /\.composer\{[^}]*position:absolute/);
-  assert.match(dashboardHtml, /\.bubble\.user\{[^}]*#2c2a26/);
+  assert.match(dashboardHtml, /\.bubble\.user\{[^}]*#E86C25/);
   // The wait matches the CLI treatment: braille frames, rotating
   // verbs, a live elapsed timer, then "Thought for Ns" when the
   // reply lands. The reply still arrives through setText.
@@ -166,6 +172,34 @@ test("dashboard page: calm presentation and working state (sprint 3 item 6)", ()
   assert.match(dashboardHtml, /function openConfigPanel\(/);
   assert.match(dashboardHtml, /function fallbackCopyText\(text\)/);
   assert.match(dashboardHtml, /id="configPanel"/);
+});
+
+test("dashboard page: Mission Control skin - Command default, groovy themes opt-in, readiness panel (2026-11-15)",()=>{
+  // Four postures, one component set: Command is the factory
+  // default (no data-theme attribute; :root carries it), the three
+  // groovy themes are value blocks a user opts into, remembered in
+  // localStorage. Discotheque is spelled the period way.
+  assert.match(dashboardHtml,/data-theme-set="command"/);
+  assert.match(dashboardHtml,/data-theme-set="headquarters"/);
+  assert.match(dashboardHtml,/data-theme-set="discotheque"/);
+  assert.match(dashboardHtml,/data-theme-set="swirl"/);
+  assert.match(dashboardHtml,/Discothèque/);
+  assert.match(dashboardHtml,/\[data-theme="headquarters"\]/);
+  assert.match(dashboardHtml,/\[data-theme="discotheque"\]/);
+  assert.match(dashboardHtml,/\[data-theme="swirl"\]/);
+  assert.match(dashboardHtml,/samTheme/);
+  // The original mark, drawn for Sam (Bible section 11).
+  assert.match(dashboardHtml,/id="i-sam-mark"/);
+  // Bible typefaces are self-hosted through the dashboard font route.
+  assert.match(dashboardHtml,/fonts\/lilita-one-400\.woff2/);
+  assert.match(dashboardHtml,/fonts\/ibm-plex-mono-400\.woff2/);
+  // Security & readiness: real controls, honest states, no
+  // superlatives in copy, ever.
+  assert.match(dashboardHtml,/id="readiness"/);
+  assert.match(dashboardHtml,/function renderReadiness\(/);
+  assert.match(dashboardHtml,/Security &amp; readiness/);
+  assert.doesNotMatch(dashboardHtml,/military grade/i);
+  assert.doesNotMatch(dashboardHtml,/Boomer AI/);
 });
 
 test("dashboard page: chat trust wiring - queue state decorates the send's bubble, failed bubbles carry Resend",()=>{
