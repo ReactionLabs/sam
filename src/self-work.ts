@@ -648,6 +648,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no findings (which would silently hide standing findings dressed as a clean library), consolidation still ledgers its own consolidate-failed:curator sub-step line when a tick hits the dead store (one line at each seam, each exactly once), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a finding record (details and suggested patches quote skill descriptions, the install's data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no state with no line and creates nothing, while torn rows still parse forgiving",
      "The full suite is green, including the skill curator store failure-ledger tests"]);
+  if (key.startsWith("skill-allowlists-store-failed:")) return base(
+    ["skills.ts", "status.ts", "self-audit.ts", "cli.ts"],
+    "Skill allowlists store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the skill allowlists store (.sam/skill-allowlists.db) must open, read, and write instead of dying at that seam - this store is the per-profile skill fence registry (one row per profile holding the skill names that profile may hold; no entry means unrestricted, an entry fences that profile's catalog, skill list, and skill reads), read by the dashboard status payload, the CLI overview, self-audit, the CLI skills views, and every chat turn's skill catalog and reads, and written by the owner's allow and allow-clear verbs, so while it is dead fences die with the seam unnamed, and a reader folding it as no allowlists would silently unrestrict every fenced profile dressed as the pre-allowlist behavior, the exact widening this store exists to prevent.",
+    ["The next fence sets, clears, status reads, and chat-turn catalogs resolve their allowlists again instead of skill-allowlists-store-failed lines",
+     "Exactly one skill-allowlists-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The fence still fails closed exactly as before: a failed read rethrows instead of folding the store as no allowlists (which would silently unrestrict every fenced profile dressed as the pre-allowlist behavior), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries an allowlist record (profile names and skill lists are fence data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no allowlists with no line and creates nothing, while validation errors (Invalid profile, Unknown skill(s)) still ledger nothing and torn rows still parse forgiving",
+     "The full suite is green, including the skill allowlists store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1062,6 +1070,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Skill curator store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "skill-curator-store-failed:" + phase, label: "skill curator store failures (" + phase + " step)" };
+    }
+    case "skill-allowlists-store-failed": {
+      const m = summary.match(/^Skill allowlists store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "skill-allowlists-store-failed:" + phase, label: "skill allowlists store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);

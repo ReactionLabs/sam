@@ -153,6 +153,76 @@ const profilePattern = /^[a-z][a-z0-9._-]{0,63}$/;
 // neither file creates nothing. The P9 backup snapshots every
 // .sam/*.db generically, so the migrated store is carried with no
 // backup change.
+// Skill allowlists store failure visibility (gap found
+// 2026-11-16, hourly run 00:04): the store above is the
+// per-profile skill FENCE - a profile with no entry is
+// unrestricted, an entry fences its catalog and skill
+// reads - and every touch opened it raw: skillAllowlists
+// rides status.ts (dashboard status, CLI overview) and
+// self-audit, skillAllowlist rides every chat turn's
+// catalog and skill reads on both loops plus the CLI
+// skills verbs, and setSkillAllowlist /
+// updateSkillAllowlist are the owner's only fence-setting
+// doors. A dead skill-allowlists.db threw into whichever
+// catch wrapped the call with the seam unnamed, and no
+// skill-allowlists-store-failed kind existed, so the
+// class was uncountable, and any reader folding a dead
+// store as "no allowlists" would silently UNRESTRICT
+// every fenced profile dressed as the pre-allowlist
+// behavior - the exact widening this store exists to
+// prevent. Now the store's touches own their failure
+// (the skill-authors precedent, helpers in this module):
+// a failed touch ledgers ONE
+// skill-allowlists-store-failed line (phase read for
+// skillAllowlists / skillAllowlist, write for
+// setSkillAllowlist / updateSkillAllowlist mutations;
+// actor sam; the verbatim reason collapsed and capped;
+// never any allowlist record - profile names and skill
+// lists are fence data, not failure data), tags the
+// error, and rethrows exactly, so every caller's handling
+// is unchanged and reads still fail closed. A touch
+// already ledgered by an inner door keeps its one line
+// and gains no second (updateSkillAllowlist's existence
+// read rides skillAllowlist). Validation errors (Invalid
+// profile, Unknown skill(s)) are not store failures and
+// ledger nothing. The exists check stays outside the
+// seam: an absent store still reads as no allowlists
+// with no line and creates nothing, and torn row
+// payloads still parse forgiving - only the store touch
+// is guarded.
+export type SkillAllowlistsStorePhase = "read" | "write";
+
+export function skillAllowlistsStoreFailureSummary(phase: SkillAllowlistsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Skill allowlists store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSkillAllowlistsStoreFailure(root: string, phase: SkillAllowlistsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "skill-allowlists-store-failed", skillAllowlistsStoreFailureSummary(phase, reason));
+}
+
+function tagSkillAllowlistsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { skillAllowlistsStoreLedgered?: boolean }).skillAllowlistsStoreLedgered = true;
+  }
+}
+
+export function isSkillAllowlistsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { skillAllowlistsStoreLedgered?: boolean }).skillAllowlistsStoreLedgered === true;
+}
+
+function failSkillAllowlistsStore(root: string, phase: SkillAllowlistsStorePhase, error: unknown): never {
+  if (!isSkillAllowlistsStoreLedgered(error)) recordSkillAllowlistsStoreFailure(root, phase, error);
+  tagSkillAllowlistsStoreLedgered(error);
+  throw error;
+}
+
+function openAllowlistsGuarded(workspace: string, phase: SkillAllowlistsStorePhase): Database.Database {
+  try { return openAllowlistsStore(workspace); }
+  catch (error) { failSkillAllowlistsStore(workspace, phase, error); }
+}
 function openAllowlistsStore(workspace: string): Database.Database {
   const dir = join(resolve(workspace), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -192,21 +262,23 @@ function allowlistStoreExists(workspace: string): boolean {
 }
 export function skillAllowlists(workspace: string): Record<string, string[]> {
   if (!allowlistStoreExists(workspace)) return {};
-  const db = openAllowlistsStore(workspace);
+  const db = openAllowlistsGuarded(workspace, "read");
   try {
     const rows = db.prepare("SELECT profile, data FROM skill_allowlists ORDER BY rowid").all() as Array<{ profile: string; data: string }>;
     const out: Record<string, string[]> = {};
     for (const row of rows) { const names = rowToNames(row.data); if (names) out[row.profile] = names; }
     return out;
-  } finally { db.close(); }
+  } catch (error) { failSkillAllowlistsStore(workspace, "read", error); }
+  finally { db.close(); }
 }
 export function skillAllowlist(workspace: string, profile: string): string[] | null {
   if (!allowlistStoreExists(workspace)) return null;
-  const db = openAllowlistsStore(workspace);
+  const db = openAllowlistsGuarded(workspace, "read");
   try {
     const row = db.prepare("SELECT data FROM skill_allowlists WHERE profile = ?").get(profile) as { data: string } | undefined;
     return row ? rowToNames(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failSkillAllowlistsStore(workspace, "read", error); }
+  finally { db.close(); }
 }
 function cleanAllowlistNames(workspace: string, names: string[]): string[] {
   const known = discoverSkills(workspace).map(s => s.name);
@@ -219,15 +291,18 @@ export function setSkillAllowlist(workspace: string, profile: string, names: str
   if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
   if (names === null) {
     if (allowlistStoreExists(workspace)) {
-      const db = openAllowlistsStore(workspace);
-      try { db.prepare("DELETE FROM skill_allowlists WHERE profile = ?").run(profile); } finally { db.close(); }
+      const db = openAllowlistsGuarded(workspace, "write");
+      try { db.prepare("DELETE FROM skill_allowlists WHERE profile = ?").run(profile); }
+      catch (error) { failSkillAllowlistsStore(workspace, "write", error); }
+      finally { db.close(); }
     }
     recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist cleared for profile " + profile + " (unrestricted)");
     return null;
   }
   const clean = cleanAllowlistNames(workspace, names);
-  const db = openAllowlistsStore(workspace);
+  const db = openAllowlistsGuarded(workspace, "write");
   try { db.prepare("INSERT INTO skill_allowlists (profile, data) VALUES (?, ?) ON CONFLICT(profile) DO UPDATE SET data = excluded.data").run(profile, JSON.stringify(clean)); }
+  catch (error) { failSkillAllowlistsStore(workspace, "write", error); }
   finally { db.close(); }
   recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist set for profile " + profile + ": " + (clean.length ? clean.join(", ") : "(none - no skills)"));
   return [...clean];
@@ -242,11 +317,12 @@ export function updateSkillAllowlist(workspace: string, profile: string, names: 
   if (!allowlistStoreExists(workspace)) return null;
   if (skillAllowlist(workspace, profile) === null) return null;
   const clean = cleanAllowlistNames(workspace, names);
-  const db = openAllowlistsStore(workspace);
+  const db = openAllowlistsGuarded(workspace, "write");
   try {
     const result = db.prepare("UPDATE skill_allowlists SET data = ? WHERE profile = ?").run(JSON.stringify(clean), profile);
     if (result.changes === 0) return null;
-  } finally { db.close(); }
+  } catch (error) { failSkillAllowlistsStore(workspace, "write", error); }
+  finally { db.close(); }
   return [...clean];
 }
 /** The skills one profile may hold: the whole library, or its allowlist. */
