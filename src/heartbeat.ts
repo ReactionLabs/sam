@@ -674,6 +674,32 @@ export function recordDeliveryFailure(root:string,profile:string,jobName:string,
  const reason=errorReason(error);
  recordActivity(root,profile,"delivery-failed",deliveryFailureSummary(jobName,reason,failure.attempts,failure.settled));
 }
+// Heartbeat job failures carry their cause (gap found
+// 2026-11-16, hourly run 13:04 EST): both job-failure catch
+// sites in the tick took e.message alone - the agent path
+// (a job's thrown chat turn) and the script path (the
+// script runner's throw) - and each wrote the bare reason
+// into TWO records, the job-failed line in heartbeats.jsonl
+// and the heartbeat-failed activity line, so a job dying on
+// transport ledgered the undici wrapper "fetch failed" in
+// both and named nothing. Both reasons now compose through
+// errorReason (the 04:04 bridge seam, already the delivery
+// paths' seam in this module): the cause chain is walked
+// bounded and deduped, errno-style codes are appended, and
+// bot-token segments are redacted. Causeless errors read
+// byte-identically, each summary keeps its existing prefix
+// and its reason slice at 160, and the non-zero-exit script
+// path (scriptFailureReason over stderr) is a different
+// record and stays untouched.
+export function heartbeatFailureReason(error:unknown):string{
+ return errorReason(error);
+}
+export function heartbeatFailedSummary(jobName:string,error:unknown):string{
+ return "Heartbeat '"+jobName+"' failed: "+heartbeatFailureReason(error).slice(0,160);
+}
+export function heartbeatScriptFailedSummary(jobName:string,error:unknown):string{
+ return "Heartbeat '"+jobName+"' script failed: "+heartbeatFailureReason(error).slice(0,160);
+}
 // Consolidation sub-step failures ledger in the activity
 // record (gap found 2026-11-13, hourly run 10:04): inside
 // consolidatePreferences, two sub-steps swallowed their throws
@@ -776,8 +802,8 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    try{outcome=await runScript(job.script??"");}
    catch(e){
     job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
-    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
-    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' script failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:heartbeatFailureReason(e)});
+    recordActivity(root,job.profile,"heartbeat-failed",heartbeatScriptFailedSummary(job.name,e));
     retireIfOnce(job);
     continue;
    }
@@ -812,8 +838,8 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     reply=await deps.runTurn(chatId,job.prompt);
    }catch(e){
     job.lastRun=new Date().toISOString();ranJobs.add(job.id);ran.push(job.name);failed.push(job.name);
-    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:e instanceof Error?e.message:String(e)});
-    recordActivity(root,job.profile,"heartbeat-failed","Heartbeat '"+job.name+"' failed: "+(e instanceof Error?e.message:String(e)).slice(0,160));
+    appendLog(root,{type:"job-failed",name:job.name,profile:job.profile,reason:heartbeatFailureReason(e)});
+    recordActivity(root,job.profile,"heartbeat-failed",heartbeatFailedSummary(job.name,e));
     retireIfOnce(job);
     continue;
    }
