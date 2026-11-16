@@ -151,6 +151,22 @@ export function recordLoopDeliveryFailure(root: string, profile: string, error: 
   recordActivity(root, profile, "delivery-failed", loopDeliveryFailureSummary(reason, failure.attempts, failure.settled));
 }
 
+// Loop re-check failures carry their cause (gap found
+// 2026-11-16, hourly run 12:04 EST): the revisit catch took
+// e.message alone over a real chat turn, so a re-check dying
+// on transport would ledger the bare undici wrapper "fetch
+// failed" in its loop-failed line and name nothing. The
+// reason now composes through errorReason (the 04:04 bridge
+// seam, already imported here for the delivery leg): the
+// cause chain is walked bounded and deduped, errno-style
+// codes are appended, and bot-token segments are redacted.
+// Causeless errors and plain strings read byte-identically,
+// the question slice and reason slice keep their existing
+// shapes, and rescheduling is untouched.
+export function loopFailedSummary(question: string, error: unknown): string {
+  return "Open loop re-check failed, will look again later: " + question.slice(0, 120) + " - " + errorReason(error).slice(0, 120);
+}
+
 const revisiting = new Set<string>();
 
 export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Promise<LoopRevisitResult> {
@@ -189,7 +205,7 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
       } catch (e) {
         rescheduleLoop(root, loop.id);
         result.failed.push(loop.id);
-        recordActivity(root, loop.profile, "loop-failed", "Open loop re-check failed, will look again later: " + loop.question.slice(0, 120) + " - " + (e instanceof Error ? e.message : String(e)).slice(0, 120));
+        recordActivity(root, loop.profile, "loop-failed", loopFailedSummary(loop.question, e));
         continue;
       }
       const { verdict, text } = parseRevisitReply(reply, loop.answer);

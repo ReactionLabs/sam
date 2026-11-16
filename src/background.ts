@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 
 // Legs (program P5): background work. A chat can hand off a long task - the
 // turn returns immediately with a task id, and the task runs later (drained by
@@ -213,6 +214,30 @@ export function queueBackgroundTask(root: string, input: { actor: string; chatId
   recordActivity(root, input.actor, "background-queued", "Handed off background task: " + title);
   return item;
 }
+// Background failures carry their cause (gap found
+// 2026-11-16, hourly run 12:04 EST): the drain catch took
+// e.message alone over a real chat turn, so a task dying on
+// transport ledgered the bare undici wrapper "fetch failed"
+// as its background-failed line, its stored result, AND the
+// failure post in the owner's chat - the wrapper in every
+// record, the cause in none. The reason now composes
+// through errorReason (the 04:04 bridge seam): the cause
+// chain is walked bounded and deduped, errno-style codes are
+// appended, and bot-token segments are redacted, so a task
+// dying on a DNS failure names the lookup in all three
+// records in the same shape. Causeless errors read
+// byte-identically, a non-Error throw keeps the existing
+// "Background run failed" fallback, and the task's prompt
+// never enters any failure record (the title only, as
+// before).
+export function backgroundFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Background run failed";
+}
+
+export function backgroundFailedSummary(title: string, error: unknown): string {
+  return "Background task failed: " + title + " - " + backgroundFailureReason(error).slice(0, 120);
+}
+
 const draining = new Set<string>();
 export interface DrainDeps { runTurn: (chatId: string, content: string) => Promise<string>; maxPerDrain?: number }
 export async function drainBackgroundTasks(root: string, deps: DrainDeps): Promise<{ ran: string[]; failed: string[]; recovered: string[] }> {
@@ -246,11 +271,11 @@ export async function drainBackgroundTasks(root: string, deps: DrainDeps): Promi
         ran.push(task.id);
         recordActivity(root, current.actor, "background-done", "Background task finished in its chat: " + current.title);
       } catch (e) {
-        const message = e instanceof Error ? e.message : "Background run failed";
+        const message = backgroundFailureReason(e);
         const bad = getBackgroundTask(root, task.id);
         if (bad) updateTaskRow(root, { ...bad, status: "failed", finishedAt: new Date().toISOString(), result: message.slice(0, 300) });
         failed.push(task.id);
-        recordActivity(root, current.actor, "background-failed", "Background task failed: " + current.title + " - " + message.slice(0, 120));
+        recordActivity(root, current.actor, "background-failed", backgroundFailedSummary(current.title, e));
         // The failure is posted into the chat too: silence in the thread the
         // owner is watching would read as the task still running.
         try { const db = new ChatStore(root); try { db.add(current.chatId, "assistant", "Background task failed: " + current.title + " (" + message.slice(0, 200) + ")"); } finally { db.close(); } } catch { /* chat gone; the ledger line stands */ }
