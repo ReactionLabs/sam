@@ -672,6 +672,22 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The registry still fails closed exactly as before: a failed read rethrows instead of folding the store as no helpers (which would silently empty the registry dressed as an idle install and free budget already carved), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a sub-agent record (prompts, results, and tool lists are the helper's data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no helpers with no line and creates nothing, while torn rows still parse forgiving, a malformed legacy file still imports nothing and ledgers nothing, and validation errors (unknown sub-agent, invalid profile, tool-widening and budget refusals) still ledger nothing",
      "The full suite is green, including the subagents store failure-ledger tests"]);
+  if (key.startsWith("heartbeat-jobs-store-failed:")) return base(
+    ["heartbeat.ts", "status.ts", "cli.ts"],
+    "Heartbeat jobs store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the heartbeat jobs store (.sam/heartbeat-jobs.db) must open, read, and write instead of dying at that seam - this store is the standing-job registry (one row per job holding its full record: name, minutes or cron schedule, profile, prompt, channel, enabled flag, and last run), read by the heartbeat tick, consolidation, the dashboard status payload, the CLI overview and heartbeat verbs, the brief, and self-audit, and written by every job create, the tick's lastRun advances and one-shot retirements, updates, and removes, so while it is dead standing work dies with the seam unnamed, and a reader folding it as no jobs would silently retire every standing job dressed as an install that never had any.",
+    ["The next ticks, job creates, updates, removes, and status reads resolve their jobs again instead of heartbeat-jobs-store-failed lines",
+     "Exactly one heartbeat-jobs-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no jobs (which would silently retire every standing job dressed as an install that never had any), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a job record (names, prompts, and schedules are the jobs' data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no jobs with no line and creates nothing, while a malformed legacy file still imports nothing and ledgers nothing, and caller-input validations (duplicate name, the createJob shape rules) still ledger nothing beyond the store touch that carries them",
+     "The full suite is green, including the heartbeat jobs store failure-ledger tests"]);
+  if (key.startsWith("heartbeat-state-store-failed:")) return base(
+    ["heartbeat.ts"],
+    "Heartbeat state store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the heartbeat state store (.sam/heartbeat-state.db) must open, read, and write instead of dying at that seam - this store is the heartbeat diff and watermark state (keyed rows holding the tick watermark, one consolidation watermark per chat, and one P3 diff record per job), read and written by every tick and every consolidation, so while it is dead ticks and consolidations die with the seam unnamed, and a reader folding it as empty state would revert every consolidation watermark (captured messages re-scanned and re-noted) and every P3 diff baseline (an unchanged job re-announces as changed, the exact noise P3 killed).",
+    ["The next ticks and consolidations resolve their state again instead of heartbeat-state-store-failed lines",
+     "Exactly one heartbeat-state-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as empty state (which would revert every watermark and diff baseline), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a state record (watermarks and diff baselines are the jobs' data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as empty state with no line and creates nothing, while torn rows still parse forgiving and a malformed legacy file still imports nothing and ledgers nothing",
+     "The full suite is green, including the heartbeat state store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1101,6 +1117,16 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Subagents store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "subagents-store-failed:" + phase, label: "subagents store failures (" + phase + " step)" };
+    }
+    case "heartbeat-jobs-store-failed": {
+      const m = summary.match(/^Heartbeat jobs store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "heartbeat-jobs-store-failed:" + phase, label: "heartbeat jobs store failures (" + phase + " step)" };
+    }
+    case "heartbeat-state-store-failed": {
+      const m = summary.match(/^Heartbeat state store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "heartbeat-state-store-failed:" + phase, label: "heartbeat state store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);

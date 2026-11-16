@@ -69,6 +69,76 @@ function logPath(root:string){return join(resolve(root),".sam","heartbeats.jsonl
 // nothing, so read-only audits stay read-only. The P9 backup
 // snapshots every .sam/*.db generically, so the migrated store
 // is carried with no backup change.
+// Heartbeat stores failure visibility (gap found 2026-11-16,
+// hourly run 03:04): this module carries TWO stores of its own
+// - the jobs store above and the state store below - and every
+// touch of both opened them raw. A dead heartbeat-jobs.db or
+// heartbeat-state.db threw into whichever catch wrapped the
+// caller with the seam unnamed (the heartbeat-log-failed kind
+// covers the heartbeats.jsonl log appends, not these stores),
+// and no heartbeat-jobs-store-failed or
+// heartbeat-state-store-failed kind existed, so the class was
+// uncountable, and any reader folding a dead jobs store as no
+// jobs would silently retire every standing job dressed as an
+// install that never had any, while a reader folding a dead
+// state store as empty state would revert every consolidation
+// watermark and every P3 diff baseline, so captured messages
+// re-scan and the frozen stack re-announces as changed. Now
+// each store's touches own their failure (the subagents
+// precedent, helpers in this module): a failed touch ledgers
+// ONE line of its store's kind (phase read for heartbeatJobs /
+// loadState, write for insertJob / updateJobRow / deleteJobRow
+// / saveState; actor sam; the verbatim reason collapsed and
+// capped; never any job or state record - prompts and diff
+// baselines are the jobs' data, not failure data), tags the
+// error, and rethrows exactly, so every caller's handling is
+// unchanged and reads still fail closed. A touch already
+// ledgered by an inner door keeps its one line and gains no
+// second (updateHeartbeatJob and removeHeartbeatJob ride
+// heartbeatJobs then their write door; heartbeatState rides
+// loadState). The exists checks stay outside the seams: an
+// absent store still reads as no jobs / empty state with no
+// line and creates nothing, torn state rows still parse
+// forgiving, and a malformed legacy file still imports
+// nothing - only the store touch is guarded. The jobs store's
+// integrity throws at the read seam (a torn job row, the >32
+// guard) ledger as read failures, because the store's own
+// content is the failure there; caller-input validations
+// (duplicate name, the createJob shape rules) ledger nothing
+// beyond the store touch that carries them.
+export type HeartbeatJobsStorePhase = "read" | "write";
+
+export function heartbeatJobsStoreFailureSummary(phase: HeartbeatJobsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Heartbeat jobs store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordHeartbeatJobsStoreFailure(root: string, phase: HeartbeatJobsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "heartbeat-jobs-store-failed", heartbeatJobsStoreFailureSummary(phase, reason));
+}
+
+function tagHeartbeatJobsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { heartbeatJobsStoreLedgered?: boolean }).heartbeatJobsStoreLedgered = true;
+  }
+}
+
+export function isHeartbeatJobsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { heartbeatJobsStoreLedgered?: boolean }).heartbeatJobsStoreLedgered === true;
+}
+
+function failHeartbeatJobsStore(root: string, phase: HeartbeatJobsStorePhase, error: unknown): never {
+  if (!isHeartbeatJobsStoreLedgered(error)) recordHeartbeatJobsStoreFailure(root, phase, error);
+  tagHeartbeatJobsStoreLedgered(error);
+  throw error;
+}
+
+function openJobsStoreGuarded(root: string, phase: HeartbeatJobsStorePhase): Database.Database {
+  try { return openJobsStore(root); }
+  catch (error) { failHeartbeatJobsStore(root, phase, error); }
+}
 function openJobsStore(root:string):Database.Database{
  mkdirSync(join(resolve(root),".sam"),{recursive:true});
  const db=openDatabase(jobsDbPath(root));
@@ -98,17 +168,18 @@ function migrateLegacyJobs(db:Database.Database,root:string):void{
 }
 export function heartbeatJobs(root:string):HeartbeatJob[]{
  if(!existsSync(jobsDbPath(root))&&!existsSync(jobsPath(root)))return [];
- const db=openJobsStore(root);
+ const db=openJobsStoreGuarded(root,"read");
  try{
   const rows=db.prepare("SELECT data FROM heartbeat_jobs ORDER BY rowid").all() as Array<{data:string}>;
   const items=rows.map(r=>JSON.parse(r.data) as HeartbeatJob);
   if(items.length>32)throw Error("Invalid heartbeat jobs file");
   return items;
- }finally{db.close();}
+ }catch(error){failHeartbeatJobsStore(root,"read",error);}
+ finally{db.close();}
 }
-function insertJob(root:string,job:HeartbeatJob){const db=openJobsStore(root);try{db.prepare("INSERT INTO heartbeat_jobs (id, data) VALUES (?, ?)").run(job.id,JSON.stringify(job));}finally{db.close();}}
-function updateJobRow(root:string,job:HeartbeatJob){const db=openJobsStore(root);try{db.prepare("UPDATE heartbeat_jobs SET data = ? WHERE id = ?").run(JSON.stringify(job),job.id);}finally{db.close();}}
-function deleteJobRow(root:string,id:string):boolean{const db=openJobsStore(root);try{return db.prepare("DELETE FROM heartbeat_jobs WHERE id = ?").run(id).changes>0;}finally{db.close();}}
+function insertJob(root:string,job:HeartbeatJob){const db=openJobsStoreGuarded(root,"write");try{db.prepare("INSERT INTO heartbeat_jobs (id, data) VALUES (?, ?)").run(job.id,JSON.stringify(job));}catch(error){failHeartbeatJobsStore(root,"write",error);}finally{db.close();}}
+function updateJobRow(root:string,job:HeartbeatJob){const db=openJobsStoreGuarded(root,"write");try{db.prepare("UPDATE heartbeat_jobs SET data = ? WHERE id = ?").run(JSON.stringify(job),job.id);}catch(error){failHeartbeatJobsStore(root,"write",error);}finally{db.close();}}
+function deleteJobRow(root:string,id:string):boolean{const db=openJobsStoreGuarded(root,"write");try{return db.prepare("DELETE FROM heartbeat_jobs WHERE id = ?").run(id).changes>0;}catch(error){failHeartbeatJobsStore(root,"write",error);}finally{db.close();}}
 // The store's own update door: patch one job's record in place
 // (the tick's lastRun advances ride updateJobRow directly; this
 // is the named seam for operator/test mutations, so nothing ever
@@ -216,6 +287,39 @@ interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; ou
 // file creates nothing, so read-only audits stay read-only. The
 // P9 backup snapshots every .sam/*.db generically, so the
 // migrated store is carried with no backup change.
+export type HeartbeatStateStorePhase = "read" | "write";
+
+export function heartbeatStateStoreFailureSummary(phase: HeartbeatStateStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Heartbeat state store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordHeartbeatStateStoreFailure(root: string, phase: HeartbeatStateStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "heartbeat-state-store-failed", heartbeatStateStoreFailureSummary(phase, reason));
+}
+
+function tagHeartbeatStateStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { heartbeatStateStoreLedgered?: boolean }).heartbeatStateStoreLedgered = true;
+  }
+}
+
+export function isHeartbeatStateStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { heartbeatStateStoreLedgered?: boolean }).heartbeatStateStoreLedgered === true;
+}
+
+function failHeartbeatStateStore(root: string, phase: HeartbeatStateStorePhase, error: unknown): never {
+  if (!isHeartbeatStateStoreLedgered(error)) recordHeartbeatStateStoreFailure(root, phase, error);
+  tagHeartbeatStateStoreLedgered(error);
+  throw error;
+}
+
+function openStateStoreGuarded(root: string, phase: HeartbeatStateStorePhase): Database.Database {
+  try { return openStateStore(root); }
+  catch (error) { failHeartbeatStateStore(root, phase, error); }
+}
 function openStateStore(root:string):Database.Database{
  mkdirSync(join(resolve(root),".sam"),{recursive:true});
  const db=openDatabase(stateDbPath(root));
@@ -247,7 +351,7 @@ function migrateLegacyState(db:Database.Database,root:string):void{
 }
 function loadState(root:string):HeartbeatState{
  if(!existsSync(stateDbPath(root))&&!existsSync(statePath(root)))return {chats:{},lastTick:null,outputs:{}};
- const db=openStateStore(root);
+ const db=openStateStoreGuarded(root,"read");
  try{
   const state:HeartbeatState={chats:{},lastTick:null,outputs:{}};
   const rows=db.prepare("SELECT key, data FROM heartbeat_state").all() as Array<{key:string;data:string}>;
@@ -259,7 +363,8 @@ function loadState(root:string):HeartbeatState{
    }catch{/* a torn row never kills a tick; its part reads as absent */}
   }
   return state;
- }finally{db.close();}
+ }catch(error){failHeartbeatStateStore(root,"read",error);}
+ finally{db.close();}
 }
 // The store's read door (tests and audits read the state through
 // the store's own shape, never around it - the actions precedent).
@@ -351,7 +456,7 @@ export function heartbeatOutputsEquivalent(prior:{hash:string;sig?:string}|undef
  return heartbeatFactBagsCompatible(prior.sig,sig);
 }
 function saveState(root:string,state:HeartbeatState){
- const db=openStateStore(root);
+ const db=openStateStoreGuarded(root,"write");
  try{
   const upsert=db.prepare("INSERT INTO heartbeat_state (key, data) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET data = excluded.data");
   const writeAll=db.transaction(()=>{
@@ -360,7 +465,8 @@ function saveState(root:string,state:HeartbeatState){
    for(const [jobId,record] of Object.entries(state.outputs??{}))upsert.run("output:"+jobId,JSON.stringify(record));
   });
   writeAll();
- }finally{db.close();}
+ }catch(error){failHeartbeatStateStore(root,"write",error);}
+ finally{db.close();}
 }
 export function heartbeatLogFailureSummary(phase:string,entryType:string,name:string|null,reason:string):string{
  const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
