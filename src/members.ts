@@ -97,6 +97,10 @@ export interface MemberView {
   status: "active" | "disabled";
   hasKey: boolean;
   hasVoiceKey: boolean;
+  /** Turn-by-turn voice rides the member's own MiniMax chat key
+   *  (member-mm-voice.ts): true when that key is in the vault, so
+   *  the app can light the mode up with no extra deposit. */
+  hasMmVoice: boolean;
   provider: MemberProviderConfig | null;
   keySource: MemberKeySource;
   managed: ManagedStatus;
@@ -390,6 +394,7 @@ export function memberView(root: string, member: Member, env: NodeJS.ProcessEnv 
     createdAt: member.createdAt, status: member.status,
     hasKey: memberHasKey(root, member),
     hasVoiceKey: memberHasVoiceKey(root, member),
+    hasMmVoice: memberHasKey(root, member) && member.provider?.kind === "minimax",
     provider: member.provider,
     keySource: member.keySource,
     managed: memberManagedStatus(root, member, env),

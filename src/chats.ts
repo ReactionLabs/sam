@@ -338,6 +338,19 @@ export class ChatStore {
       return this.db.prepare("UPDATE chat_messages SET content=?,partial=0 WHERE id=? AND chat_id=? AND role='assistant'").run(text,messageId,chatId).changes===1;
     });
   }
+  // Re-stamp one row's provenance after the fact. The MiniMax
+  // voice path runs its turn through the ordinary chat queue,
+  // whose assistant row lands with the default stamp; when the
+  // turn settles, the voice watcher marks that row "voice" so a
+  // spoken exchange reads as spoken on every surface, exactly
+  // like a transcript saved from a live call. Only the five
+  // client stamps (or unknown) can ever be written.
+  setSource(chatId:string,messageId:string,source:unknown):boolean{
+    return this.touch("write", () => {
+      const stamped=normalizeMessageSource(source);
+      return this.db.prepare("UPDATE chat_messages SET source=? WHERE id=? AND chat_id=?").run(stamped,messageId,chatId).changes===1;
+    });
+  }
   // Reactions (Dip, 2026-11-10): an emoji stamped on one message -
   // SAM's automatic seen/acknowledged marks and its deliberate
   // sam_react both land here. Null clears. The message must belong

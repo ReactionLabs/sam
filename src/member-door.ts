@@ -19,6 +19,7 @@ import {
   type Member,
 } from "./members.js";
 import { mintVoiceSession, saveVoiceTranscript, VOICE_KEY_MISSING } from "./member-voice.js";
+import { MM_KEY_MISSING, MM_KEY_NOT_MINIMAX, startMmVoiceTurn, synthesizeSpeech } from "./member-mm-voice.js";
 import { sendMagicLinkEmail } from "./member-mail.js";
 import {
   createMemberHeartbeat, deleteMemberHeartbeat, memberFileKind, memberFileView, memberHeartbeats,
@@ -106,6 +107,12 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
   // Voice sessions: each mint spends the member's own key on an
   // OpenAI call, so the door keeps mints to a human pace.
   const voiceLimiter = new RateLimiter(20, 3600_000, 0);
+  // MiniMax voice turns: each one spends the member's own key on
+  // a transcription plus a chat turn - a conversation pace, not a
+  // script pace. Speak calls ride their own, wider limiter: one
+  // spoken reply is several sentences by design.
+  const mmTurnLimiter = new RateLimiter(30, 3600_000, 0);
+  const mmSpeakLimiter = new RateLimiter(300, 3600_000, 0);
   resumeChatQueues(workspace);
 
   function memberChats(member: Member): Array<{ id: string; title: string; updatedAt: string }> {
@@ -464,7 +471,7 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
         } finally { store.close(); }
         return;
       }
-      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset|\/voice-transcript)?$/);
+      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset|\/voice-transcript|\/mm-voice\/speak|\/mm-voice)?$/);
       if (chatMatch) {
         const chatId = chatMatch[1];
         const sub = chatMatch[2] ?? "";
@@ -516,6 +523,52 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
             sendJson(res, 200, result);
           } catch {
             sendJson(res, 404, { error: "No such chat." });
+          }
+          return;
+        }
+        if (sub === "/mm-voice" && req.method === "POST") {
+          // Voice on the member's MiniMax key: one recorded
+          // utterance in (base64 JSON - a WAV from the browser is
+          // a few hundred KB), its transcript out, and the words
+          // already running as a chat turn on the same key. The
+          // reply itself arrives through the thread; the speak
+          // route below voices it sentence by sentence.
+          if (!mmTurnLimiter.allow("mmvoice:" + member.id)) { sendJson(res, 429, { error: "A lot of voice turns in a short time. Give it a minute." }); return; }
+          const raw = await readBody(req, 8_000_000).catch(() => "");
+          let body: Record<string, unknown> = {};
+          try { body = raw.trim() ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { body = {}; }
+          const b64 = typeof body.audio === "string" ? body.audio : "";
+          const bytes = b64 ? Buffer.from(b64, "base64") : Buffer.alloc(0);
+          if (!bytes.length || bytes.length > 6_000_000) { sendJson(res, 400, { error: "That recording did not arrive. Try again." }); return; }
+          const filename = typeof body.filename === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(body.filename) ? body.filename : "speech.wav";
+          const mime = typeof body.mime === "string" && body.mime.length <= 80 ? body.mime : "audio/wav";
+          try {
+            const result = await startMmVoiceTurn(workspace, member, chatId, { bytes, filename, mime });
+            sendJson(res, 200, result);
+          } catch (error) {
+            const code = (error as { code?: string })?.code;
+            const message = error instanceof Error ? error.message : "Voice could not take that turn. Try again.";
+            if (code === MM_KEY_MISSING || code === MM_KEY_NOT_MINIMAX) sendJson(res, 400, { error: message, code });
+            else sendJson(res, 502, { error: message });
+          }
+          return;
+        }
+        if (sub === "/mm-voice/speak" && req.method === "POST") {
+          // One sentence of the reply, spoken on the member's own
+          // MiniMax key. The audio comes back base64 in JSON like
+          // everything else through this door; the key never does.
+          if (!mmSpeakLimiter.allow("mmspeak:" + member.id)) { sendJson(res, 429, { error: "A lot of speaking in a short time. Give it a minute." }); return; }
+          const body = await readJson(req);
+          const text = typeof body.text === "string" ? body.text : "";
+          if (!text.trim()) { sendJson(res, 400, { error: "There is nothing to say in that text." }); return; }
+          try {
+            const spoken = await synthesizeSpeech(workspace, member, text);
+            sendJson(res, 200, { audio: spoken.audio.toString("base64"), mime: spoken.mime });
+          } catch (error) {
+            const code = (error as { code?: string })?.code;
+            const message = error instanceof Error ? error.message : "SAM could not speak that. Try again.";
+            if (code === MM_KEY_MISSING || code === MM_KEY_NOT_MINIMAX) sendJson(res, 400, { error: message, code });
+            else sendJson(res, 502, { error: message });
           }
           return;
         }
