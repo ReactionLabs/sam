@@ -8,7 +8,7 @@ import { PreferenceStore } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
 import { channels } from "./channels.js";
-import { channelForChat } from "./telegram.js";
+import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
@@ -483,6 +483,28 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
   if (!summary.installed.length) throw new Error("Nothing installed: " + (summary.skipped.join("; ") || "no skills found"));
   return "Installed skill(s): " + summary.installed.map(i => i.name).join(", ") + (summary.skipped.length ? " (skipped: " + summary.skipped.join("; ") + ")" : "");
 }
+// Action execution failures carry their cause (gap found
+// 2026-11-16, hourly run 15:04 EST): applyDecision's catch took
+// e.message alone over execute(), and that one bare message fed
+// two records - the failed card's stored result (the text the
+// owner reads on the card and in approval history) and the
+// "failed" activity line. Execution includes the skill install,
+// which rides fetch to skills.sh and the GitHub API, so an
+// install dying on transport read the bare undici wrapper
+// "fetch failed" in both records and named nothing (DNS vs
+// connect vs socket vs TLS indistinguishable, the real reason
+// rides error.cause). The reason now composes through
+// errorReason (the 04:04 bridge seam): the cause chain is
+// walked bounded and deduped, errno-style codes are appended,
+// and bot-token segments are redacted, so a failure dying on a
+// DNS lookup names the lookup in both records in the same
+// shape. Causeless errors read byte-identically, a non-Error
+// throw keeps the existing "Execution failed" fallback, and
+// the proposal's detail never enters any failure record.
+export function actionFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Execution failed";
+}
+
 // One decision path for every decider: the owner (dashboard / CLI)
 // and the approvals engine's auto modes. `by` is "owner" or the auto
 // via stamp ("auto:smart" / "auto:off"); it lands on the record as
@@ -522,7 +544,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
       recordActivity(root, a.actor, "skill-scan-hold", a.kind + ": " + a.title + " - " + e.message);
       return a;
     }
-    a.status = "failed"; a.result = e instanceof Error ? e.message : "Execution failed";
+    a.status = "failed"; a.result = actionFailureReason(e);
     // A failed card must not be a dead end. A heartbeat that died on an
     // unknown profile (a legacy proposal written before proposal-time
     // validation, or a profile removed after proposing) gets a corrected
