@@ -126,6 +126,29 @@ test("BYOK: the key vaults under the account name and never surfaces", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("BYOK model field: the provider label normalizes to the default model", () => {
+  const root = tempRoot();
+  try {
+    const { member } = findOrCreateMember(root, "label@example.com");
+    // "Minimax" is the provider label, not a model name: typed into
+    // the optional model field it must land on the default, in any
+    // case, or the API 400s every turn.
+    let view = setMemberKey(root, member, { apiKey: "sk-label-key", model: "Minimax" });
+    assert.equal(view.provider?.model, "MiniMax-M2.5");
+    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "MINIMAX" });
+    assert.equal(view.provider?.model, "MiniMax-M2.5");
+    // Blank stays the default.
+    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "  " });
+    assert.equal(view.provider?.model, "MiniMax-M2.5");
+    // A real MiniMax model name passes through untouched.
+    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "MiniMax-M2" });
+    assert.equal(view.provider?.model, "MiniMax-M2");
+    // The custom kind keeps its own model exactly as given.
+    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", kind: "custom", endpoint: "https://example.com/v1/chat/completions", model: "minimax" });
+    assert.equal(view.provider?.model, "minimax");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 function memberKeyOf(root: string): string {
   return listVaultCredentials(root)[0]?.name ?? "";
 }

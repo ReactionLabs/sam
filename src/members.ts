@@ -517,8 +517,16 @@ export function setMemberKey(root: string, member: Member, input: SetMemberKeyIn
     model = (input.model ?? "").trim();
     if (!MODEL_RE.test(model)) throw new Error("Invalid model name");
   } else if (input.model && input.model.trim()) {
-    model = input.model.trim();
-    if (!MODEL_RE.test(model)) throw new Error("Invalid model name");
+    const supplied = input.model.trim();
+    // The provider label is not a model name: a member who types
+    // "Minimax" into the optional model field means the standard
+    // MiniMax model, and the API rejects the label with a 400 on
+    // every turn. Normalize it to the default; real model names
+    // pass through untouched.
+    if (supplied.toLowerCase() !== "minimax") {
+      model = supplied;
+      if (!MODEL_RE.test(model)) throw new Error("Invalid model name");
+    }
   }
   const keyName = memberKeyName(member);
   let host = "";
