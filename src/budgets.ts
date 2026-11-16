@@ -1,3 +1,5 @@
+import { errorReason } from "./telegram.js";
+
 // Tool budgets tier by route (program P5). Not every turn deserves the same
 // leash: a heartbeat poll is SAM glancing at a gauge and must stay cheap, an
 // interactive chat is the owner's live question, and a background task exists
@@ -102,6 +104,21 @@ export type TurnEndReason = "calls" | "steps";
 export function trimHistoryForRetry<T>(messages: T[]): T[] {
   if (messages.length <= 7) return messages;
   return [messages[0], ...messages.slice(-6)];
+}
+/** The turn-retry ledger line both chat loops write when the
+ * context-reset retry fires. Its quoted reason composes through
+ * errorReason (the 04:04 bridge seam; gap found 2026-11-16,
+ * hourly run 18:04 EST): both loops took (e as Error).message
+ * alone, so a triggering error carrying that message WITH a
+ * cause (a provider attaching its sanitized transport cause,
+ * the 09:04 shape, or any future completer) would ledger the
+ * bare message and drop the cause its turn-failed sibling
+ * names. errorReason walks the cause chain (bounded, deduped),
+ * appends errno-style codes, redacts bot-token segments, and
+ * collapses whitespace; causeless errors read byte-identically,
+ * and the line's prefix and suffix are exactly the old shape. */
+export function turnRetrySummary(error: unknown): string {
+  return "Context reset after '" + errorReason(error) + "' before any tool ran; history trimmed to the last 6 messages";
 }
 export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
   if (reason === "steps") return "Turn step limit reached: " + executed.length + " calls used (" + (executed.join(", ") || "none") + ") - the call budget (" + maxCalls + ") was NOT reached" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");

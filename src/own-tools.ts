@@ -6,7 +6,7 @@ import { linkExchange } from "./collab.js";
 import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions.js";
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
-import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
@@ -889,7 +889,7 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
     const trimmed = (e instanceof Error && (e.message === "Unsafe model output" || e.message === "Empty model response") && executed.length === 0) ? trimHistoryForRetry(messages) : null;
     if (!trimmed || trimmed.length >= messages.length) throw e;
     messages.splice(0, messages.length, ...trimmed);
-    recordActivity(root, actor, "turn-retry", "Context reset after '" + (e as Error).message + "' before any tool ran; history trimmed to the last 6 messages");
+    recordActivity(root, actor, "turn-retry", turnRetrySummary(e));
     trimTurnHistory(); turn = await provider.completeConnectorTurn(model, messages, sendTools);
   }
   if(!turn.calls.length){
