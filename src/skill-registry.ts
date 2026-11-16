@@ -84,6 +84,74 @@ function installsDbFile(root: string): string { return join(resolve(root), ".sam
 // forgiving contract). A pure read on an install with neither file
 // creates nothing. The P9 backup snapshots every .sam/*.db
 // generically, so the migrated store is carried with no backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 21:04 EST): the skill installs store holds the registry
+// provenance registry - each installed skill's name,
+// source, ref, file count, install time, and actor -
+// and every touch opened it raw. installedSkills rides
+// status.ts (the dashboard status payload and the CLI
+// overview), the CLI skills verbs, and the skill curator
+// in skill-author.ts; the row writes ride installSkill
+// (the ONE gate's approved and smart-auto installs),
+// updateInstalledSkill, and removeInstalledSkill. A dead
+// skill-installs.db threw into whichever catch wrapped
+// the call with the seam unnamed, and no
+// skill-installs-store-failed kind existed, so the class
+// was uncountable, and any reader folding a dead store
+// as "no installs" would silently empty the provenance
+// registry dressed as a fresh install - an installed
+// skill's files orphaned from the registry the curator
+// checks, or a removed skill's record resurrecting
+// invisibly. Now the store's touches own their failure
+// (the parallel precedent): a failed touch ledgers ONE
+// skill-installs-store-failed line (phase read for
+// installedSkills / findInstalledRow, write for
+// insertInstalledRow / updateInstalledSkill /
+// removeInstalledSkill and every mutation door riding
+// them; actor sam; the verbatim reason collapsed and
+// capped; never any install record - sources and refs
+// are the install's data, not failure data), tags the
+// error, and rethrows exactly, so every caller's
+// handling is unchanged and reads still fail closed. A
+// touch already ledgered by an inner door keeps its one
+// line and gains no second. Validation errors (skill-ref
+// shape refusals) are not store failures and ledger
+// nothing. An absent store still reads empty with no
+// line and creates nothing, and torn row payloads still
+// parse forgiving - only the store touch is guarded.
+export type SkillInstallsStorePhase = "read" | "write";
+
+export function skillInstallsStoreFailureSummary(phase: SkillInstallsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Skill installs store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSkillInstallsStoreFailure(root: string, phase: SkillInstallsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "skill-installs-store-failed", skillInstallsStoreFailureSummary(phase, reason));
+}
+
+function tagSkillInstallsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { skillInstallsStoreLedgered?: boolean }).skillInstallsStoreLedgered = true;
+  }
+}
+
+export function isSkillInstallsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { skillInstallsStoreLedgered?: boolean }).skillInstallsStoreLedgered === true;
+}
+
+function failSkillInstallsStore(root: string, phase: SkillInstallsStorePhase, error: unknown): never {
+  if (!isSkillInstallsStoreLedgered(error)) recordSkillInstallsStoreFailure(root, phase, error);
+  tagSkillInstallsStoreLedgered(error);
+  throw error;
+}
+
+function openInstallsGuarded(root: string, phase: SkillInstallsStorePhase): Database.Database {
+  try { return openInstallsStore(root); }
+  catch (error) { failSkillInstallsStore(root, phase, error); }
+}
 function openInstallsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -122,25 +190,28 @@ function storeExists(root: string): boolean {
 }
 export function installedSkills(root: string): InstalledSkill[] {
   if (!storeExists(root)) return [];
-  const db = openInstallsStore(root);
+  const db = openInstallsGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM skill_installs ORDER BY rowid").all() as Array<{ data: string }>;
     const items: InstalledSkill[] = [];
     for (const row of rows) { const rec = rowToInstalled(row.data); if (rec) items.push(rec); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failSkillInstallsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function findInstalledRow(root: string, name: string): InstalledSkill | null {
   if (!storeExists(root)) return null;
-  const db = openInstallsStore(root);
+  const db = openInstallsGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM skill_installs WHERE name = ?").get(name) as { data: string } | undefined;
     return row ? rowToInstalled(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failSkillInstallsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertInstalledRow(root: string, rec: InstalledSkill): void {
-  const db = openInstallsStore(root);
+  const db = openInstallsGuarded(root, "write");
   try { db.prepare("INSERT INTO skill_installs (name, data) VALUES (?, ?)").run(rec.name, JSON.stringify(rec)); }
+  catch (error) { failSkillInstallsStore(root, "write", error); }
   finally { db.close(); }
 }
 // The store's update door (the drafts precedent): patch one installed
@@ -153,8 +224,9 @@ export function updateInstalledSkill(root: string, name: string, patch: Partial<
   const current = findInstalledRow(root, name);
   if (!current) return null;
   const next: InstalledSkill = { ...current, ...patch, name: current.name };
-  const db = openInstallsStore(root);
+  const db = openInstallsGuarded(root, "write");
   try { db.prepare("UPDATE skill_installs SET data = ? WHERE name = ?").run(JSON.stringify(next), current.name); }
+  catch (error) { failSkillInstallsStore(root, "write", error); }
   finally { db.close(); }
   return next;
 }
@@ -280,12 +352,13 @@ export function removeInstalledSkill(root: string, name: string): boolean {
   const rec = findInstalledRow(root, name);
   if (!rec) return false;
   rmSync(join(resolve(root), ".agents", "skills", name), { recursive: true, force: true });
-  const db = openInstallsStore(root);
+  const db = openInstallsGuarded(root, "write");
   let removed = false;
   try {
     const result = db.prepare("DELETE FROM skill_installs WHERE name = ?").run(name);
     removed = result.changes > 0;
-  } finally { db.close(); }
+  } catch (error) { failSkillInstallsStore(root, "write", error); }
+  finally { db.close(); }
   if (!removed) return false;
   recordActivity(root, "operator", "skill", "Removed skill " + name + " (was from " + rec.source + ")");
   return true;
