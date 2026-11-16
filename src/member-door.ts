@@ -23,6 +23,7 @@ import {
   createMemberHeartbeat, deleteMemberHeartbeat, memberFileKind, memberFileView, memberHeartbeats,
   memberSkills, saveMemberFile, updateMemberHeartbeat,
 } from "./member-sam.js";
+import { memberArtifact, memberArtifacts, memberArtifactVersion, memberFiles } from "./member-files.js";
 
 // The member door (Mission Control Phase 1, Dip ruling 2026-11-15):
 // the public API the hosted web app talks to. Every rule of the
@@ -342,6 +343,36 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
       if (heartbeatMatch && req.method === "DELETE") {
         const gone = deleteMemberHeartbeat(workspace, member, heartbeatMatch[1]);
         sendJson(res, gone ? 200 : 404, gone ? { ok: true } : { error: "No such heartbeat." });
+        return;
+      }
+      // --- Member files: the member's artifacts, readable at
+      // last, and the one organized files listing (artifacts +
+      // standing files) the app's Files view rides. Same rule as
+      // everywhere in this door: reads are keyed by THIS member's
+      // profile, and another member's artifact answers the same
+      // 404 as a missing one. ---
+      if (path === "/me/artifacts" && req.method === "GET") {
+        try { sendJson(res, 200, { artifacts: memberArtifacts(workspace, member) }); }
+        catch { sendJson(res, 200, { artifacts: [] }); }
+        return;
+      }
+      if (path === "/me/files" && req.method === "GET") {
+        try { sendJson(res, 200, { files: memberFiles(workspace, member) }); }
+        catch { sendJson(res, 200, { files: [] }); }
+        return;
+      }
+      const artifactVersionMatch = path.match(/^\/me\/artifacts\/([A-Za-z0-9-]+)\/versions\/(\d+)$/);
+      if (artifactVersionMatch && req.method === "GET") {
+        const found = memberArtifactVersion(workspace, member, artifactVersionMatch[1], Number(artifactVersionMatch[2]));
+        if (!found) { sendJson(res, 404, { error: "No such artifact version." }); return; }
+        sendJson(res, 200, { artifact: found });
+        return;
+      }
+      const artifactMatch = path.match(/^\/me\/artifacts\/([A-Za-z0-9-]+)$/);
+      if (artifactMatch && req.method === "GET") {
+        const found = memberArtifact(workspace, member, artifactMatch[1]);
+        if (!found) { sendJson(res, 404, { error: "No such artifact." }); return; }
+        sendJson(res, 200, { artifact: found });
         return;
       }
       if (path === "/developer" && req.method === "GET") {
