@@ -116,6 +116,81 @@ function authorsDbFile(root: string): string { return join(resolve(root), ".sam"
 // forgiving contract). A pure read on an install with neither file
 // creates nothing. The P9 backup snapshots every .sam/*.db
 // generically, so the migrated store is carried with no backup change.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 22:04 EST): the skill authors store holds the
+// authored-skill provenance registry - each sam-authored
+// skill's name, source, actor, version, and stamps -
+// and every touch opened it raw. authoredSkills rides
+// status.ts (the dashboard status payload and the CLI
+// overview), the CLI skills authored verb, and the
+// skill curator's orphan check; the row writes ride
+// writeAuthoredSkill (the ONE gate's approved
+// skill-author executor and the operator CLI author
+// verb) and updateAuthoredSkill; skillDraftIsPatch (the
+// proposal-time ownership check) rides the read, and
+// the curator's patch-safety probe folds its throws to
+// false by design. A dead skill-authors.db threw into
+// whichever catch wrapped the call with the seam
+// unnamed, and no skill-authors-store-failed kind
+// existed, so the class was uncountable, and any reader
+// folding a dead store as "no authored skills" would
+// silently empty the provenance registry dressed as a
+// fresh install - SAM's own skills orphaned from the
+// registry that alone lets SAM patch them. Now the
+// store's touches own their failure (the skill-installs
+// precedent): a failed touch ledgers ONE
+// skill-authors-store-failed line (phase read for
+// authoredSkills / findAuthoredRow, write for
+// upsertAuthoredRow / updateAuthoredSkill's UPDATE and
+// every mutation door riding them; actor sam; the
+// verbatim reason collapsed and capped; never any
+// authored record - names, actors, and stamps are the
+// install's data, not failure data), tags the error,
+// and rethrows exactly, so every caller's handling is
+// unchanged (the curator probe still folds to false,
+// now countable) and reads still fail closed. A touch
+// already ledgered by an inner door keeps its one line
+// and gains no second. Validation errors (skill-draft
+// shape and secret-scan refusals) are not store
+// failures and ledger nothing. An absent store still
+// reads empty with no line and creates nothing, and
+// torn row payloads still parse forgiving - only the
+// store touch is guarded. The curator store in this
+// same file is a separate store with its own seam,
+// guarded in its own run.
+export type SkillAuthorsStorePhase = "read" | "write";
+
+export function skillAuthorsStoreFailureSummary(phase: SkillAuthorsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Skill authors store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSkillAuthorsStoreFailure(root: string, phase: SkillAuthorsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "skill-authors-store-failed", skillAuthorsStoreFailureSummary(phase, reason));
+}
+
+function tagSkillAuthorsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { skillAuthorsStoreLedgered?: boolean }).skillAuthorsStoreLedgered = true;
+  }
+}
+
+export function isSkillAuthorsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { skillAuthorsStoreLedgered?: boolean }).skillAuthorsStoreLedgered === true;
+}
+
+function failSkillAuthorsStore(root: string, phase: SkillAuthorsStorePhase, error: unknown): never {
+  if (!isSkillAuthorsStoreLedgered(error)) recordSkillAuthorsStoreFailure(root, phase, error);
+  tagSkillAuthorsStoreLedgered(error);
+  throw error;
+}
+
+function openAuthorsGuarded(root: string, phase: SkillAuthorsStorePhase): Database.Database {
+  try { return openAuthorsStore(root); }
+  catch (error) { failSkillAuthorsStore(root, phase, error); }
+}
 function openAuthorsStore(root: string): Database.Database {
   const dir = join(resolve(root), ".sam");
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -154,27 +229,30 @@ function authorsStoreExists(root: string): boolean {
 }
 export function authoredSkills(root: string): AuthoredSkill[] {
   if (!authorsStoreExists(root)) return [];
-  const db = openAuthorsStore(root);
+  const db = openAuthorsGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM skill_authors ORDER BY rowid").all() as Array<{ data: string }>;
     const items: AuthoredSkill[] = [];
     for (const row of rows) { const rec = rowToAuthored(row.data); if (rec) items.push(rec); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failSkillAuthorsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function findAuthoredRow(root: string, name: string): AuthoredSkill | null {
   if (!authorsStoreExists(root)) return null;
-  const db = openAuthorsStore(root);
+  const db = openAuthorsGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM skill_authors WHERE name = ?").get(name) as { data: string } | undefined;
     return row ? rowToAuthored(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failSkillAuthorsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function upsertAuthoredRow(root: string, rec: AuthoredSkill): void {
-  const db = openAuthorsStore(root);
+  const db = openAuthorsGuarded(root, "write");
   try {
     db.prepare("INSERT INTO skill_authors (name, data) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET data = excluded.data").run(rec.name, JSON.stringify(rec));
-  } finally { db.close(); }
+  } catch (error) { failSkillAuthorsStore(root, "write", error); }
+  finally { db.close(); }
 }
 // The store's update door (the skill-installs precedent): patch one
 // authored skill record by name through the store's own shape. The
@@ -186,8 +264,9 @@ export function updateAuthoredSkill(root: string, name: string, patch: Partial<A
   const current = findAuthoredRow(root, name);
   if (!current) return null;
   const next: AuthoredSkill = { ...current, ...patch, name: current.name };
-  const db = openAuthorsStore(root);
+  const db = openAuthorsGuarded(root, "write");
   try { db.prepare("UPDATE skill_authors SET data = ? WHERE name = ?").run(JSON.stringify(next), current.name); }
+  catch (error) { failSkillAuthorsStore(root, "write", error); }
   finally { db.close(); }
   return next;
 }
