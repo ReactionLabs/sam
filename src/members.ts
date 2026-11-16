@@ -39,6 +39,19 @@ export const MEMBER_SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
 export const MEMBER_PROVIDER_ID = "member";
 export const MINIMAX_CHAT_ENDPOINT = "https://api.minimax.io/v1/chat/completions";
 export const MINIMAX_DEFAULT_MODEL = "MiniMax-M2.5";
+/** The current MiniMax chat models a member may pick (Settings
+ *  shows this same list as a dropdown; the door validates against
+ *  it). Lineup confirmed 2026-11-16 against the live MiniMax
+ *  catalog summaries (M3.1 Flash, M3, M2.7, M2.5 and the Highspeed
+ *  versions); M2.5 stays the standard default. */
+export const MINIMAX_MODELS: readonly string[] = [
+  "MiniMax-M2.5",
+  "MiniMax-M2.5-highspeed",
+  "MiniMax-M3",
+  "MiniMax-M3.1-Flash",
+  "MiniMax-M2.7",
+  "MiniMax-M2.7-highspeed",
+];
 const MAX_MEMBERS = 500;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
@@ -518,15 +531,12 @@ export function setMemberKey(root: string, member: Member, input: SetMemberKeyIn
     if (!MODEL_RE.test(model)) throw new Error("Invalid model name");
   } else if (input.model && input.model.trim()) {
     const supplied = input.model.trim();
-    // The provider label is not a model name: a member who types
-    // "Minimax" into the optional model field means the standard
-    // MiniMax model, and the API rejects the label with a 400 on
-    // every turn. Normalize it to the default; real model names
-    // pass through untouched.
-    if (supplied.toLowerCase() !== "minimax") {
-      model = supplied;
-      if (!MODEL_RE.test(model)) throw new Error("Invalid model name");
-    }
+    // Only a model on the current MiniMax list is stored as-is.
+    // Anything else (the "Minimax" provider label, a retired or
+    // mistyped name) normalizes to the default: an unusable model
+    // string makes the API reject every turn with a 400, so it is
+    // never stored.
+    if (MINIMAX_MODELS.includes(supplied)) model = supplied;
   }
   const keyName = memberKeyName(member);
   let host = "";

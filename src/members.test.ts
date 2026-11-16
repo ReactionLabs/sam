@@ -7,6 +7,7 @@ import { openDatabase } from "./sqlite.js";
 import {
   findOrCreateMember, isMemberProfile, listApiTokens, listMembers, memberByEmail,
   memberConnection, memberForApiToken, memberForSession, memberView, mintApiToken,
+  MINIMAX_DEFAULT_MODEL, MINIMAX_MODELS,
   mintMagicToken, redeemMagicToken, removeMemberKey, revokeApiToken, revokeSession,
   setMemberKey, setMemberKeySource, setMemberStatus,
 } from "./members.js";
@@ -126,25 +127,34 @@ test("BYOK: the key vaults under the account name and never surfaces", () => {
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("BYOK model field: the provider label normalizes to the default model", () => {
+test("BYOK model field: only a listed MiniMax model is stored; anything else lands on the default", () => {
   const root = tempRoot();
   try {
     const { member } = findOrCreateMember(root, "label@example.com");
+    const fresh = () => memberByEmail(root, "label@example.com")!;
     // "Minimax" is the provider label, not a model name: typed into
-    // the optional model field it must land on the default, in any
-    // case, or the API 400s every turn.
+    // the model field it must land on the default, in any case, or
+    // the API 400s every turn.
     let view = setMemberKey(root, member, { apiKey: "sk-label-key", model: "Minimax" });
-    assert.equal(view.provider?.model, "MiniMax-M2.5");
-    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "MINIMAX" });
-    assert.equal(view.provider?.model, "MiniMax-M2.5");
+    assert.equal(view.provider?.model, MINIMAX_DEFAULT_MODEL);
+    view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", model: "MINIMAX" });
+    assert.equal(view.provider?.model, MINIMAX_DEFAULT_MODEL);
     // Blank stays the default.
-    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "  " });
-    assert.equal(view.provider?.model, "MiniMax-M2.5");
-    // A real MiniMax model name passes through untouched.
-    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", model: "MiniMax-M2" });
-    assert.equal(view.provider?.model, "MiniMax-M2");
+    view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", model: "  " });
+    assert.equal(view.provider?.model, MINIMAX_DEFAULT_MODEL);
+    // Every model on the current list round-trips exactly.
+    for (const model of MINIMAX_MODELS) {
+      view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", model });
+      assert.equal(view.provider?.model, model);
+    }
+    // Off-list values normalize to the default instead of being
+    // stored: a retired name and a foreign name alike.
+    view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", model: "MiniMax-M2" });
+    assert.equal(view.provider?.model, MINIMAX_DEFAULT_MODEL);
+    view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", model: "gpt-4o" });
+    assert.equal(view.provider?.model, MINIMAX_DEFAULT_MODEL);
     // The custom kind keeps its own model exactly as given.
-    view = setMemberKey(root, memberByEmail(root, "label@example.com")!, { apiKey: "sk-label-key", kind: "custom", endpoint: "https://example.com/v1/chat/completions", model: "minimax" });
+    view = setMemberKey(root, fresh(), { apiKey: "sk-label-key", kind: "custom", endpoint: "https://example.com/v1/chat/completions", model: "minimax" });
     assert.equal(view.provider?.model, "minimax");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
