@@ -36,6 +36,34 @@ export class MalformedToolCallError extends Error {
   }
 }
 
+/** The sanitized cause a converted transport error may carry
+ * (gap found 2026-11-16, hourly run 09:04 EST). The provider's
+ * TypeError conversions below deliberately discard the original
+ * error - "never echo network errors or response bodies: they
+ * can contain secrets" - but discarding it whole also discarded
+ * the one diagnosable fact it held, so a turn dying on a dead
+ * endpoint ledgered the plain conversion and named nothing.
+ * This extracts ONLY the errno-style codes from the original
+ * cause chain (ENOTFOUND, ECONNREFUSED, ECONNRESET,
+ * UND_ERR_SOCKET and kin): a code is not a secret, carries no
+ * message, no URL, and no body. No code in the chain, no cause
+ * attached, and the converted error reads exactly as before. */
+export function transportCause(error: unknown): Error | undefined {
+  const codes: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current !== null && current !== undefined; depth++) {
+    const code = (current as { code?: unknown })?.code;
+    if (typeof code === "string" && code && !codes.includes(code)) codes.push(code);
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return codes.length ? new Error(codes.join(", ")) : undefined;
+}
+
+function networkError(message: string, error: unknown): Error {
+  const cause = transportCause(error);
+  return cause ? new Error(message, { cause }) : new Error(message);
+}
+
 /** MiniMax-class models sometimes leak their tool-call machinery into
  * the visible content as markup (<tool_call> spans, <invoke> spans,
  * <|tool_call|> tokens, stray think tags, the ]<]minimax token). The
@@ -308,7 +336,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       return turn;
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw new Error("Model tool request timed out");
-      if (error instanceof TypeError) throw new Error("Model tool network request failed");
+      if (error instanceof TypeError) throw networkError("Model tool network request failed", error);
       throw error;
     } finally { clearTimeout(timer); unlinkAbort(); }
   }
@@ -489,7 +517,7 @@ export class OpenAICompatibleProvider implements ModelProvider {
       if(calls.length&&content){try{this.onNarration?.(content);}catch{/* the narration sink never breaks a turn */}}
       else if(content){try{this.onPartial?.(content);}catch{/* persistence never breaks the read */}}
       return {content:content||null,calls};
-    }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw Error("Model connector network error");throw e;}finally{clearTimeout(timer);unlinkAbort();}
+    }catch(e){if(e instanceof Error&&e.name==="AbortError")throw Error("Model connector request timed out");if(e instanceof TypeError)throw networkError("Model connector network error", e);throw e;}finally{clearTimeout(timer);unlinkAbort();}
   }
   async complete(request: ConversationRequest): Promise<ConversationResponse> {
     validateConversation(request);
@@ -541,7 +569,9 @@ export class OpenAICompatibleProvider implements ModelProvider {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") throw new Error("Model request timed out");
       // Never echo network errors or response bodies: they can contain secrets.
-      if (error instanceof TypeError) throw new Error("Model network request failed");
+      // The converted error carries only the sanitized code-only
+      // cause (transportCause above), never the original message.
+      if (error instanceof TypeError) throw networkError("Model network request failed", error);
       throw error;
     } finally { clearTimeout(timer); unlinkAbort(); }
   }

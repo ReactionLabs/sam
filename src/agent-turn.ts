@@ -11,6 +11,7 @@ import { chatTurnBudget, type ChatSurface, type SteerProvider, type TurnRoute } 
 import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
 import { relayCommandPrompt, relayPrompt, relayTargetsForProfile } from "./relay.js";
+import { errorReason } from "./telegram.js";
 import { recordUsage } from "./usage.js";
 import { recordContextMeter } from "./context-meter.js";
 import { countWords } from "./memory.js";
@@ -96,8 +97,21 @@ function setReactionSafe(root:string,chatId:string,messageId:string,reaction:str
 // that failure also kills the outer turn, the outer ledgers too -
 // two turns failed, two lines, which is the true count.
 export function turnFailureSummary(chatId:string,route:TurnRoute,error:unknown):string{
-  const message=error instanceof Error?error.message:String(error);
-  return "Turn failed in chat "+chatId.slice(0,8)+" ("+route+"): "+message;
+  // The reason rides errorReason (gap found 2026-11-16, hourly
+  // run 09:04 EST; the 04:04 bridge seam, cured at delivery
+  // 05:04, probe verdicts 06:04, verify 07:04, vault-use
+  // 08:04): a turn dying on a transport failure used to ledger
+  // the bare wrapper ("fetch failed", or the provider's plain
+  // "Model network request failed") and name nothing - DNS vs
+  // connect vs socket vs TLS indistinguishable, the real reason
+  // on error.cause. errorReason walks the cause chain
+  // (bounded, deduped), appends errno-style codes, redacts
+  // bot-token segments, and collapses whitespace. Causeless
+  // errors and plain strings read byte-identically, so every
+  // existing failure class keeps its exact line and its
+  // self-work classification; the person's message content
+  // still never enters the line.
+  return "Turn failed in chat "+chatId.slice(0,8)+" ("+route+"): "+errorReason(error);
 }
 export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,error:unknown):void{
   let actor="sam";
