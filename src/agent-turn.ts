@@ -29,6 +29,7 @@ import { REASONING_BLOCKED_REPLY, isReasoningNarration, reasoningBlockedLedgerSu
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
 import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
+import { getVaultCredentialValue } from "./vault.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
 // statement (UNIFICATION item 1): these are real UI capabilities the
@@ -332,10 +333,20 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     const conn=routes[i];
     const guard:TurnToolGuard={toolsStarted:false};
     try{
-      if(conn.unavailable)throw Error(conn.unavailable);
+      if(conn.unavailable){const e=new Error(conn.unavailable) as Error&{samUnavailable?:string};e.samUnavailable=conn.unavailable;throw e;}
       if(!conn.endpoint||!conn.model)throw Error("Model not configured");
       const model=conn.model;
-      const provider=new OpenAICompatibleProvider(conn.endpoint,readProviderKey(process.env,conn.keyEnv)??"",MODEL_REQUEST_TIMEOUT_MS);
+      // Member BYOK: a route carrying a vaultKey spends the
+      // MEMBER's own key, resolved from the vault by name and
+      // ledgered (vault-use, name and purpose only) on every
+      // resolution - the house environment key is never read for
+      // a member route.
+      let turnApiKey=readProviderKey(process.env,conn.keyEnv)??"";
+      if(conn.vaultKey){
+        turnApiKey=getVaultCredentialValue(root,conn.vaultKey)??"";
+        try{recordActivity(root,profileName,"vault-use","Vault credential "+conn.vaultKey+" used for a member model call ("+conn.providerId+"/"+model+")");}catch{/* the ledger never blocks the turn */}
+      }
+      const provider=new OpenAICompatibleProvider(conn.endpoint,turnApiKey,MODEL_REQUEST_TIMEOUT_MS);
       provider.abortSignal=control.signal;
       const tier=conn.tier;
       // Narration sink: tool-round text arrives here, never at
@@ -473,7 +484,14 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // marker on the owner's bubble plus the partial carry the
       // story, and a resend resumes from that text.
       if(!visitor&&route==="chat"&&!isProviderOverloadError(error)&&partialId===null){
-        const noteText=control.deadlineExceeded()?turnDeadlineFallbackAnswer(content):TURN_FAILURE_MESSAGE;
+        // An unavailable route (no key yet, managed usage spent, a
+        // provider pin that is not configured) already speaks in
+        // plain words written for the reader - the chat gets THOSE
+        // words, not the generic failure sentence, so a member who
+        // has not added their key reads "add your key" where they
+        // asked, not "a problem on my side".
+        const unavailableNote=(error as {samUnavailable?:unknown})?.samUnavailable;
+        const noteText=typeof unavailableNote==="string"?unavailableNote:(control.deadlineExceeded()?turnDeadlineFallbackAnswer(content):TURN_FAILURE_MESSAGE);
         try{
           const store=new ChatStore(root);
           try{

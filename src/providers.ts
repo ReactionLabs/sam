@@ -42,6 +42,11 @@ export interface TurnConnection {
   source: ModelSource;
   /** Set when the profile pins a provider id that is not configured. */
   unavailable?: string;
+  /** Member BYOK (Mission Control): when set, the turn's key comes
+   *  from the SAM vault under this credential NAME - a member's own
+   *  key, spent only on that member's turns - never from the
+   *  environment. agent-turn resolves it and ledgers the use. */
+  vaultKey?: string;
 }
 
 export interface FileProvider {

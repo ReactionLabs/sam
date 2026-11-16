@@ -43,7 +43,11 @@ import { recordActivity } from "./activity.js";
 export const VAULT_NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const HOST_RE = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 const MAX_VALUE_CHARS = 8192;
-const MAX_CREDENTIALS = 64;
+// Raised from 64 when members arrived (Mission Control, 2026-11-15):
+// every member account's own model key is one vault credential, so
+// the vault's ceiling is the member ceiling. Still a hard bound: a
+// runaway deposit loop stops here instead of filling the disk.
+const MAX_CREDENTIALS = 1024;
 
 /** The env var the injected value rides into the child process
  *  on. Named here so the askpass script and the executor can
