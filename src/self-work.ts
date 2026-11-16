@@ -616,6 +616,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The queue still fails closed exactly as before: a failed read rethrows instead of folding the store as no tasks (which would silently drop every queued and running run dressed as an empty queue, stranding work whose branch sandbox and approval assume it still waits), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a task record (specs, outputs, and results are the owner's words, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no tasks with no line, while validation errors (invalid actor / spec, missing chat, queue full) still ledger nothing",
      "The full suite is green, including the engine store failure-ledger tests"]);
+  if (key.startsWith("parallel-store-failed:")) return base(
+    ["parallel-coding.ts", "heartbeat.ts", "status.ts", "cli.ts"],
+    "Parallel store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the parallel store (.sam/parallel.db) must open, read, and write instead of dying at that seam - this store is the parallel coding queue (one row per job: actor, chat, spec, survey, slices, merges, verification, review, and result), read by parallelSummary (the dashboard status payload and the CLI overview) and drained by the heartbeat tick, so while it is dead parallel jobs die with the seam unnamed, the drain can fail uncounted, and a reader folding it as no jobs would silently empty the queue dressed as an idle install.",
+    ["The next queues, drains, status reads, and CLI parallel views resolve their jobs again instead of parallel-store-failed lines",
+     "Exactly one parallel-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The queue still fails closed exactly as before: a failed read rethrows instead of folding the store as no jobs (which would silently drop every queued and running job dressed as an empty queue, stranding work whose slice branches and approval assume it still waits), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a job record (specs, slice tasks, and results are the owner's words, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no jobs with no line, while validation errors (invalid actor / spec, missing chat, queue full) still ledger nothing",
+     "The full suite is green, including the parallel store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1010,6 +1018,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Engine store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "engine-store-failed:" + phase, label: "engine store failures (" + phase + " step)" };
+    }
+    case "parallel-store-failed": {
+      const m = summary.match(/^Parallel store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "parallel-store-failed:" + phase, label: "parallel store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);

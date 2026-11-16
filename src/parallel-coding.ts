@@ -143,7 +143,81 @@ export function parallelSliceBranch(job: { id: string }, sliceName: string): str
 // connections carry the F1 busy_timeout so the dashboard process
 // queuing and a CLI drain writing never lose each other's rows. A
 // pure read on an install with no store creates nothing.
+// Failure visibility (gap found 2026-11-15, hourly run
+// 20:04 EST): the parallel store holds the parallel
+// coding queue - each job's actor, chat, spec, survey,
+// slices, merges, verification, review, and result -
+// and every touch opened it raw. listParallelJobs rides
+// parallelSummary (the dashboard status payload and the
+// CLI overview) and the heartbeat drain; getParallelJob
+// and the row writes ride the drain's transitions,
+// updateParallelJob, proposeParallelPush, and the CLI
+// parallel verbs. A dead parallel.db threw into
+// whichever catch wrapped the call with the seam
+// unnamed, and no parallel-store-failed kind existed
+// (parallel-failed is the drain's job-outcome class, a
+// different seam), so the class was uncountable, and
+// any reader folding a dead store as "no jobs" would
+// silently empty the parallel queue dressed as an idle
+// install - a queued job's record gone while its slice
+// branches and the owner's approval assume it still
+// waits. Now the store's touches own their failure
+// (the engine precedent): a failed touch ledgers ONE
+// parallel-store-failed line (phase read for
+// listParallelJobs / getParallelJob, write for
+// insertParallelJob / saveParallelJob and every
+// mutation door riding them; actor sam; the verbatim
+// reason collapsed and capped; never any job record -
+// specs, slice tasks, and results are the owner's
+// words, not failure data), tags the error, and
+// rethrows exactly, so every caller's handling is
+// unchanged and reads still fail closed. A touch
+// already ledgered by an inner door keeps its one
+// line and gains no second. Validation errors (actor /
+// spec / chat / queue-full refusals) are not store
+// failures and ledger nothing. An absent store still
+// reads empty with no line and creates nothing, and
+// torn row payloads still parse forgiving - only the
+// store touch is guarded.
+export type ParallelStorePhase = "read" | "write";
 
+export function parallelStoreFailureSummary(phase: ParallelStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Parallel store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordParallelStoreFailure(root: string, phase: ParallelStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "parallel-store-failed", parallelStoreFailureSummary(phase, reason));
+}
+
+function tagParallelStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { parallelStoreLedgered?: boolean }).parallelStoreLedgered = true;
+  }
+}
+
+export function isParallelStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { parallelStoreLedgered?: boolean }).parallelStoreLedgered === true;
+}
+
+const PARALLEL_STORE_VALIDATION = [/^Invalid actor$/, /^Invalid parallel job spec$/, /^A chat is required$/, /^Parallel job queue is full$/];
+
+function isParallelStoreValidation(error: unknown): boolean {
+  return error instanceof Error && PARALLEL_STORE_VALIDATION.some(re => re.test(error.message));
+}
+
+function failParallelStore(root: string, phase: ParallelStorePhase, error: unknown): never {
+  if (!isParallelStoreLedgered(error) && !isParallelStoreValidation(error)) recordParallelStoreFailure(root, phase, error);
+  if (!isParallelStoreValidation(error)) tagParallelStoreLedgered(error);
+  throw error;
+}
+
+function openParallelGuarded(root: string, phase: ParallelStorePhase): Database.Database {
+  try { return openParallelStore(root); }
+  catch (error) { failParallelStore(root, phase, error); }
+}
 function parallelDbFile(root: string): string { return join(resolve(root), ".sam", "parallel.db"); }
 function openParallelStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
@@ -157,30 +231,34 @@ function rowToJob(data: string): ParallelJob | null {
 }
 export function listParallelJobs(root: string): ParallelJob[] {
   if (!existsSync(parallelDbFile(root))) return [];
-  const db = openParallelStore(root);
+  const db = openParallelGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM parallel_jobs ORDER BY rowid").all() as Array<{ data: string }>;
     const items: ParallelJob[] = [];
     for (const row of rows) { const job = rowToJob(row.data); if (job) items.push(job); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failParallelStore(root, "read", error); }
+  finally { db.close(); }
 }
 export function getParallelJob(root: string, id: string): ParallelJob | null {
   if (!existsSync(parallelDbFile(root))) return null;
-  const db = openParallelStore(root);
+  const db = openParallelGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM parallel_jobs WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToJob(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failParallelStore(root, "read", error); }
+  finally { db.close(); }
 }
 function insertParallelJob(root: string, item: ParallelJob): void {
-  const db = openParallelStore(root);
+  const db = openParallelGuarded(root, "write");
   try { db.prepare("INSERT INTO parallel_jobs (id, data) VALUES (?, ?)").run(item.id, JSON.stringify(item)); }
+  catch (error) { failParallelStore(root, "write", error); }
   finally { db.close(); }
 }
 function saveParallelJob(root: string, item: ParallelJob): void {
-  const db = openParallelStore(root);
+  const db = openParallelGuarded(root, "write");
   try { db.prepare("UPDATE parallel_jobs SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
+  catch (error) { failParallelStore(root, "write", error); }
   finally { db.close(); }
 }
 export function updateParallelJob(root: string, id: string, patch: Partial<ParallelJob>): ParallelJob | null {
