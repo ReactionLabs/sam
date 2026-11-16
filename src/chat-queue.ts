@@ -9,6 +9,7 @@ import { runChatTurn } from "./agent-turn.js";
 import { readDashboardConfig } from "./dashboard-config.js";
 import { abortChatTurnRequests, bumpTurnGeneration, createTurnControl, OWNER_TURN_DEADLINE_MS } from "./turn-control.js";
 import { chatQueueTouch, chatQueueTouchAsync } from "./chat-queue-failure.js";
+import { errorReason } from "./telegram.js";
 import type { SteerProvider } from "./budgets.js";
 
 // Message bursts (Defect 2, Dip 2026-11-14: "i want to be able to fire
@@ -131,6 +132,23 @@ function actorForChat(root: string, chatId: string): string {
 }
 function ledger(root: string, actor: string, kind: string, summary: string): void {
   try { recordActivity(root, actor, kind, summary); } catch { /* the ledger never breaks the queue */ }
+}
+
+// Queued message failures carry their reason (gap found
+// 2026-11-16, hourly run 11:04 EST): the drain catch bound no
+// error at all, so every live message-failed line read as the
+// bare accounting sentence and named nothing - the class was
+// countable but never diagnosable from its own line. The
+// reason rides errorReason (the 2026-11-16 04:04 bridge seam,
+// cured at turn-failed 09:04): the cause chain is walked
+// bounded and deduped, errno-style codes are appended, and
+// bot-token segments are redacted, so a queued turn dying on
+// transport reads with its cause named. The accounting half
+// of the sentence is byte-identical, the composed summary
+// caps at 200 like the house failure summaries, and the
+// person's message content never enters the line.
+export function messageFailedSummary(chatId: string, count: number, error: unknown): string {
+  return ("A queued turn in chat " + chatId.slice(0, 8) + " failed: " + errorReason(error) + "; its " + count + " message(s) are marked failed in the queue, not lost").slice(0, 200);
 }
 
 export function listChatQueue(root: string, chatId: string, limit = 12): QueueItem[] {
@@ -345,12 +363,16 @@ async function drainChatQueueInner(root: string, chatId: string, opts?: { deadli
             if (target) setItemMessageId(root, target.id, messageId);
           },
         });
-      } catch {
+      } catch (e) {
         // runChatTurn already ledgered the failure (turn-failed); the
         // queue rows are marked failed so the surface shows them as
-        // accounted-for, never silently gone.
+        // accounted-for, never silently gone. The queue's own line
+        // carries the reason too (gap found 2026-11-16, hourly run
+        // 11:04 EST): all 6 live message-failed lines named nothing
+        // at all, so the class was countable but diagnosable only
+        // by correlating timestamps with the turn-failed sibling.
         for (const item of items) setStatus(root, item.id, "failed");
-        ledger(root, actor, "message-failed", "A queued turn in chat " + chatId.slice(0, 8) + " failed; its " + items.length + " message(s) are marked failed in the queue, not lost");
+        ledger(root, actor, "message-failed", messageFailedSummary(chatId, items.length, e));
       }
     }
   } finally {
