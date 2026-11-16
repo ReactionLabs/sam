@@ -213,3 +213,104 @@ test("sign-out ends the session", async () => {
   const me = await api("/me", { token: a.token });
   assert.equal(me.status, 401);
 });
+
+test("your sam: the standing files start as honest starter content, save into the member's own files, and never leak across members", async () => {
+  const a = await signIn("door-a@example.com");
+  const b = await signIn("door-b@example.com");
+
+  // The new routes demand a credential like everything else.
+  const anon = await api("/me/files/soul");
+  assert.equal(anon.status, 401);
+  const anonSkills = await api("/me/skills");
+  assert.equal(anonSkills.status, 401);
+
+  // A has never saved a SOUL: the door serves starter content
+  // seeded from A's own spawn instructions, marked seeded, and
+  // written nowhere yet.
+  const soulA = await api("/me/files/soul", { token: a.token });
+  assert.equal(soulA.status, 200);
+  const fileA = soulA.json.file as { content: string; seeded: boolean; present: boolean; fileName: string };
+  assert.equal(fileA.fileName, "SOUL.md");
+  assert.equal(fileA.seeded, true);
+  assert.equal(fileA.present, false);
+  assert.match(fileA.content, /personal AI assistant for/i);
+
+  // A saves their own words; the read-back is A's file, unseeded.
+  const saved = await api("/me/files/soul", { method: "PUT", token: a.token, body: { content: "# Who my SAM is\nA-only soul text, short and warm." } });
+  assert.equal(saved.status, 200);
+  const savedFile = saved.json.file as { content: string; seeded: boolean; present: boolean };
+  assert.equal(savedFile.seeded, false);
+  assert.equal(savedFile.present, true);
+  assert.match(savedFile.content, /A-only soul text/);
+
+  // B's SOUL is still B's own starter; A's words never appear.
+  const soulB = await api("/me/files/soul", { token: b.token });
+  const fileB = soulB.json.file as { content: string; seeded: boolean };
+  assert.equal(fileB.seeded, true);
+  assert.doesNotMatch(fileB.content, /A-only soul text/);
+
+  // AGENTS rides the same shape: starter first, then A's save.
+  const agentsA = await api("/me/files/agents", { token: a.token });
+  const agentsFile = agentsA.json.file as { content: string; seeded: boolean; fileName: string };
+  assert.equal(agentsFile.fileName, "AGENTS.md");
+  assert.equal(agentsFile.seeded, true);
+  assert.match(agentsFile.content, /How your SAM works/);
+  const savedAgents = await api("/me/files/agents", { method: "PUT", token: a.token, body: { content: "Always check the calendar first." } });
+  assert.equal(savedAgents.status, 200);
+
+  // An empty save is refused, and an unknown file is a plain 404.
+  const empty = await api("/me/files/agents", { method: "PUT", token: a.token, body: { content: "   " } });
+  assert.equal(empty.status, 400);
+  const nope = await api("/me/files/diary", { token: a.token });
+  assert.equal(nope.status, 404);
+
+  // Skills answer with the name + description shape.
+  const skills = await api("/me/skills", { token: a.token });
+  assert.equal(skills.status, 200);
+  assert.ok(Array.isArray(skills.json.skills));
+});
+
+test("your sam: heartbeats are the member's own - create, list, toggle, edit, delete, isolation", async () => {
+  const a = await signIn("door-a@example.com");
+  const b = await signIn("door-b@example.com");
+
+  const created = await api("/me/heartbeats", { method: "POST", token: a.token, body: { name: "Morning check", minutes: 60, prompt: "Check the day and report anything new." } });
+  assert.equal(created.status, 201);
+  const job = created.json.heartbeat as { id: string; enabled: boolean; minutes: number; lastRun: unknown };
+  assert.equal(job.enabled, true);
+  assert.equal(job.minutes, 60);
+  assert.equal(job.lastRun, null);
+
+  // Validation is plain: below the 5-minute floor is refused.
+  const bad = await api("/me/heartbeats", { method: "POST", token: a.token, body: { name: "Too fast", minutes: 1, prompt: "x" } });
+  assert.equal(bad.status, 400);
+  const noPrompt = await api("/me/heartbeats", { method: "POST", token: a.token, body: { name: "No orders", minutes: 30, prompt: " " } });
+  assert.equal(noPrompt.status, 400);
+
+  const listA = await api("/me/heartbeats", { token: a.token });
+  assert.equal((listA.json.heartbeats as unknown[]).length, 1);
+  const listB = await api("/me/heartbeats", { token: b.token });
+  assert.equal((listB.json.heartbeats as unknown[]).length, 0);
+
+  // B cannot touch A's job by id: update and delete both 404.
+  const stolenPut = await api("/me/heartbeats/" + job.id, { method: "PUT", token: b.token, body: { enabled: false } });
+  assert.equal(stolenPut.status, 404);
+  const stolenDel = await api("/me/heartbeats/" + job.id, { method: "DELETE", token: b.token });
+  assert.equal(stolenDel.status, 404);
+
+  // A toggles it off and changes the interval.
+  const off = await api("/me/heartbeats/" + job.id, { method: "PUT", token: a.token, body: { enabled: false } });
+  assert.equal(off.status, 200);
+  assert.equal((off.json.heartbeat as { enabled: boolean }).enabled, false);
+  const edited = await api("/me/heartbeats/" + job.id, { method: "PUT", token: a.token, body: { minutes: 120 } });
+  assert.equal(edited.status, 200);
+  assert.equal((edited.json.heartbeat as { minutes: number }).minutes, 120);
+  const badEdit = await api("/me/heartbeats/" + job.id, { method: "PUT", token: a.token, body: { minutes: 2 } });
+  assert.equal(badEdit.status, 400);
+
+  // A deletes it; the list is empty again.
+  const del = await api("/me/heartbeats/" + job.id, { method: "DELETE", token: a.token });
+  assert.equal(del.status, 200);
+  const listA2 = await api("/me/heartbeats", { token: a.token });
+  assert.equal((listA2.json.heartbeats as unknown[]).length, 0);
+});

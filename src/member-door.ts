@@ -19,6 +19,10 @@ import {
   type Member,
 } from "./members.js";
 import { sendMagicLinkEmail } from "./member-mail.js";
+import {
+  createMemberHeartbeat, deleteMemberHeartbeat, memberFileKind, memberFileView, memberHeartbeats,
+  memberSkills, saveMemberFile, updateMemberHeartbeat,
+} from "./member-sam.js";
 
 // The member door (Mission Control Phase 1, Dip ruling 2026-11-15):
 // the public API the hosted web app talks to. Every rule of the
@@ -276,6 +280,68 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
       if (apiTokenMatch && req.method === "DELETE") {
         const gone = revokeApiToken(workspace, member, apiTokenMatch[1]);
         sendJson(res, gone ? 200 : 404, gone ? { ok: true } : { error: "No such token." });
+        return;
+      }
+      // --- Your Sam: the member's own scoped SAM, visible and
+      // tunable (skills, the two standing files, heartbeats).
+      // Every read and write is keyed by THIS member's profile;
+      // another member's files and jobs answer the same 404 as
+      // missing, never their data. ---
+      if (path === "/me/skills" && req.method === "GET") {
+        try { sendJson(res, 200, { skills: memberSkills(workspace, member) }); }
+        catch { sendJson(res, 200, { skills: [] }); }
+        return;
+      }
+      const fileMatch = path.match(/^\/me\/files\/([a-z]+)$/);
+      if (fileMatch && (req.method === "GET" || req.method === "PUT")) {
+        const kind = memberFileKind(fileMatch[1]);
+        if (!kind) { sendJson(res, 404, { error: "No such file." }); return; }
+        if (req.method === "GET") {
+          sendJson(res, 200, { file: memberFileView(workspace, member, kind) });
+          return;
+        }
+        const body = await readJson(req);
+        try {
+          const file = saveMemberFile(workspace, member, kind, typeof body.content === "string" ? body.content : "");
+          sendJson(res, 200, { file });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "That file could not be saved." });
+        }
+        return;
+      }
+      if (path === "/me/heartbeats" && req.method === "GET") {
+        sendJson(res, 200, { heartbeats: memberHeartbeats(workspace, member) });
+        return;
+      }
+      if (path === "/me/heartbeats" && req.method === "POST") {
+        const body = await readJson(req);
+        try {
+          const job = createMemberHeartbeat(workspace, member, {
+            name: typeof body.name === "string" ? body.name : "",
+            minutes: typeof body.minutes === "number" ? body.minutes : NaN,
+            prompt: typeof body.prompt === "string" ? body.prompt : "",
+          });
+          sendJson(res, 201, { heartbeat: job });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "That heartbeat could not be saved." });
+        }
+        return;
+      }
+      const heartbeatMatch = path.match(/^\/me\/heartbeats\/([A-Za-z0-9-]+)$/);
+      if (heartbeatMatch && req.method === "PUT") {
+        const body = await readJson(req);
+        try {
+          const job = updateMemberHeartbeat(workspace, member, heartbeatMatch[1], body);
+          if (!job) { sendJson(res, 404, { error: "No such heartbeat." }); return; }
+          sendJson(res, 200, { heartbeat: job });
+        } catch (error) {
+          sendJson(res, 400, { error: error instanceof Error ? error.message : "That heartbeat could not be saved." });
+        }
+        return;
+      }
+      if (heartbeatMatch && req.method === "DELETE") {
+        const gone = deleteMemberHeartbeat(workspace, member, heartbeatMatch[1]);
+        sendJson(res, gone ? 200 : 404, gone ? { ok: true } : { error: "No such heartbeat." });
         return;
       }
       if (path === "/developer" && req.method === "GET") {
