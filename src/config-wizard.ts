@@ -11,6 +11,7 @@ import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 
 // CLI dressing item 1 (Dip, 2026-11-10; OpenClaw borrow, research doc
 // section 6 items 1+2): a guided `sam config` with sections, riding the
@@ -196,7 +197,21 @@ export async function verifyModel(env: NodeJS.ProcessEnv = process.env, complete
     if (!reply) return { ok: false, model, reason: "The model answered with an empty completion; nothing was saved." };
     return { ok: true, model, reason: "Verified with one real completion.", reply: reply.slice(0, 120) };
   } catch (err) {
-    return { ok: false, model, reason: "Verification failed: " + (err instanceof Error ? err.message : String(err)) };
+    // The failure reason rides errorReason (the 2026-11-16 04:04
+    // bridge seam, cured at the delivery seam at 05:04 and the
+    // probe verdict at 06:04): Node's fetch wraps every transport
+    // failure in the same "fetch failed" with the real reason on
+    // error.cause, so err.message alone reported "Verification
+    // failed: fetch failed" for a DNS failure, a refused
+    // connection, and a TLS failure alike - the first-run setup
+    // and `config verify --live` named nothing at the moment the
+    // owner most needs to know what to fix. errorReason walks
+    // the cause chain (bounded, deduped), appends errno codes,
+    // redacts bot-token segments, and collapses whitespace;
+    // causeless errors compose to exactly their message, so
+    // they read as before. Verify-before-save is untouched: a
+    // failure still saves nothing.
+    return { ok: false, model, reason: "Verification failed: " + errorReason(err) };
   }
 }
 
