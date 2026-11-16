@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import { getVaultCredentialValue, listVaultCredentials, VAULT_NAME_RE } from "./vault.js";
+import { errorReason } from "./telegram.js";
 
 // A connector's credential comes from exactly one of two places:
 // the process environment (tokenEnv, the original shape) or the
@@ -277,6 +278,14 @@ export function resolveConnectorCredential(root:string|undefined,c:Connector):st
 export function connectorCredentialPresent(root:string,c:Connector):boolean{
  return resolveConnectorCredential(root,c)!==null;
 }
+// Failure outcomes on the vault-use lines compose through
+// errorReason (gap found 2026-11-16, hourly run 08:04 EST):
+// the MCP exchange rides fetch, whose transport failures all
+// wear the bare "fetch failed" wrapper with the real reason
+// (DNS / connect / socket / TLS) on error.cause, so a message-
+// alone line named nothing. Causeless errors read exactly as
+// before, and the line still carries name + connector +
+// outcome only - never the credential value.
 function ledgerConnectorVaultUse(root:string,c:Connector,purpose:string,outcome:string):void{
  if(!c.vaultKey)return;
  try{recordActivity(root,"sam","vault-use","Vault credential "+c.vaultKey+" used for connector \""+c.name+"\" ("+purpose+") - "+outcome);}catch{/* the ledger never breaks a connector call */}
@@ -369,7 +378,7 @@ export async function mcpCall(c:Connector,method:string,params:Record<string,unk
   if(root)ledgerConnectorVaultUse(root,c,method==="tools/call"?"tool call "+String(tool):method,"ok");
   return out;
  }catch(e){
-  if(root)ledgerConnectorVaultUse(root,c,method==="tools/call"?"tool call "+String(tool):method,"failed: "+(e instanceof Error?e.message:"unknown error"));
+  if(root)ledgerConnectorVaultUse(root,c,method==="tools/call"?"tool call "+String(tool):method,"failed: "+(e instanceof Error?errorReason(e):"unknown error"));
   throw e;
  }
 }
@@ -383,7 +392,7 @@ export async function testConnector(c:Connector,root?:string){
   if(root)ledgerConnectorVaultUse(root,c,"connector test","ok");
   return {initialized:true,protocolVersion:session.version,tools,approved:tools.filter(x=>readOnlyTools.has(x)&&c.allowedTools.includes(x))};
  }catch(e){
-  if(root)ledgerConnectorVaultUse(root,c,"connector test","failed: "+(e instanceof Error?e.message:"unknown error"));
+  if(root)ledgerConnectorVaultUse(root,c,"connector test","failed: "+(e instanceof Error?errorReason(e):"unknown error"));
   throw e;
  }
 }
