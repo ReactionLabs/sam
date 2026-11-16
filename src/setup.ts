@@ -2,6 +2,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { join, resolve } from "node:path";
 import { stdin, stdout } from "node:process";
 import { verifyAndSaveSetup, type Completer } from "./config-wizard.js";
+import { grooveEnabled, makeTheme } from "./theme.js";
+
+// Guided setup is a human flow: its milestone lines take the poster
+// theme on a terminal, and stay plain everywhere else.
+const theme = makeTheme(grooveEnabled());
 
 // Cold-install path (Program B, scoreboard dimension 5): a stranger
 // clones the repo and reaches a first answered chat in minutes, with
@@ -139,7 +144,7 @@ export async function runSetup(root: string, io: SetupIo, opts: SetupOptions = {
     }
   }
 
-  io.print("Setting up S.A.M. in " + workspace);
+  io.print(theme.lead("Setting up S.A.M. in " + workspace));
   const provider = ((opts.provider ?? (await io.ask("Model provider [minimax]: ")).trim()) || DEFAULT_SETUP_PROVIDER).toLowerCase();
   if (provider !== "minimax") {
     io.print("Guided setup currently wires the minimax provider only. For an OpenAI-compatible endpoint, write " + envFile + " by hand with SAM_MODEL_ENDPOINT, SAM_MODEL and SAM_MODEL_API_KEY, then run `sam config verify --live`. Nothing was saved.");
@@ -178,7 +183,7 @@ export async function runSetup(root: string, io: SetupIo, opts: SetupOptions = {
 
   writeWorkspaceEnv(workspace, { SAM_MODEL_PROVIDER: provider, SAM_MODEL: model, MINIMAX_API_KEY: key });
   io.print("");
-  io.print("Verified: " + model + " answered. Your key is stored in " + envFile + " (permissions 0600, loaded automatically by every sam command).");
+  io.print(theme.ok("Verified: " + model + " answered. Your key is stored in " + envFile + " (permissions 0600, loaded automatically by every sam command)."));
   io.print("");
   io.print("Next steps:");
   io.print("  First chat in the terminal:");

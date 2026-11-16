@@ -23,6 +23,7 @@ import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-
 import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
 import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, mergeQueueIntoMessages, resendFailedMessage, resetChatTurn, resumeChatQueues, type QueueItem } from "./chat-queue.js";
 import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
+import { grooveEnabled, makeTheme } from "./theme.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -428,8 +429,13 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
   });
   await new Promise<void>((done,fail)=>{server.once("error",fail);server.listen(port,"127.0.0.1",()=>{server.off("error",fail);done();});});
   // Bursts that outlived a restart resume draining on their own.
-  try{const resumed=resumeChatQueues(workspace);if(resumed.length)console.log("SAM dashboard: resumed message queues for "+resumed.length+" chat(s)");}catch{/* a dead queue store never blocks the dashboard */}
-  console.log(`SAM dashboard: http://127.0.0.1:${port}/dashboard/${token}`);
-  console.log("Read-only local dashboard. Press Ctrl+C to stop.");
+  // Terminal startup lines are CLI surface and take the poster theme;
+  // the served page is the owner's own design canvas and is untouched.
+  // Under a service manager stdout is not a TTY, so the theme is off
+  // and these lines stay plain in the logs.
+  const theme=makeTheme(grooveEnabled());
+  try{const resumed=resumeChatQueues(workspace);if(resumed.length)console.log(theme.ok("SAM dashboard: resumed message queues for "+resumed.length+" chat(s)"));}catch{/* a dead queue store never blocks the dashboard */}
+  console.log(theme.lead(`SAM dashboard: http://127.0.0.1:${port}/dashboard/${token}`));
+  console.log(theme.dim("Read-only local dashboard. Press Ctrl+C to stop."));
   await new Promise<void>(done=>{const stop=()=>server.close(()=>done());process.once("SIGINT",stop);process.once("SIGTERM",stop);});
 }

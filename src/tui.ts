@@ -16,8 +16,10 @@ import { lastSkillByChat } from "./skill-use.js";
 import { samBanner } from "./banner.js";
 import { detectSetup } from "./config-wizard.js";
 import { renderImageFile } from "./term-image.js";
+import { grooveEnabled, POSTER } from "./theme.js";
 
-const CYAN = "\x1b[38;2;34;211;238m";
+// The poster accent (burnt orange) rides the prompt and speaker marks.
+const CYAN = `\x1b[38;2;${POSTER.orange[0]};${POSTER.orange[1]};${POSTER.orange[2]}m`;
 const DIM = "\x1b[90m";
 const BOLD = "\x1b[1m";
 const RED = "\x1b[38;2;248;113;113m";
@@ -45,7 +47,7 @@ export function wrapText(text: string, width: number): string[] {
 
 export async function runTui(root: string, opts: { profile?: string; bannerOnly?: boolean } = {}): Promise<void> {
   const profile = opts.profile ?? "sam";
-  const color = !!process.stdout.isTTY;
+  const color = grooveEnabled();
   const cols = () => Math.max(30, process.stdout.columns ?? 80);
   const paint = (code: string, text: string) => (color ? code + text + RESET : text);
   const banner = () => samBanner({ profile, model: process.env.SAM_MODEL, workspace: root, color, cols: cols() });

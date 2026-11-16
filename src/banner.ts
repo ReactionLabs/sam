@@ -1,37 +1,41 @@
 // The S.A.M. startup splash (Dip ask 2026-11-10: "spell out Sam when u
-// first start it"). Block-letter wordmark in a cyan top-to-bottom gradient,
-// matching the terminal-glow reference art Dip supplied, with the tagline
-// from that art. Pure string building so the splash is unit-testable and
-// identical on every surface that prints it.
+// first start it"). Bubble-letter wordmark in the spirit of Dip's 70s
+// SAM poster (restyle 2026-11-15): rounded block glyphs running a
+// mustard-to-burnt-orange gradient, the tagline from the original
+// reference art between two poster sparkles, the status line in CRT
+// green (the instrument color), hints in olive. Pure string building
+// so the splash is unit-testable and
+// identical on every surface that prints it; color is the caller's
+// call (theme.ts owns the TTY / NO_COLOR / SAM_PLAIN decision).
 
 const GLYPHS: Record<string, string[]> = {
   S: [
-    " ██████",
-    "██     ",
-    " █████ ",
-    "     ██",
-    "██████ ",
+    " ▄████▄ ",
+    "██      ",
+    " ▀████▄ ",
+    "      ██",
+    " ▄████▀ ",
   ],
   A: [
-    " █████ ",
-    "██   ██",
-    "███████",
-    "██   ██",
-    "██   ██",
+    " ▄████▄ ",
+    "██    ██",
+    "████████",
+    "██    ██",
+    "██    ██",
   ],
   M: [
-    "███   ███",
-    "████ ████",
-    "██ ███ ██",
-    "██  █  ██",
-    "██     ██",
+    "███    ███",
+    "████  ████",
+    "██ ▀██▀ ██",
+    "██      ██",
+    "██      ██",
   ],
   ".": [
-    "  ",
-    "  ",
-    "  ",
-    "  ",
-    "██",
+    "   ",
+    "   ",
+    "   ",
+    "   ",
+    "██ ",
   ],
   PROMPT: [
     "    ",
@@ -42,14 +46,20 @@ const GLYPHS: Record<string, string[]> = {
   ],
 };
 
-// Cyan gradient, bright at the top edge to deep at the baseline.
+// Poster gradient between Dip's specified tokens (2026-11-15):
+// mustard #D5AC40 at the top edge to burnt orange #E86C25 at the baseline.
 const ROW_COLORS: Array<[number, number, number]> = [
-  [165, 243, 252],
-  [103, 232, 249],
-  [34, 211, 238],
-  [6, 182, 212],
-  [8, 145, 178],
+  [213, 172, 64],
+  [218, 156, 57],
+  [222, 140, 50],
+  [227, 124, 44],
+  [232, 108, 37],
 ];
+
+const TAGLINE_RGB: [number, number, number] = [213, 172, 64];
+const SPARKLE_RGB: [number, number, number] = [232, 108, 37];
+const STATUS_RGB: [number, number, number] = [134, 226, 154];
+const HINTS_RGB: [number, number, number] = [78, 88, 57];
 
 export function samWordmark(): string[] {
   const parts = [GLYPHS.PROMPT, GLYPHS.S, GLYPHS["."], GLYPHS.A, GLYPHS["."], GLYPHS.M];
@@ -72,14 +82,22 @@ export function samBanner(opts: { profile: string; model?: string; workspace: st
       lines.push(pad + row);
     }
   });
-  const tagline = "Self-directed AI Workforce";
+  const tagline = "✶ Self-directed AI Workforce ✶";
   const tagPad = cols > width + 4 ? " ".repeat(Math.max(0, Math.floor((cols - tagline.length) / 2))) : pad;
   lines.push("");
-  lines.push(tagPad + (opts.color ? "\x1b[38;2;34;211;238m" + tagline + "\x1b[0m" : tagline));
+  if (opts.color) {
+    const sparkle = `\x1b[38;2;${SPARKLE_RGB[0]};${SPARKLE_RGB[1]};${SPARKLE_RGB[2]}m`;
+    const gold = `\x1b[1m\x1b[38;2;${TAGLINE_RGB[0]};${TAGLINE_RGB[1]};${TAGLINE_RGB[2]}m`;
+    lines.push(tagPad + sparkle + "✶" + "\x1b[0m " + gold + "Self-directed AI Workforce" + "\x1b[0m " + sparkle + "✶" + "\x1b[0m");
+  } else {
+    lines.push(tagPad + tagline);
+  }
+  const statusRgb = `\x1b[38;2;${STATUS_RGB[0]};${STATUS_RGB[1]};${STATUS_RGB[2]}m`;
+  const hintsRgb = `\x1b[38;2;${HINTS_RGB[0]};${HINTS_RGB[1]};${HINTS_RGB[2]}m`;
   const status = `profile ${opts.profile}` + (opts.model ? ` · model ${opts.model}` : "") + ` · ${opts.workspace}`;
-  lines.push(pad + (opts.color ? "\x1b[90m" + status + "\x1b[0m" : status));
+  lines.push(pad + (opts.color ? statusRgb + status + "\x1b[0m" : status));
   const hints = "Type to talk · /image <file> shows an image · /help · /quit";
-  lines.push(pad + (opts.color ? "\x1b[90m" + hints + "\x1b[0m" : hints));
+  lines.push(pad + (opts.color ? hintsRgb + hints + "\x1b[0m" : hints));
   lines.push("");
   return lines.join("\n") + "\n";
 }

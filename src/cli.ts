@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, type Help } from "commander";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { TaskScheduler } from "./tasks.js";
@@ -90,6 +90,7 @@ import { addFallbackRoute, clearFallbackRoutes, fallbackRoutes } from "./failove
 import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
 import { samBanner } from "./banner.js";
+import { grooveEnabled, makeTheme } from "./theme.js";
 import { authorizeMcpTool } from "./mcp-policy.js";
 import { homedir } from "node:os";
 import { join,resolve } from "node:path";
@@ -125,6 +126,11 @@ import { CaptureGuardStore, addSuppression } from "./capture-guard.js";
 
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
+// The poster theme (theme.ts owns the decision): paint exists only on
+// a human's TTY with NO_COLOR unset and SAM_PLAIN not "1". When the
+// theme is off every helper below is the identity, so piped and --json
+// output stays byte-identical for the scripts that consume it.
+const theme=makeTheme(grooveEnabled());
 program.option("--workspace <path>","Workspace directory",process.cwd()).option("--json","JSON output");
 function dbPath():string {
   return join(resolve(program.opts().workspace),".sam","missions.db");
@@ -145,7 +151,11 @@ function missionOrThrow(missions:MissionStore,code:string) {
 function withTasks<T>(fn:(tasks:TaskScheduler,missions:MissionStore)=>T):T {
   return withDb((db,missions)=>fn(new TaskScheduler(db, program.opts().workspace as string),missions));
 }
-function output(data:unknown):void { console.log(program.opts().json?JSON.stringify(data,null,2):typeof data==="string"?data:JSON.stringify(data,null,2)); }
+function output(data:unknown):void {
+  if (program.opts().json) { console.log(JSON.stringify(data,null,2)); return; }
+  if (typeof data==="string") { console.log(data); return; }
+  console.log(theme.json(JSON.stringify(data,null,2)));
+}
 // C5 self-review wiring for the production coding drains (heartbeat
 // tick + coding drain): the real goldfish reviewer from the model
 // env, or a refusing stub when no model is configured - a coding
@@ -168,7 +178,7 @@ function makeChannelDeliver(root:string){ return async(channelId:string,text:str
 }; }
 program.command("init").description("Initialize local mission workspace").action(()=>{
   const dir=join(resolve(program.opts().workspace),".sam");mkdirSync(dir,{recursive:true});
-  const db=store();db.close();output("SAM initialized at "+dir);
+  const db=store();db.close();output(theme.ok("SAM initialized at "+dir));
 });
 program.command("inspect-local").description("List one explicitly selected directory; no model access, file contents, or commands")
   .requiredOption("--root <path>","Authorized root folder")
@@ -292,7 +302,7 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
   const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"telegram");
   let stopping=false;process.once("SIGINT",()=>{stopping=true;});process.once("SIGTERM",()=>{stopping=true;});
-  console.log("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)"));
+  console.log(theme.ok("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)")));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
  });
 program.command("discord-post").description("Post a message to a Discord channel via its webhook (channel kind: discord)")
@@ -578,7 +588,7 @@ eventCmd.command("bind").argument("<name>").argument("<profile>").requiredOption
 eventCmd.command("list").description("Event bindings. Secret values are never printed").action(()=>{const root=program.opts().workspace as string;output(eventBindings(root).map(b=>({...b,secret:process.env[b.secretEnv]?.trim()?"present":"absent"})));});
 eventCmd.command("unbind").argument("<name>").action((name:string)=>output({removed:unbindEvent(program.opts().workspace,name)}));
 eventCmd.command("accept").argument("<name>").requiredOption("--body <file>","UTF-8 JSON file: {type,id?,data}").option("--signature <hex>","HMAC-SHA256 hex of the file bytes. Omit to sign with the binding's secret env, for a local check").description("Accept one signed event now, the same door the webhook uses").action(async(name:string,o:{body:string;signature?:string})=>{const root=program.opts().workspace as string;const raw=readFileSync(o.body,"utf8");const binding=eventBindings(root).find(b=>b.name===name);if(!binding)throw new Error("Unknown event");const secret=process.env[binding.secretEnv];if(!secret)throw new Error("Event secret missing from environment: "+binding.secretEnv);const signature=o.signature??signEvent(secret,raw);const result=await acceptEvent(root,{name,rawBody:raw,signature});output(result);if(result.status!==200)process.exitCode=1;});
-eventCmd.command("serve").option("--port <number>","Loopback port","4392").description("Serve POST /events/<name> on 127.0.0.1. Signature header: x-sam-event-signature").action(async(o:{port:string})=>{const root=program.opts().workspace as string;const port=Number(o.port);await serveEvents(root,port);console.log("SAM event door on 127.0.0.1:"+port);await new Promise(()=>{});});
+eventCmd.command("serve").option("--port <number>","Loopback port","4392").description("Serve POST /events/<name> on 127.0.0.1. Signature header: x-sam-event-signature").action(async(o:{port:string})=>{const root=program.opts().workspace as string;const port=Number(o.port);await serveEvents(root,port);console.log(theme.ok("SAM event door on 127.0.0.1:"+port));await new Promise(()=>{});});
 program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")
@@ -594,7 +604,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
   const token=o.dashboardToken?()=>o.dashboardToken:()=>dashboardTokenFromLog(logPath);
   const sam=new DashboardSamClient(o.dashboardUrl.replace(/\/$/,""),token,fetch,"api");
-  console.log("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port);
+  console.log(theme.ok("SAM webhook channel "+channel.name+" -> profile "+channel.profile+" on 127.0.0.1:"+o.port));
   await serveWebhookChannel({channel,sam,secret,port:Number(o.port),root});
  });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
@@ -802,7 +812,7 @@ program.command("talk").description("Interactive terminal conversation with conf
     const provider=new OpenAICompatibleProvider(endpoint,key);
     const messages:Array<{role:"user"|"assistant";content:string}>=[];
     const rl=createInterface({input:stdin,output:stdout,terminal:stdin.isTTY});
-    console.log("SAM terminal chat. Type /exit to quit. Each reply may incur provider charges.");
+    console.log(theme.lead("SAM terminal chat. Type /exit to quit. Each reply may incur provider charges."));
     try {
       while (true) {
         let line:string;
@@ -1000,7 +1010,7 @@ const config=program.command("config").description("Configuration: bare `sam con
 // The wizard under the banner: the S.A.M. splash first (the spin-up is a
 // welcome screen, Dip 2026-11-10), then the sectioned flow on readline.
 async function runWizardCli(root:string,section?:string):Promise<void>{
-  process.stdout.write(samBanner({profile:"sam",model:process.env.SAM_MODEL,workspace:root,color:!!process.stdout.isTTY,cols:process.stdout.columns??0}));
+  process.stdout.write(samBanner({profile:"sam",model:process.env.SAM_MODEL,workspace:root,color:theme.on,cols:process.stdout.columns??0}));
   const rl=createInterface({input:stdin,output:stdout});
   try{ await runConfigWizard(root,{print:(line:string)=>console.log(line),ask:(q:string)=>rl.question(q)},{section}); }
   finally{ rl.close(); }
@@ -1010,9 +1020,9 @@ function printSections(root:string,section?:string):void{
   const picked=section?all.filter(s=>s.id===section):all;
   if(section&&!picked.length)throw new Error("Unknown config section \""+section+"\". Sections: "+CONFIG_SECTIONS.join(", "));
   if(program.opts().json){output({sections:picked,setup:readSetupRecord(root)});return;}
-  for(const s of picked){console.log("== "+s.title+" ("+s.state+") ==");for(const line of s.lines)console.log("  "+line);}
+  for(const s of picked){console.log(theme.sectionHeader(s.title,s.state));for(const line of s.lines)console.log("  "+line);}
   const rec=readSetupRecord(root);
-  console.log(rec?("Verified setup: "+rec.model+" via "+rec.provider+" at "+rec.verifiedAt):"Verified setup: none recorded yet - `sam config setup --live` verifies and records it.");
+  console.log(rec?theme.ok("Verified setup: "+rec.model+" via "+rec.provider+" at "+rec.verifiedAt):"Verified setup: none recorded yet - `sam config setup --live` verifies and records it.");
 }
 config.action(async()=>{
   const root=resolve(program.opts().workspace);
@@ -1080,4 +1090,21 @@ program.command("setup").description("Guided first-run setup: take the model pro
     if(result.status==="verify-failed"||result.status==="unsupported-provider")process.exitCode=1;
   } finally { io.close(); }
 });
+// Poster dress for help screens and the bare invocation, TTY only:
+// every command's help formatter gets the theme wrap (wording and
+// spacing untouched, paint only), and a bare `sam` in a terminal opens
+// with the splash over the help. Piped runs never enter this block, so
+// scripted help capture stays byte-identical.
+if (theme.on) {
+  const paintHelp=(cmd:Command):void=>{
+    const create=cmd.createHelp.bind(cmd);
+    cmd.createHelp=():Help=>{ const help=create(); const format=help.formatHelp.bind(help); help.formatHelp=(c,h)=>theme.help(format(c,h)); return help; };
+    for (const sub of cmd.commands) paintHelp(sub);
+  };
+  paintHelp(program);
+  if (process.argv.length<=2) {
+    process.stdout.write(samBanner({profile:"sam",model:process.env.SAM_MODEL,workspace:resolve(program.opts().workspace),color:true,cols:process.stdout.columns??0}));
+    process.stdout.write(theme.divider()+"\n");
+  }
+}
 program.parseAsync().catch((err:unknown)=>{console.error("SAM error:",err instanceof Error?err.message:String(err));process.exitCode=1;});
