@@ -12,6 +12,7 @@ import { recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { listProviders, modelKeyEnvName, readProviderKey, resolveTurnConnection, type ConfiguredProvider } from "./providers.js";
 import { codexAuthState, type CodexAuthState } from "./codex-auth.js";
+import { errorReason } from "./telegram.js";
 
 export { modelKeyEnvName };
 
@@ -282,8 +283,20 @@ export function authCheckOk(status: { routes: AuthTarget[] }): boolean {
 // does: the owner (and a script) needs the KIND of failure, not a
 // raw stack. Order matters: a 429 that mentions quota is a rate
 // limit; a 402 / insufficient-balance is billing.
+//
+// The text both the bucket tests and the persisted reason read is
+// composed through errorReason (the 2026-11-16 04:04 bridge seam):
+// Node's fetch wraps every transport failure in the same TypeError
+// "fetch failed" with the real reason on error.cause, so taking
+// err.message alone bucketed a dead endpoint correctly as network
+// but persisted a verdict naming nothing (DNS vs connect vs socket
+// vs TLS indistinguishable), and a signal riding only on the cause
+// could never move the bucket. errorReason walks the cause chain
+// (bounded, deduped), appends errno codes, redacts bot-token
+// segments, and collapses whitespace; causeless errors compose to
+// exactly their message, so they classify and read as before.
 export function classifyProbeError(err: unknown): { bucket: ProbeBucket; reason: string } {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = errorReason(err);
   const name = err instanceof Error ? err.name : "";
   const reason = message.slice(0, 200);
   if (name === "AbortError" || /timed out|timeout/i.test(message)) return { bucket: "timeout", reason };
