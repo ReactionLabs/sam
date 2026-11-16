@@ -166,7 +166,8 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     // Security & readiness (Dip ruling 2026-11-15): the controls
     // Sam already has, stated from the stores themselves - vault
     // metadata only (names and purposes, never a value) and the
-    // backup shelf in the workspace's own backup folder. A dead
+    // backup shelf (the workspace's backup folder, or one beside
+    // it). A dead
     // store degrades its row to absent instead of taking the
     // payload down; the panel reads "not found" as itself.
     readiness: (() => {
@@ -174,7 +175,13 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
       try { const vs = vaultStatus(root); vault = { held: vs.credentials.length, names: vs.credentials.map(c => c.name) }; } catch { /* ledgered in the vault */ }
       let backups: { count: number; newest: { archive: string; created_at: string; bytes: number } | null } = { count: 0, newest: null };
       try {
-        const shelf = listBackups(join(root, "backups"));
+        // The shelf the operator actually keeps: the workspace's own
+        // backup folder first, then a backups folder beside the
+        // workspace (the box layout: home and backups as siblings
+        // under one root). An empty first shelf never masks real
+        // archives sitting in the second.
+        let shelf = listBackups(join(root, "backups"));
+        if (!shelf.length) { try { shelf = listBackups(join(root, "..", "backups")); } catch { /* no sibling shelf */ } }
         const newest = shelf.length ? shelf[shelf.length - 1] : null;
         backups = { count: shelf.length, newest: newest ? { archive: newest.archive, created_at: newest.created_at, bytes: newest.bytes } : null };
       } catch { /* no shelf readable: the row says so */ }
