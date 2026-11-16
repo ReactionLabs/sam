@@ -378,3 +378,32 @@ export async function startMmVoiceTurn(
   watchVoiceReply(root, member, chatId, beforeIds, transcript);
   return { transcript };
 }
+
+/** Dictation (Dip, 2026-11-16: "put the dictation right inside
+ *  the app... put that right inside the chat"): the mic inside
+ *  the chat composer. It spends the same ASR call as a voice
+ *  turn and that is ALL it does: the words come back as text
+ *  for the composer, no turn is run, nothing is saved to the
+ *  chat by the door, and no speech is made. The member reads
+ *  the words, fixes them, and sends them like anything typed.
+ *  Ownership is re-checked here as well as at the door, the
+ *  same discipline as startMmVoiceTurn, and the spend is
+ *  ledgered by transcribeUtterance plus the line below. */
+export async function dictateTranscript(
+  root: string,
+  member: Member,
+  chatId: string,
+  audio: { bytes: Buffer; filename: string; mime: string },
+  env: NodeJS.ProcessEnv = process.env,
+  fetchFn: MmFetch = realFetch,
+): Promise<string> {
+  const store = new ChatStore(root);
+  try {
+    const chat = store.get(chatId);
+    if (!chat || chat.agent_name !== member.profile) throw new Error("No such chat.");
+  } finally { store.close(); }
+  const transcript = await transcribeUtterance(root, member, audio, env, fetchFn);
+  recordActivity(root, member.profile, "member-dictate",
+    "An utterance was dictated into the composer of chat " + chatId + " (" + transcript.length + " characters heard); no turn was run and nothing was saved");
+  return transcript;
+}

@@ -19,7 +19,7 @@ import {
   type Member,
 } from "./members.js";
 import { mintVoiceSession, saveVoiceTranscript, VOICE_KEY_MISSING } from "./member-voice.js";
-import { MM_KEY_MISSING, MM_KEY_NOT_MINIMAX, startMmVoiceTurn, synthesizeSpeech } from "./member-mm-voice.js";
+import { dictateTranscript, MM_KEY_MISSING, MM_KEY_NOT_MINIMAX, startMmVoiceTurn, synthesizeSpeech } from "./member-mm-voice.js";
 import { sendMagicLinkEmail } from "./member-mail.js";
 import {
   createMemberHeartbeat, deleteMemberHeartbeat, memberFileKind, memberFileView, memberHeartbeats,
@@ -113,6 +113,9 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
   // spoken reply is several sentences by design.
   const mmTurnLimiter = new RateLimiter(30, 3600_000, 0);
   const mmSpeakLimiter = new RateLimiter(300, 3600_000, 0);
+  // Dictation: one ASR spend per utterance, no turn behind it -
+  // a thinking-out-loud pace, wider than full voice turns.
+  const dictateLimiter = new RateLimiter(60, 3600_000, 0);
   resumeChatQueues(workspace);
 
   function memberChats(member: Member): Array<{ id: string; title: string; updatedAt: string }> {
@@ -471,7 +474,7 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
         } finally { store.close(); }
         return;
       }
-      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset|\/voice-transcript|\/mm-voice\/speak|\/mm-voice)?$/);
+      const chatMatch = path.match(/^\/chats\/([A-Za-z0-9-]+)(\/messages|\/live|\/reset|\/voice-transcript|\/mm-voice\/speak|\/mm-voice|\/dictate)?$/);
       if (chatMatch) {
         const chatId = chatMatch[1];
         const sub = chatMatch[2] ?? "";
@@ -568,6 +571,33 @@ export async function serveMemberDoor(root: string, opts: MemberDoorOptions = {}
             const code = (error as { code?: string })?.code;
             const message = error instanceof Error ? error.message : "SAM could not speak that. Try again.";
             if (code === MM_KEY_MISSING || code === MM_KEY_NOT_MINIMAX) sendJson(res, 400, { error: message, code });
+            else sendJson(res, 502, { error: message });
+          }
+          return;
+        }
+        if (sub === "/dictate" && req.method === "POST") {
+          // Dictation for the composer mic: one recorded utterance
+          // in (same base64 JSON shape as /mm-voice), ONLY its
+          // transcript out. No turn is run and nothing is saved to
+          // the chat - the words land in the member's composer as
+          // editable text, and sending stays the member's own tap.
+          if (!dictateLimiter.allow("dictate:" + member.id)) { sendJson(res, 429, { error: "A lot of dictation in a short time. Give it a minute." }); return; }
+          const raw = await readBody(req, 8_000_000).catch(() => "");
+          let body: Record<string, unknown> = {};
+          try { body = raw.trim() ? JSON.parse(raw) as Record<string, unknown> : {}; } catch { body = {}; }
+          const b64 = typeof body.audio === "string" ? body.audio : "";
+          const bytes = b64 ? Buffer.from(b64, "base64") : Buffer.alloc(0);
+          if (!bytes.length || bytes.length > 6_000_000) { sendJson(res, 400, { error: "That recording did not arrive. Try again." }); return; }
+          const filename = typeof body.filename === "string" && /^[A-Za-z0-9._-]{1,80}$/.test(body.filename) ? body.filename : "speech.wav";
+          const mime = typeof body.mime === "string" && body.mime.length <= 80 ? body.mime : "audio/wav";
+          try {
+            const transcript = await dictateTranscript(workspace, member, chatId, { bytes, filename, mime });
+            sendJson(res, 200, { transcript });
+          } catch (error) {
+            const code = (error as { code?: string })?.code;
+            const message = error instanceof Error ? error.message : "SAM could not write that down. Try again.";
+            if (code === MM_KEY_MISSING || code === MM_KEY_NOT_MINIMAX) sendJson(res, 400, { error: message, code });
+            else if (message === "No such chat.") sendJson(res, 404, { error: message });
             else sendJson(res, 502, { error: message });
           }
           return;
