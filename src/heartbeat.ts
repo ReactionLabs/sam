@@ -9,7 +9,7 @@ import { captureSuppressionsFromText, filterUnsuppressed } from "./capture-guard
 import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
-import { loadBridgeState } from "./telegram.js";
+import { errorReason, loadBridgeState } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
@@ -663,7 +663,15 @@ export function deliveryFailureSummary(jobName:string,reason:string,attempts:num
  return (settled?base+" - gave up after 5 attempts; the update will not be retried":base).slice(0,200);
 }
 export function recordDeliveryFailure(root:string,profile:string,jobName:string,error:unknown,failure:{attempts:number;settled:boolean}):void{
- const reason=error instanceof Error?error.message:String(error);
+ // The reason carries its cause (gap found 2026-11-16, hourly
+ // run 05:04 EST): a channel delivery is a fetch, so a bare
+ // error.message is the undici wrapper "fetch failed" for
+ // every transport failure at once - the live ledger's one
+ // delivery-failed line said exactly that and named nothing.
+ // errorReason (the 04:04 bridge seam) walks the cause chain
+ // and redacts any bot-token segment, so this line, the
+ // outbox fold, and the heartbeats log all name the cause.
+ const reason=errorReason(error);
  recordActivity(root,profile,"delivery-failed",deliveryFailureSummary(jobName,reason,failure.attempts,failure.settled));
 }
 // Consolidation sub-step failures ledger in the activity
@@ -729,7 +737,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     deliveryResult.delivered.push(pending.jobName);
     if(recovered)deliveryResult.recovered.push(pending.jobName);
     appendLog(root,{type:"delivery-recovered",name:pending.jobName,profile:pending.profile,recovered});
-   }catch(e){const failure=markAttemptFailed(root,pending.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:pending.jobName,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,pending.profile,pending.jobName,e,failure);}
+   }catch(e){const failure=markAttemptFailed(root,pending.id,errorReason(e));appendLog(root,{type:"delivery-failed",name:pending.jobName,reason:errorReason(e).slice(0,300)});recordDeliveryFailure(root,pending.profile,pending.jobName,e,failure);}
   }
   });
  }
@@ -844,7 +852,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
     recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
    }else if(deps.deliver){
     try{await deps.deliver(job.channelId,queued.text);markDelivered(root,queued.id,false);deliveryResult.delivered.push(job.name);}
-    catch(e){const failure=markAttemptFailed(root,queued.id,e instanceof Error?e.message:String(e));appendLog(root,{type:"delivery-failed",name:job.name,reason:(e instanceof Error?e.message:String(e)).slice(0,300)});recordDeliveryFailure(root,job.profile,job.name,e,failure);}
+    catch(e){const failure=markAttemptFailed(root,queued.id,errorReason(e));appendLog(root,{type:"delivery-failed",name:job.name,reason:errorReason(e).slice(0,300)});recordDeliveryFailure(root,job.profile,job.name,e,failure);}
    }
   }
   retireIfOnce(job);

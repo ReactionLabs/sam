@@ -3,7 +3,7 @@ import { adoptLoopChat, closeLoop, dueLoops, rescheduleLoop, updateLoopAnswer, t
 import { heartbeatFactSignatureString, heartbeatOutputHash, heartbeatOutputsEquivalent } from "./heartbeat.js";
 import { assessDelivery } from "./worthiness.js";
 import { markAttemptFailed, markDelivered, markSuppressed, queueDelivery } from "./delivery-outbox.js";
-import { channelForChat } from "./telegram.js";
+import { channelForChat, errorReason } from "./telegram.js";
 import { recordActivity } from "./activity.js";
 
 // SECOND ANSWERS revisit engine (Dip ruling 2026-11-09 17:51: SAM
@@ -143,7 +143,11 @@ export function loopDeliveryFailureSummary(reason: string, attempts: number, set
 }
 
 export function recordLoopDeliveryFailure(root: string, profile: string, error: unknown, failure: { attempts: number; settled: boolean }): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  // The reason carries its cause, the heartbeat delivery seam's
+  // 2026-11-16 shape: a bare message is the undici wrapper for
+  // every transport failure; errorReason names the cause and
+  // redacts any bot-token segment before the line is composed.
+  const reason = errorReason(error);
   recordActivity(root, profile, "delivery-failed", loopDeliveryFailureSummary(reason, failure.attempts, failure.settled));
 }
 
@@ -211,7 +215,7 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
           recordActivity(root, loop.profile, "delivery-suppressed", "Second-answer channel update held: " + assessment.reason);
         } else if (deps.deliver) {
           try { await deps.deliver(channelId, queued.text); markDelivered(root, queued.id, false); }
-          catch (e) { const failure = markAttemptFailed(root, queued.id, e instanceof Error ? e.message : String(e)); recordLoopDeliveryFailure(root, loop.profile, e, failure); }
+          catch (e) { const failure = markAttemptFailed(root, queued.id, errorReason(e)); recordLoopDeliveryFailure(root, loop.profile, e, failure); }
         }
       }
       if (verdict === "resolved") {
