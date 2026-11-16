@@ -8,6 +8,7 @@ import { recordActivity } from "./activity.js";
 import { codeRoot, codeWrites, type CodeWriteRecord } from "./code.js";
 import { commitTaskPaths, prepareTaskBranch, type CodingGitState } from "./git-work.js";
 import { listChanges, verificationStatus } from "./verification.js";
+import { errorReason } from "./telegram.js";
 import type { GoldfishRecord } from "./goldfish.js";
 
 /**
@@ -134,6 +135,31 @@ export function codingStoreFailureSummary(phase: CodingStorePhase, reason: strin
 export function recordCodingStoreFailure(root: string, phase: CodingStorePhase, error: unknown): void {
   const reason = error instanceof Error ? error.message : String(error);
   recordActivity(root, "sam", "coding-store-failed", codingStoreFailureSummary(phase, reason));
+}
+
+// Coding task failures carry their cause (gap found
+// 2026-11-16, hourly run 16:04 EST): the drain's turn catch
+// took e.message alone over a real chat turn, so a task
+// dying on transport would read the bare undici wrapper
+// "fetch failed" in all three records the failure feeds -
+// the stored result, the coding-failed activity line, and
+// the closing summary posted into the task's chat (which
+// carries the stored result). The reason now composes
+// through errorReason (the 04:04 bridge seam): the cause
+// chain is walked bounded and deduped, errno-style codes
+// are appended, and bot-token segments are redacted, so a
+// task dying on a DNS failure names the lookup in all
+// three records in the same shape. Causeless errors read
+// byte-identically, a non-Error throw keeps the existing
+// "Coding run failed" fallback, and the failure reason
+// itself carries no spec text (the records keep carrying
+// the task's title exactly as before).
+export function codingFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Coding run failed";
+}
+
+export function codingFailedSummary(title: string, error: unknown): string {
+  return "Coding task failed: " + title + " - " + codingFailureReason(error).slice(0, 120);
 }
 
 function tagCodingStoreLedgered(error: unknown): void {
@@ -401,6 +427,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       let verdict: { state: string; pending: string[]; note?: string } | null = null;
       let lastReply = "";
       let turnFailed: string | null = null;
+      let turnError: unknown = null;
       let reviewOutcome: string | null = null;
       let reviewUnavailable: string | null = null;
       try {
@@ -452,7 +479,8 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
           // iteration gets the verdict as its input.
         }
       } catch (e) {
-        turnFailed = e instanceof Error ? e.message : "Coding run failed";
+        turnError = e;
+        turnFailed = codingFailureReason(e);
       }
       const fresh = getCodingTask(root, task.id);
       if (!fresh) continue;
@@ -465,7 +493,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       if (turnFailed) {
         done.status = "failed"; done.result = turnFailed.slice(0, 300);
         failed.push(task.id);
-        recordActivity(root, current.actor, "coding-failed", "Coding task failed: " + current.title + " - " + turnFailed.slice(0, 120));
+        recordActivity(root, current.actor, "coding-failed", codingFailedSummary(current.title, turnError));
       } else if (done.changes.length > 0 && status.state === "verified" && !reviewUnavailable && reviewGateOk && gitPending.length === 0) {
         done.status = "done"; done.result = lastReply.slice(0, 300);
         ran.push(task.id);
