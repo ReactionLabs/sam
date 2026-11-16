@@ -217,6 +217,70 @@ export function profileToolNames(): string[] {
 // neither file creates nothing. The P9 backup snapshots every
 // .sam/*.db generically, so the migrated store is carried with
 // no backup change.
+// Subagents store failure visibility (gap found 2026-11-16,
+// hourly run 02:04): the store above is the sub-agent registry
+// every hire door rides - read feeds listSubagents (dashboard
+// status, CLI overview, the run inspector, orchestration, and
+// the orphan sweep), readOne feeds get/cancel/update, and put
+// persists every spawn, finish, cancel, and orphan fencing -
+// and every touch opened it raw. A dead subagent-registry.db
+// threw into whichever catch wrapped the caller with the seam
+// unnamed, and no subagents-store-failed kind existed, so the
+// class was uncountable, and any reader folding a dead store
+// as "no helpers" would silently empty the registry dressed
+// as an idle install - running helpers vanish, their carved
+// spawn-pool budget reads as unspent so the pool can be
+// double-carved, and finished results revert to nothing.
+// Now the store's touches own their failure (the tool-loads
+// precedent, helpers in this module): a failed touch ledgers
+// ONE subagents-store-failed line (phase read for read /
+// readOne, write for put; actor sam; the verbatim reason
+// collapsed and capped; never any sub-agent record - prompts,
+// results, and tool lists are the helper's data, not failure
+// data), tags the error, and rethrows exactly, so every
+// caller's handling is unchanged and reads still fail closed.
+// A touch already ledgered by an inner door keeps its one
+// line and gains no second (updateSubagent rides readOne
+// then put; the orphan sweep rides read then put;
+// getSubagent rides listSubagents). The exists check stays
+// outside the seam: an absent store still reads as no
+// helpers with no line and creates nothing, torn row
+// payloads still parse forgiving, and a malformed legacy
+// file still imports nothing - only the store touch is
+// guarded.
+export type SubagentsStorePhase = "read" | "write";
+
+export function subagentsStoreFailureSummary(phase: SubagentsStorePhase, reason: string): string {
+  const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
+  return ("Subagents store " + phase + " failed: " + clean).slice(0, 200);
+}
+
+export function recordSubagentsStoreFailure(root: string, phase: SubagentsStorePhase, error: unknown): void {
+  const reason = error instanceof Error ? error.message : String(error);
+  recordActivity(root, "sam", "subagents-store-failed", subagentsStoreFailureSummary(phase, reason));
+}
+
+function tagSubagentsStoreLedgered(error: unknown): void {
+  if (error !== null && (typeof error === "object" || typeof error === "function")) {
+    (error as { subagentsStoreLedgered?: boolean }).subagentsStoreLedgered = true;
+  }
+}
+
+export function isSubagentsStoreLedgered(error: unknown): boolean {
+  return error !== null && (typeof error === "object" || typeof error === "function")
+    && (error as { subagentsStoreLedgered?: boolean }).subagentsStoreLedgered === true;
+}
+
+function failSubagentsStore(root: string, phase: SubagentsStorePhase, error: unknown): never {
+  if (!isSubagentsStoreLedgered(error)) recordSubagentsStoreFailure(root, phase, error);
+  tagSubagentsStoreLedgered(error);
+  throw error;
+}
+
+function openRegistryGuarded(root: string, phase: SubagentsStorePhase): Database.Database {
+  try { return openRegistryStore(root); }
+  catch (error) { failSubagentsStore(root, phase, error); }
+}
 function openRegistryStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   const db = openDatabase(registryDbFile(root));
@@ -256,28 +320,31 @@ function storeExists(root: string): boolean {
 }
 function read(root: string): Subagent[] {
   if (!storeExists(root)) return [];
-  const db = openRegistryStore(root);
+  const db = openRegistryGuarded(root, "read");
   try {
     const rows = db.prepare("SELECT data FROM subagents ORDER BY rowid").all() as Array<{ data: string }>;
     const items: Subagent[] = [];
     for (const row of rows) { const item = rowToSubagent(row.data); if (item) items.push(item); }
     return items;
-  } finally { db.close(); }
+  } catch (error) { failSubagentsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function readOne(root: string, id: string): Subagent | null {
   if (!storeExists(root)) return null;
-  const db = openRegistryStore(root);
+  const db = openRegistryGuarded(root, "read");
   try {
     const row = db.prepare("SELECT data FROM subagents WHERE id = ?").get(id) as { data: string } | undefined;
     return row ? rowToSubagent(row.data) : null;
-  } finally { db.close(); }
+  } catch (error) { failSubagentsStore(root, "read", error); }
+  finally { db.close(); }
 }
 function put(root: string, item: Subagent): void {
-  const db = openRegistryStore(root);
+  const db = openRegistryGuarded(root, "write");
   try {
     db.prepare("INSERT INTO subagents (id, data) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data")
       .run(item.id, JSON.stringify(normalizeSubagent(item)));
-  } finally { db.close(); }
+  } catch (error) { failSubagentsStore(root, "write", error); }
+  finally { db.close(); }
 }
 // The store's update door (the updateCodingTask precedent): patch
 // one record by id through the store's own shape. Returns the

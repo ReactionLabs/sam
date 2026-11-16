@@ -664,6 +664,14 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
      "The store still fails closed exactly as before: a failed read rethrows instead of folding the store as no loads (which would silently unload every tool a chat already loaded dressed as a fresh session), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a loaded-set record (chat ids and tool names are session data, not failure data)",
      "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no loads with no line and creates nothing, while torn rows still parse forgiving and a malformed legacy file still imports nothing and ledgers nothing",
      "The full suite is green, including the tool loads store failure-ledger tests"]);
+  if (key.startsWith("subagents-store-failed:")) return base(
+    ["subagents.ts", "status.ts", "cli.ts"],
+    "Subagents store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the subagents store (.sam/subagent-registry.db) must open, read, and write instead of dying at that seam - this store is the sub-agent registry (one row per helper holding its full record: profile, parent, depth, prompt, tools, budget, status, result, loop id, and spawn-pool scope), read by the dashboard status payload, the CLI overview and subagent verbs, the run inspector, and orchestration, and written by every spawn, finish, cancel, and orphan-sweep fencing, so while it is dead hire doors die with the seam unnamed, and a reader folding it as no helpers would silently empty the registry dressed as an idle install, so running helpers vanish, their carved spawn-pool budget reads as unspent and can be double-carved, and finished results revert to nothing.",
+    ["The next spawns, finishes, cancels, status reads, and orphan sweeps resolve their registry again instead of subagents-store-failed lines",
+     "Exactly one subagents-store-failed ledger line still lands per genuinely failed touch, naming the phase and the verbatim reason, so the class stays countable",
+     "The registry still fails closed exactly as before: a failed read rethrows instead of folding the store as no helpers (which would silently empty the registry dressed as an idle install and free budget already carved), a touch already ledgered by an inner door is never recorded twice, and a failure line never carries a sub-agent record (prompts, results, and tool lists are the helper's data, not failure data)",
+     "A failed direct read still fails closed (one ledger line, then the rethrow) exactly as its readers expect, and an absent store still reads as no helpers with no line and creates nothing, while torn rows still parse forgiving, a malformed legacy file still imports nothing and ledgers nothing, and validation errors (unknown sub-agent, invalid profile, tool-widening and budget refusals) still ledger nothing",
+     "The full suite is green, including the subagents store failure-ledger tests"]);
   if (key.startsWith("engine-connection-store-failed:")) return base(
     ["engine-connect.ts", "engine.ts", "engine-connection-failure.ts"],
     "Engine connection store touches stop failing: '" + label + "' has ledgered " + n + " failures, and the engine connection store (.sam/engine-connection.db: the non-secret route marker and the provider choice for the managed coding engine) must open, read, and write instead of dying at that seam - while it is dead every status surface and engine verb rides a dying read with the seam unnamed, or the run layer's mirror silently folds the dead store to the Claude Code default, running the wrong provider on a Codex-selected install dressed as no choice ever recorded.",
@@ -1088,6 +1096,11 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       const m = summary.match(/^Tool loads store ([a-z]+) failed/);
       const phase = m ? m[1] : "unknown";
       return { key: "tool-loads-store-failed:" + phase, label: "tool loads store failures (" + phase + " step)" };
+    }
+    case "subagents-store-failed": {
+      const m = summary.match(/^Subagents store ([a-z]+) failed/);
+      const phase = m ? m[1] : "unknown";
+      return { key: "subagents-store-failed:" + phase, label: "subagents store failures (" + phase + " step)" };
     }
     case "engine-connection-store-failed": {
       const m = summary.match(/^Engine connection store ([a-z]+) failed/);
