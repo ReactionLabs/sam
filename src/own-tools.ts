@@ -82,9 +82,24 @@ export function skillCatalogFailureSummary(actor:string,reason:string):string{
   const clean=reason.replace(/\s+/g," ").trim()||"unknown error";
   return ("Skill catalog assemble failed for "+actor+": "+clean).slice(0,200);
 }
+// Skill catalog failure reasons carry their cause (gap
+// found 2026-11-17, hourly run 09:04 EST): the ledger line
+// above took error.message alone, so a discovery death
+// whose wrapper hides the transport or store cause behind
+// it (a fetch-style wrapper, a sqlite open naming only its
+// own message) was countable but never diagnosable - the
+// same blind spot the rest of the failure-ledger family
+// closed through the 04:04 bridge seam. Now the reason
+// composes through errorReason: causeless errors read
+// byte-identically, a non-Error keeps String(error),
+// bot-token segments are redacted, and no skill name or
+// content ever enters the line (the reason names the
+// failure, never the catalog).
+export function skillCatalogFailureReason(error:unknown):string{
+  return errorReason(error);
+}
 export function recordSkillCatalogFailure(root:string,actor:string,error:unknown):void{
-  const reason=error instanceof Error?error.message:String(error);
-  recordActivity(root,actor,"skill-catalog-failed",skillCatalogFailureSummary(actor,reason));
+  recordActivity(root,actor,"skill-catalog-failed",skillCatalogFailureSummary(actor,skillCatalogFailureReason(error)));
 }
 // The installed-skill catalog line for a chat system prompt: names and
 // descriptions only, never instructions. SAM cannot use a skill it does not
