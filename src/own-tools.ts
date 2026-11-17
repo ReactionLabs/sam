@@ -125,6 +125,23 @@ export function skillCatalogForPrompt(root:string,actor?:string):string{
 export function linkedExchangeFailureError(error:unknown):string{
   return "Linked exchange failed: "+errorReason(error);
 }
+// Sync tool failures carry their cause (gap found 2026-11-17,
+// hourly run 04:04 EST): the sync dispatch's outer catch in
+// executeOwnToolInner bound no error at all and returned
+// {error:"Tool failed"} for every death outside the inner
+// per-tool catches - the memory store opening or searching,
+// the workspace filesystem reads, and the artifact store all
+// ride that catch - discarding even the message, let alone
+// the cause behind it. The tool result is the only record of
+// the death and the model reading it is the voice that
+// reports it, so the error now composes through errorReason
+// (the 04:04 bridge seam) via toolFailureError: the prefix
+// stays, the reason follows it, a non-Error throw keeps
+// String(error), bot tokens are redacted, and the tool's
+// arguments never enter the error.
+export function toolFailureError(error:unknown):string{
+  return "Tool failed: "+errorReason(error);
+}
 const collabInFlight=new Set<string>();
 /** A hire that fits no tranche of this turn returns as DATA, not an
  *  error (Defect 3): the numbers ride along, the result is marked
@@ -711,7 +728,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
       }catch(e){return {error:e instanceof Error?e.message:"Proposal refused"};}
     }
     return {error:"Tool not approved"};
-  }catch{return {error:"Tool failed"};}
+  }catch(e){return {error:toolFailureError(e)};}
 }
 export function executeOwnTool(root:string,actor:string,name:string,args:Record<string,unknown>,chatId?:string,userMessageId?:string):unknown{
   const result=executeOwnToolInner(root,actor,name,args,chatId,userMessageId);
