@@ -12,6 +12,7 @@ import { codeWrites, readCodeFile, setCodeRoot, writeCodeFile } from "./code.js"
 import { recordVerification, verificationGate } from "./verification.js";
 import { annotateToolResult, processReplySources } from "./source-citations.js";
 import { orchestrate, setOrchestrationRunnerForTests, type Lane } from "./orchestration.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * The task battery (Sprint 4 item 4, Program C): a fixed, versioned
@@ -529,8 +530,21 @@ export function taskBatteryFailureSummary(phase: TaskBatteryPhase, reason: strin
   return ("Task battery store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a task-battery-failed line carries (census sprint
+ * 2026-11-17): recordTaskBatteryFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function taskBatteryFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordTaskBatteryFailure(root: string, phase: TaskBatteryPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = taskBatteryFailureReason(error);
   recordActivity(root, "sam", "task-battery-failed", taskBatteryFailureSummary(phase, reason));
 }
 

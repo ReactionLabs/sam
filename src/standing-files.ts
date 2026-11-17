@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Standing files per profile (Plan Phase A, item 1 - the Hermes/OpenClaw
 // runtime spine). A profile used to be ONE instructions paragraph; now it
@@ -81,8 +82,21 @@ export function standingFileFailureSummary(profile: string, name: string, reason
   return ("Standing file read failed for profile " + profile + " (" + name + "): " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a standing-file-failed line carries (census sprint
+ * 2026-11-17): recordStandingFileFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function standingFileFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordStandingFileFailure(root: string, profile: string, name: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = standingFileFailureReason(error);
   recordActivity(root, profile, "standing-file-failed", standingFileFailureSummary(profile, name, reason));
 }
 

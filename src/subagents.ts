@@ -256,8 +256,21 @@ export function subagentsStoreFailureSummary(phase: SubagentsStorePhase, reason:
   return ("Subagents store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a subagents-store-failed line carries (census sprint
+ * 2026-11-17): recordSubagentsStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function subagentsStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSubagentsStoreFailure(root: string, phase: SubagentsStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = subagentsStoreFailureReason(error);
   recordActivity(root, "sam", "subagents-store-failed", subagentsStoreFailureSummary(phase, reason));
 }
 
