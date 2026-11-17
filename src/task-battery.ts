@@ -488,12 +488,28 @@ export async function runTaskBattery(root: string, opts: { live?: boolean; env?:
   });
 }
 
+export const TASK_BATTERY_SCRIPT = "sam-task-battery";
+
+/** The battery as plain text (the sam-task-battery script job's
+ *  stdout shape): the scorecard a person reads. The text
+ *  deliberately carries NO clock or duration reading - not the
+ *  run's stamp, not a case's durationMs, and not the cold-chat
+ *  evidence's own measured milliseconds: a script job's stdout
+ *  is P3-diffed on its facts, and a fresh stamp or duration is
+ *  a new date/number fact every run, so a timed scorecard
+ *  would announce "changed" daily at an identical score (the
+ *  stack-watch false-change class, and the eval battery's
+ *  2026-11-17 fix mirrored). The recorded record
+ *  (readTaskBattery / battery show) keeps the stamp and every
+ *  duration; the text keeps the per-case pass/fail and
+ *  evidence, which are the facts a reader and the diff judge. */
 export function taskBatteryText(run: TaskBatteryRun): string {
   const lines = [
-    "Task battery " + run.version + " - " + run.at + " - " + String(run.overall.passed) + "/" + String(run.overall.total) + " passed - " + run.execution + " - live: " + run.liveRun,
+    "Task battery " + run.version + " - " + String(run.overall.passed) + "/" + String(run.overall.total) + " passed - " + run.execution + " - live: " + run.liveRun,
   ];
   for (const c of run.cases) {
-    lines.push("- " + c.id + ": " + (c.passed ? "PASS" : "FAIL") + " (" + String(c.durationMs) + "ms) - " + c.evidence);
+    const evidence = c.evidence.replace(/in \d+ms\b/, "within the timed bound");
+    lines.push("- " + c.id + ": " + (c.passed ? "PASS" : "FAIL") + " - " + evidence);
   }
   lines.push("", run.note);
   return lines.join("\n");
