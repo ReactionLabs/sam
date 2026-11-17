@@ -236,9 +236,17 @@ export async function runEvalBattery(root: string): Promise<EvalBattery> {
 
 /** The battery as plain text (the sam-eval-battery script job's
  *  stdout shape): the scorecard a person reads, with the ship
- *  verdict up top. */
+ *  verdict up top. The text deliberately carries NO clock
+ *  reading - neither this run's stamp nor the previous run's:
+ *  a script job's stdout is P3-diffed on its facts, and a fresh
+ *  timestamp is a new date fact every run, so a timestamped
+ *  scorecard would announce "changed" daily at an identical
+ *  score (the stack-watch false-change class). The recorded
+ *  record (readEvalBattery / eval-battery show) keeps both
+ *  stamps; the text keeps the scores, which are the facts a
+ *  reader and the diff both judge. */
 export function evalBatteryText(battery: EvalBattery): string {
-  const lines: string[] = ["Eval battery - " + battery.at + " - " + String(battery.overall.passed) + "/" + String(battery.overall.total) + " tasks passed - verdict: " + battery.verdict + (battery.previous ? " (previous " + String(battery.previous.passed) + "/" + String(battery.previous.total) + " at " + battery.previous.at + ")" : "")];
+  const lines: string[] = ["Eval battery - " + String(battery.overall.passed) + "/" + String(battery.overall.total) + " tasks passed - verdict: " + battery.verdict + (battery.previous ? " (previous " + String(battery.previous.passed) + "/" + String(battery.previous.total) + ")" : "")];
   for (const cat of battery.categories) lines.push("- " + cat.label + ": " + String(cat.passed) + "/" + String(cat.total));
   if (battery.findings.length) {
     lines.push("", "Findings:");

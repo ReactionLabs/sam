@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readActivity } from "./activity.js";
 import { buildEvalBattery, evalBatteryText, EVAL_TASK_TOTAL, readEvalBattery, runEvalBattery } from "./eval-battery.js";
+import { heartbeatFactSignatureString, heartbeatOutputHash, heartbeatOutputsEquivalent } from "./heartbeat.js";
 
 // HARNESS INTELLIGENCE item 4: the behavior eval battery. The
 // 27 tasks run the REAL machinery in scratch state (the stack
@@ -66,6 +67,35 @@ test("eval-battery: a regression against the previous run reads regressed and na
     assert.equal(down.verdict, "held");
     const regressedText = evalBatteryText({ ...battery, verdict: "regressed" });
     assert.match(regressedText, /SHIP GATE: this battery REGRESSED/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("eval-battery: the scorecard text carries no clock reading, so a scheduled run at a held score is P3-silent", async () => {
+  const root = fresh();
+  try {
+    const first = await runEvalBattery(root);
+    // The record keeps both stamps; the text (the script job's
+    // stdout, P3-diffed on its facts) keeps neither - a fresh
+    // ISO stamp is a new date fact every run and would read as
+    // changed daily at an identical score.
+    assert.match(first.at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.doesNotMatch(evalBatteryText(first), /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    const second = await runEvalBattery(root);
+    assert.equal(second.verdict, "held");
+    assert.ok(second.previous);
+    assert.match(second.previous.at, /^\d{4}-\d{2}-\d{2}T/);
+    assert.doesNotMatch(evalBatteryText(second), /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/);
+    const third = await runEvalBattery(root);
+    assert.equal(third.verdict, "held");
+    // Two consecutive held runs at the same score produce the
+    // identical scorecard, and P3 judges them the same news.
+    assert.equal(evalBatteryText(third), evalBatteryText(second));
+    const prior = { hash: heartbeatOutputHash(evalBatteryText(second)), sig: heartbeatFactSignatureString(evalBatteryText(second)) };
+    assert.equal(heartbeatOutputsEquivalent(prior, heartbeatOutputHash(evalBatteryText(third)), heartbeatFactSignatureString(evalBatteryText(third))), true);
+    // A score change still changes the text: the silence is
+    // earned by the facts, not by blanking the scorecard.
+    const weaker = { ...third, overall: { passed: third.overall.passed - 1, total: third.overall.total }, verdict: "regressed" as const };
+    assert.notEqual(evalBatteryText(weaker), evalBatteryText(third));
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
