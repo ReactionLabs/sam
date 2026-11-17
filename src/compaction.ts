@@ -6,6 +6,7 @@ import { episodeScope } from "./episodes.js";
 import { recordActivity } from "./activity.js";
 import { activeSuppressions, needleMatches, recordSuppressionBlock, MemorySuppressedError, type CaptureSuppression } from "./capture-guard.js";
 import { readLawSnapshot, verifyLawAcrossFold, recordFenceIntegrityFailure, fenceIntegrityFailureSummary, digestLaw, type LawSnapshot } from "./fence-integrity.js";
+import { errorReason } from "./error-reason.js";
 
 // Context compression with a memory flush (Plan Phase A, item 2 - the
 // Hermes/OpenClaw runtime spine). Before this, agent-turn built every
@@ -125,8 +126,21 @@ export function compactionFailureSummary(chatId: string, phase: string, reason: 
   return ("Compaction " + phase + " failed for chat " + chatId.slice(0, 8) + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a compaction-failed line carries (census sprint
+ * 2026-11-17): recordCompactionFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function compactionFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordCompactionFailure(root: string, actor: string, chatId: string, phase: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = compactionFailureReason(error);
   recordActivity(root, actor, "compaction-failed", compactionFailureSummary(chatId, phase, reason));
 }
 

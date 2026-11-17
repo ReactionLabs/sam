@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Per-contact permission notes (P12). SAM works for other people through its
 // owner, and every person it might write to gets a standing note: what is
@@ -132,8 +133,21 @@ export function contactFailureSummary(phase: ContactPhase, reason: string): stri
   return ("Contact " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a contact-failed line carries (census sprint
+ * 2026-11-17): recordContactFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function contactFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordContactFailure(root: string, phase: ContactPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = contactFailureReason(error);
   recordActivity(root, "sam", "contact-failed", contactFailureSummary(phase, reason));
 }
 
@@ -421,10 +435,21 @@ export function writeAddressBook(root: string): { dir: string; people: number } 
 // unmakes the store write (the store is the truth), but it is
 // never silent either: one address-book-failed line, and the CLI
 // export verb is the standing repair.
+/** The reason an address-book-failed line carries (census
+ * sprint 2026-11-17): the quiet Address Book render took
+ * error.message alone, discarding error.cause. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no contact content ever enters the line. */
+export function addressBookFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 function renderAddressBookQuietly(root: string): void {
   try { writeAddressBook(root); }
   catch (error) {
-    const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim() || "unknown error";
+    const reason = addressBookFailureReason(error);
     try { recordActivity(root, "sam", "address-book-failed", ("Address Book write failed: " + reason).slice(0, 200)); } catch { /* the ledger never breaks a write */ }
   }
 }

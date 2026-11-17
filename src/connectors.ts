@@ -124,8 +124,21 @@ export function connectorFailureSummary(phase: ConnectorPhase, reason: string): 
   return ("Connector " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a connector-failed line carries (census sprint
+ * 2026-11-17): recordConnectorFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function connectorFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordConnectorFailure(root: string, phase: ConnectorPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = connectorFailureReason(error);
   recordActivity(root, "sam", "connector-failed", connectorFailureSummary(phase, reason));
 }
 
