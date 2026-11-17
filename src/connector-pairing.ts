@@ -5,6 +5,7 @@ import {
   removeConnector, testConnector, type Connector,
 } from "./connectors.js";
 import { listVaultCredentials, VAULT_NAME_RE } from "./vault.js";
+import { errorReason } from "./telegram.js";
 
 /**
  * SELF-PAIRING (Dip ruling 2026-11-12 13:18 EST: "we want it to be
@@ -102,6 +103,34 @@ export function validatePairDetail(root: string, detail: string): PairSpec {
 
 export type PairTester = (connector: Connector, root: string) => Promise<{ tools: string[]; approved: string[] }>;
 
+// Pair failure reasons carry their cause (gap found
+// 2026-11-16, hourly run 20:04 EST): the rollback line below
+// took e.message alone over testConnector's MCP exchange, so
+// a pairing dying on transport ledgered the bare undici
+// wrapper "fetch failed" and named nothing (DNS vs connect
+// vs socket vs TLS indistinguishable, the real reason rides
+// error.cause) - beside the vault-use line for the very same
+// test, which since the 08:04 cure names the cause: the same
+// death, two lines, one diagnosable and one not. The reason
+// now composes through telegram.ts errorReason (the 04:04
+// bridge seam, cured at delivery 05:04, probe 06:04, verify
+// 07:04, vault-use 08:04, turn 09:04, queued message 11:04,
+// background/loop 12:04, heartbeat jobs 13:04, subagent
+// 14:04, action execution 15:04, coding 16:04,
+// turn-failure-note 17:04, turn-retry 18:04, failover
+// 19:04): causeless errors read byte-identically, a
+// non-Error throw keeps the "unknown error" fallback, and
+// the line still carries name + host + the vault
+// credential's NAME only, never its value.
+export function pairFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "unknown error";
+}
+
+export function pairFailedSummary(name: string, host: string, vaultKey: string, error: unknown): string {
+  return "Pairing connector \"" + name + "\" at " + host + " using vault credential " + vaultKey +
+    " failed and was rolled back: " + pairFailureReason(error);
+}
+
 /** The pair flow itself. The tester is injectable for tests; the
  *  real one is testConnector - initialize + tools/list, the
  *  harmless list call, which also ledgers the vault use. */
@@ -137,8 +166,7 @@ export async function pairConnector(
   } catch (e) {
     removeConnector(root, connector.id);
     recordActivity(root, actor, "connector-pair-failed",
-      "Pairing connector \"" + clean.name + "\" at " + host + " using vault credential " + clean.vaultKey +
-      " failed and was rolled back: " + (e instanceof Error ? e.message : "unknown error"));
+      pairFailedSummary(clean.name, host, clean.vaultKey, e));
     throw e;
   }
 }
