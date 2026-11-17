@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
+import { errorReason } from "./error-reason.js";
 
 // Links: the only bridge between profiles. Profiles are isolated by default -
 // each has its own private memory scope and cannot see another's. A link group
@@ -111,8 +112,21 @@ export function linkFailureSummary(phase: LinkPhase, actor: string, reason: stri
   return ("Link read failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a link-failed line carries (census sprint
+ * 2026-11-17): recordLinkFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function linkFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordLinkFailure(root: string, phase: LinkPhase, actor: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = linkFailureReason(error);
   recordActivity(root, phase === "resolve" ? actor : "sam", "link-failed", linkFailureSummary(phase, actor, reason));
 }
 

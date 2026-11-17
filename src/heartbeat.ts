@@ -113,8 +113,21 @@ export function heartbeatJobsStoreFailureSummary(phase: HeartbeatJobsStorePhase,
   return ("Heartbeat jobs store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a heartbeat-jobs-store-failed line carries (census sprint
+ * 2026-11-17): recordHeartbeatJobsStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function heartbeatJobsStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordHeartbeatJobsStoreFailure(root: string, phase: HeartbeatJobsStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = heartbeatJobsStoreFailureReason(error);
   recordActivity(root, "sam", "heartbeat-jobs-store-failed", heartbeatJobsStoreFailureSummary(phase, reason));
 }
 
@@ -294,8 +307,21 @@ export function heartbeatStateStoreFailureSummary(phase: HeartbeatStateStorePhas
   return ("Heartbeat state store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a heartbeat-state-store-failed line carries (census sprint
+ * 2026-11-17): recordHeartbeatStateStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function heartbeatStateStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordHeartbeatStateStoreFailure(root: string, phase: HeartbeatStateStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = heartbeatStateStoreFailureReason(error);
   recordActivity(root, "sam", "heartbeat-state-store-failed", heartbeatStateStoreFailureSummary(phase, reason));
 }
 
@@ -473,8 +499,21 @@ export function heartbeatLogFailureSummary(phase:string,entryType:string,name:st
  if(phase==="read")return ("Heartbeat log read failed for ledger: "+clean).slice(0,300);
  return ("Heartbeat log append failed for "+entryType+(name?" job '"+name+"'":"")+": "+clean).slice(0,300);
 }
+/**
+ * The reason a heartbeat-log-failed line carries (census sprint
+ * 2026-11-17): recordHeartbeatLogFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function heartbeatLogFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordHeartbeatLogFailure(root:string,phase:string,entryType:string,name:string|null,error:unknown):void{
- const reason=error instanceof Error?error.message:String(error);
+ const reason=heartbeatLogFailureReason(error);
  recordActivity(root,"sam","heartbeat-log-failed",heartbeatLogFailureSummary(phase,entryType,name,reason));
 }
 export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
@@ -728,12 +767,38 @@ export function consolidationFailureSummary(step:string,count:number,reason:stri
  if(step==="curator")return ("Consolidation skill curator failed: "+clean).slice(0,200);
  return ("Consolidation correction routing failed for "+count+(count===1?" message":" messages")+": "+clean).slice(0,200);
 }
+/**
+ * The reason a consolidate-failed line carries (census sprint
+ * 2026-11-17): recordConsolidationFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function consolidationFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordConsolidationFailure(root:string,step:string,count:number,error:unknown):void{
- const reason=error instanceof Error?error.message:String(error);
+ const reason=consolidationFailureReason(error);
  recordActivity(root,"sam","consolidate-failed",consolidationFailureSummary(step,count,reason));
 }
+/**
+ * The reason a tick-failed line carries (census sprint
+ * 2026-11-17): tickStageFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function tickStageFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function tickStageFailure(root:string,stage:string,error:unknown):void{
- const reason=error instanceof Error?error.message:String(error);
+ const reason=tickStageFailureReason(error);
  appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
  recordActivity(root,"sam","tick-failed",("Heartbeat tick stage '"+stage+"' failed: "+reason).slice(0,200));
 }

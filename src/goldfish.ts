@@ -9,6 +9,7 @@ import { codeRoot } from "./code.js";
 import { recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * The goldfish verifier (Harness Implementation Order item 2, Dip
@@ -75,8 +76,21 @@ export function goldfishFailureSummary(phase: "read" | "append", eventLabel: str
   return ("Goldfish " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a goldfish-failed line carries (census sprint
+ * 2026-11-17): recordGoldfishFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function goldfishFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordGoldfishFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = goldfishFailureReason(error);
   recordActivity(root, "sam", "goldfish-failed", goldfishFailureSummary(phase, eventLabel, reason));
 }
 
