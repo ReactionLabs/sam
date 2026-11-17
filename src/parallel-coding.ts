@@ -11,6 +11,7 @@ import { proposeAction } from "./actions.js";
 import { gitRepoRoot, isTaskBranch } from "./git-work.js";
 import { defaultEngineRunner, engineArgv, engineRunBinary, selectedEngineProvider, type EngineRunProvider, type EngineRunner, type EngineTask } from "./engine.js";
 import type { GoldfishChangeInput, GoldfishRecord } from "./goldfish.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Parallel coding (Program E, Dip's ruling 2026-11-14: "We need to
@@ -186,8 +187,21 @@ export function parallelStoreFailureSummary(phase: ParallelStorePhase, reason: s
   return ("Parallel store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a parallel-store-failed line carries (census sprint
+ * 2026-11-17): recordParallelStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function parallelStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordParallelStoreFailure(root: string, phase: ParallelStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = parallelStoreFailureReason(error);
   recordActivity(root, "sam", "parallel-store-failed", parallelStoreFailureSummary(phase, reason));
 }
 

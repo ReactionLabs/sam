@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { channels, setChannelOwners, type Channel } from "./channels.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Pairing-code channel auth (Plan Phase A item 3): how a person proves they
 // belong on a channel's owner list without the operator hand-copying numeric
@@ -156,8 +157,21 @@ export function pairingFailureSummary(phase: PairingPhase, reason: string): stri
   return ("Pairing " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a pairing-failed line carries (census sprint
+ * 2026-11-17): recordPairingFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function pairingFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordPairingFailure(root: string, phase: PairingPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = pairingFailureReason(error);
   recordActivity(root, "sam", "pairing-failed", pairingFailureSummary(phase, reason));
 }
 

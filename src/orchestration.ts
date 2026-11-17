@@ -40,6 +40,7 @@ import {
 import { parseReview } from "./team-runtime.js";
 import { ChatStore } from "./chats.js";
 import { codeRoot } from "./code.js";
+import { errorReason } from "./error-reason.js";
 
 export const ORCH_MAX_DEPTH = 2;
 export const ORCH_MAX_LANE_ATTEMPTS = 2;
@@ -139,8 +140,33 @@ export function orchestrationStoreExists(root: string): boolean { return existsS
 export function orchestrationFailureSummary(phase: "read" | "write", reason: string): string {
   return "Orchestration store " + phase + " failed: " + reason.slice(0, 160);
 }
+/**
+ * The reason a orchestration-failed line carries (census sprint
+ * 2026-11-17): recordStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+/** The reason a failed lane attempt carries on its record
+ * (census sprint 2026-11-17): runLane took error.message
+ * alone, discarding error.cause, so a lane that died behind
+ * a wrapper named nothing diagnosable on the job record.
+ * Now it composes through errorReason (the 04:04 bridge
+ * seam): causeless errors keep their plain message, a
+ * non-Error reads through String, bot-token segments are
+ * redacted, and no lane content ever enters the reason. */
+export function laneFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
+export function orchestrationStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 function recordStoreFailure(root: string, phase: "read" | "write", error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = orchestrationStoreFailureReason(error);
   try { recordActivity(root, "sam", "orchestration-failed", orchestrationFailureSummary(phase, reason)); } catch { /* the ledger must never mask the store error */ }
 }
 function openStore(root: string): Database.Database {
@@ -568,7 +594,7 @@ async function runLane(root: string, job: OrchestrationJob, lane: Lane, lanes: L
     let failure: string | null = null;
     try {
       outcome = testRunner ? await testRunner(root, lane, depResults) : await defaultLaneRunner(root, job, lane, depResults);
-    } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    } catch (error) { failure = laneFailureReason(error); }
     if (outcome !== null) {
       const verdict = verifyLaneOutput(root, lane, outcome);
       if (verdict.verdict === "verified") {
