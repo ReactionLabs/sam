@@ -546,6 +546,24 @@ export function subagentFailedSummary(id: string, error: unknown): string {
   return "Sub-agent " + id.slice(0, 8) + " failed: " + subagentFailureReason(error).slice(0, 180);
 }
 
+// Child tool failures carry their cause (gap found 2026-11-17,
+// hourly run 07:04 EST): runChild's dispatch catch took
+// error.message alone for an Error and the bare "Tool failed"
+// label for a non-Error, discarding error.cause, so a child's
+// tool dying on transport (fetch failed with its real reason
+// on the cause) or a store death carrying an errno-style code
+// read back to the child model as the wrapper alone - and the
+// tool result is the only record of that death (it also rides
+// the loop journal's tool_call detail). The error now composes
+// through errorReason (the 04:04 bridge seam) via
+// childToolFailureError: the "Tool failed" prefix stays, the
+// reason follows it, a non-Error throw keeps String(error),
+// bot-token segments are redacted, and the tool's arguments
+// never enter the error.
+export function childToolFailureError(error: unknown): string {
+  return "Tool failed: " + errorReason(error);
+}
+
 async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Promise<Subagent> {
   try {
     const env = opts?.env ?? process.env;
@@ -721,7 +739,7 @@ async function runChild(root: string, item: Subagent, complete: SubagentComplete
         else {
           callsUsed++;
           try { body = await parentSlot.run(item.id, () => executeOwnToolAsync(root, item.profile, call.name, call.args ?? {}, undefined, item.chatId ?? undefined)); }
-          catch (error) { body = { error: error instanceof Error ? error.message : "Tool failed" }; }
+          catch (error) { body = { error: childToolFailureError(error) }; }
           const detail = call.name + " " + JSON.stringify(body).slice(0, 400);
           try { journal.event(item.loopId!, "tool_call", detail); } catch { /* a closed loop does not break the child */ }
         }
