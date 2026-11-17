@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Capture guard (Program H, self-knowledge item A - the keystone):
 // a standing owner instruction to keep something out of memory now
@@ -106,8 +107,21 @@ export function captureGuardFailureSummary(phase: CaptureGuardPhase, reason: str
   return ("Capture guard store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a capture-guard-failed line carries (census sprint
+ * 2026-11-17): recordCaptureGuardFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function captureGuardFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordCaptureGuardFailure(root: string, phase: CaptureGuardPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = captureGuardFailureReason(error);
   recordActivity(root, "sam", "capture-guard-failed", captureGuardFailureSummary(phase, reason));
 }
 

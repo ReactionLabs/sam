@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Deterministic bindings (Plan Phase C item 3): which profile an incoming
 // channel message lands on is a routing decision, and routing is never the
@@ -118,13 +119,26 @@ export function bindingFailureSummary(phase: BindingPhase, reason: string, chann
   return ("Binding read failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a binding-failed line carries (census sprint
+ * 2026-11-17): recordBindingReadFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function bindingFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordBindingReadFailure(root: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = bindingFailureReason(error);
   recordActivity(root, "sam", "binding-failed", bindingFailureSummary("read", reason));
 }
 
 export function recordBindingResolveFailure(root: string, channel: Channel, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = bindingFailureReason(error);
   recordActivity(root, channel.profile, "binding-failed", bindingFailureSummary("resolve", reason, channel.name));
 }
 
