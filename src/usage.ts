@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
 import type { ModelTier } from "./model-routing.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Token spend accounting (program P11): every model response that carries
 // a provider usage object lands one line in .sam/usage.jsonl, stamped with
@@ -49,8 +50,21 @@ export function usageFailureSummary(model: string, reason: string): string {
   return ("Usage record failed for model " + model + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a usage-failed line carries (census sprint
+ * 2026-11-17): recordUsageFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function usageFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordUsageFailure(root: string, actor: string, model: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = usageFailureReason(error);
   recordActivity(root, actor, "usage-failed", usageFailureSummary(model, reason));
 }
 
@@ -67,8 +81,21 @@ export function usageReadFailureSummary(reason: string): string {
   return ("Usage ledger read failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a usage-failed line carries (census sprint
+ * 2026-11-17): recordUsageReadFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function usageReadFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordUsageReadFailure(root: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = usageReadFailureReason(error);
   recordActivity(root, "sam", "usage-failed", usageReadFailureSummary(reason));
 }
 

@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Verify-on-stop (Harness Implementation Order item 1, Dip 2026-11-09,
@@ -67,8 +68,21 @@ export function verificationFailureSummary(phase: "read" | "append", eventLabel:
   return ("Verification " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a verification-failed line carries (census sprint
+ * 2026-11-17): recordVerificationFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function verificationFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordVerificationFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = verificationFailureReason(error);
   recordActivity(root, "sam", "verification-failed", verificationFailureSummary(phase, eventLabel, reason));
 }
 
