@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import type { RunSource, SourceKind } from "./source-citations.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Artifacts: durable deliverables Sam hands the owner.
@@ -147,8 +148,21 @@ export function artifactFailureSummary(phase: string, reason: string): string {
   return ("Artifact " + phase + " failed: " + clean).slice(0, 300);
 }
 
+/**
+ * The reason a artifact-failed line carries (census sprint
+ * 2026-11-17): recordArtifactFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function artifactFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordArtifactFailure(root: string, actor: string, phase: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = artifactFailureReason(error);
   recordActivity(root, actor, "artifact-failed", artifactFailureSummary(phase, reason));
 }
 

@@ -89,8 +89,21 @@ export function backgroundStoreFailureSummary(phase: BackgroundStorePhase, reaso
   return ("Background store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a background-store-failed line carries (census sprint
+ * 2026-11-17): recordBackgroundStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function backgroundStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordBackgroundStoreFailure(root: string, phase: BackgroundStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = backgroundStoreFailureReason(error);
   recordActivity(root, "sam", "background-store-failed", backgroundStoreFailureSummary(phase, reason));
 }
 
