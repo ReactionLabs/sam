@@ -5,6 +5,7 @@ import { mkdirSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
 import { findSuppressionHitInDb, suppressionProfilesForScope, MemorySuppressedError, isCaptureGuardLedgered } from "./capture-guard.js";
+import { errorReason } from "./error-reason.js";
 
 export type MemoryKind = "observation" | "decision" | "failure" | "procedure";
 export interface MemoryRecord {
@@ -86,8 +87,21 @@ export function memoryStoreFailureSummary(phase: MemoryStorePhase, reason: strin
   return ("Memory store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a memory-store-failed line carries (census sprint
+ * 2026-11-17): recordMemoryStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function memoryStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordMemoryStoreFailure(root: string, phase: MemoryStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = memoryStoreFailureReason(error);
   recordActivity(root, "sam", "memory-store-failed", memoryStoreFailureSummary(phase, reason));
 }
 

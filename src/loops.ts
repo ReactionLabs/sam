@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Open loops (Smarter-and-Smoother S2 carry-in + the SECOND
@@ -84,8 +85,21 @@ export function loopStoreFailureSummary(phase: LoopStorePhase, reason: string): 
   return ("Loop store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a loop-store-failed line carries (census sprint
+ * 2026-11-17): recordLoopStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function loopStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordLoopStoreFailure(root: string, phase: LoopStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = loopStoreFailureReason(error);
   recordActivity(root, "sam", "loop-store-failed", loopStoreFailureSummary(phase, reason));
 }
 

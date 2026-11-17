@@ -7,6 +7,7 @@ import { ChatStore } from "./chats.js";
 import { addHeartbeatJob } from "./heartbeat.js";
 import { connectors } from "./connectors.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Minis: a mini is a scoped SAM spawned for one person. Under the hood it is a
 // profile plus a registry record, and everything SAM has learned to scope by
@@ -82,8 +83,21 @@ export function miniStoreFailureSummary(phase: MiniStorePhase, reason: string): 
   return ("Mini store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a mini-store-failed line carries (census sprint
+ * 2026-11-17): recordMiniStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function miniStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordMiniStoreFailure(root: string, phase: MiniStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = miniStoreFailureReason(error);
   recordActivity(root, "sam", "mini-store-failed", miniStoreFailureSummary(phase, reason));
 }
 
