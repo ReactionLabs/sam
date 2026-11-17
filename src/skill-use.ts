@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Skill-use ledger (Dip, 2026-11-10: "we need to be able to see what
 // skills it's using while it's using it"). One JSON line per
@@ -30,8 +31,21 @@ export function skillUseFailureSummary(skill: string, chatId: string | null, rea
   return ("Skill use record failed for skill " + skill + (chatId ? " in chat " + chatId.slice(0, 8) : "") + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a skill-use-failed line carries (census sprint
+ * 2026-11-17): recordSkillUseFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function skillUseFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSkillUseFailure(root: string, actor: string, skill: string, chatId: string | null, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = skillUseFailureReason(error);
   recordActivity(root, actor, "skill-use-failed", skillUseFailureSummary(skill, chatId, reason));
 }
 
@@ -48,8 +62,21 @@ export function skillUseReadFailureSummary(reason: string): string {
   return ("Skill use read failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a skill-use-failed line carries (census sprint
+ * 2026-11-17): recordSkillUseReadFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function skillUseReadFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSkillUseReadFailure(root: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = skillUseReadFailureReason(error);
   recordActivity(root, "sam", "skill-use-failed", skillUseReadFailureSummary(reason));
 }
 
