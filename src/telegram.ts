@@ -6,6 +6,7 @@ import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 import type { MessageSource } from "./message-provenance.js";
 
 // Telegram bridge: long-polls the bot API (no public webhook needed, so it works
@@ -331,35 +332,13 @@ export function dashboardTokenFromLog(logPath:string):string{
 // turn, and a poison update retried forever would wedge every
 // later update behind it (the heartbeat-isolation lesson). The
 // update stays consumed; the line makes the loss countable.
-// The reason a bridge failure line carries (gap found
-// 2026-11-16, hourly run 04:04 EST): Node's fetch wraps every
-// transport failure in the same TypeError "fetch failed" - DNS,
-// connect refused or timed out, socket reset, and TLS are
-// indistinguishable in the message alone, and the live ledger
-// held 61 bridge-poll-failed lines of which 60 said exactly
-// those three words, so the bridge's top defect class was
-// countable but never diagnosable. The real reason rides
-// error.cause, so the reason walks the cause chain (bounded,
-// deduped) and appends each cause's message plus its
-// errno-style code when it carries one. The bot token never
-// enters a line: the Telegram API URL carries it in its path
-// (bot<token>/method), so any bot-token segment or
-// token-shaped credential in a message is redacted before the
-// line is composed. Whitespace collapses and the composed
-// summary caps at 200, the house failure-summary shape.
-export function errorReason(error:unknown):string{
- if(error===null||error===undefined)return "unknown error";
- const parts:string[]=[];
- let current:unknown=error;
- for(let depth=0;depth<4&&current!==null&&current!==undefined;depth++){
-  const message=current instanceof Error?current.message:String(current);
-  const code=(current as {code?:unknown})?.code;
-  const part=typeof code==="string"&&code&&!message.includes(code)?message+" ("+code+")":message;
-  if(part&&!parts.includes(part))parts.push(part);
-  current=(current as {cause?:unknown})?.cause;
- }
- return parts.join(": ").replace(/bot\d+:[A-Za-z0-9_-]+/g,"bot<redacted>").replace(/\s+/g," ").trim()||"unknown error";
-}
+// The reason a bridge failure line carries lives in the
+// leaf module error-reason.ts (moved 2026-11-17, hourly run
+// 10:04 EST, so the activity ledger - which this module
+// imports - can compose through the same seam with no
+// import cycle) and is re-exported here so every existing
+// import from telegram.js keeps working byte-for-byte.
+export { errorReason } from "./error-reason.js";
 export function bridgeFailureSummary(channelName:string,updateId:number,error:unknown):string{
  return ("Telegram bridge failed on update "+updateId+" for channel "+channelName+": "+errorReason(error)).slice(0,200);
 }

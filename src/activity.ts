@@ -1,5 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { errorReason } from "./error-reason.js";
 
 // The activity ledger: one append-only line per thing SAM did, so the owner can
 // answer "what did you do today and why" from a single place. Turns, proposals,
@@ -29,9 +30,25 @@ export function activityFailureSummary(reason: string): string {
  *  whole file is dead the append is swallowed like every
  *  append (the ledger never breaks the work it records) and
  *  the caller's rethrow is the witness. Never throws. */
+/** The reason an activity-failed line carries (gap found
+ *  2026-11-17, hourly run 10:04 EST): recordActivityFailure
+ *  took error.message alone, discarding error.cause, so a
+ *  dead ledger read whose wrapper hid its cause was
+ *  countable but never diagnosable - in the ledger's own
+ *  self-report line, the worst place to lose a cause. Now
+ *  it composes through errorReason (the 04:04 bridge seam,
+ *  extracted to its leaf module error-reason.ts in this
+ *  same change because telegram.ts imports this module and
+ *  the ledger cannot import the seam back without a cycle):
+ *  causeless errors keep their plain message, a non-Error
+ *  reads through String, bot-token segments are redacted,
+ *  and no ledger content ever enters the line. */
+export function activityFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordActivityFailure(root: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
-  recordActivity(root, "sam", "activity-failed", activityFailureSummary(reason));
+  recordActivity(root, "sam", "activity-failed", activityFailureSummary(activityFailureReason(error)));
 }
 
 export interface ActivityFilter { actor?: string; kind?: string }
