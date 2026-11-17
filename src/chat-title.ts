@@ -2,6 +2,8 @@ import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { modelRoutingTable } from "./model-routing.js";
+import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 
 // Auto-titling for chats the dashboard creates on the owner's first send
 // (Dip ruling 2026-11-14: messaging from the Talk empty state simply creates
@@ -58,6 +60,37 @@ export function defaultTitleCompleter(env: NodeJS.ProcessEnv = process.env): Tit
   };
 }
 
+// Autotitle failures are ledgered (gap found 2026-11-17,
+// hourly run 02:04 EST): the completer catch used to bind
+// nothing and return null, so a title route dying on
+// transport, timeout, or auth left the provisional title in
+// place - exactly as designed - with zero evidence anywhere:
+// the class was neither countable nor diagnosable, and a
+// persistently dead title route would silently leave every
+// new chat provisionally named forever. Now the catch
+// ledgers ONE autotitle-failed activity line and still
+// returns null exactly as before. The reason composes
+// through errorReason (the 04:04 bridge seam): the cause
+// chain is walked bounded and deduped, errno-style codes are
+// appended, and bot-token segments are redacted. Causeless
+// errors read byte-identically to their plain message, a
+// non-Error throw reads through String(error), and the
+// person's message content never enters the line. Returns
+// that are not failures stay silent: no model configured,
+// a placeholder mismatch (the owner renamed first), and a
+// completion that sanitizes to no title.
+export function autotitleFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
+export function autotitleFailedSummary(chatId: string, error: unknown): string {
+  return ("Autotitle failed in chat " + chatId.slice(0, 8) + ": " + autotitleFailureReason(error)).slice(0, 200);
+}
+
+export function recordAutotitleFailure(root: string, actor: string, chatId: string, error: unknown): void {
+  recordActivity(root, actor, "autotitle-failed", autotitleFailedSummary(chatId, error));
+}
+
 export async function autotitleChat(
   root: string,
   chatId: string,
@@ -78,7 +111,8 @@ export async function autotitleChat(
     let raw: string;
     try {
       raw = await run(user.content, asst?.content ?? "");
-    } catch {
+    } catch (error) {
+      try { recordAutotitleFailure(root, chat.agent_name ?? "sam", chatId, error); } catch { /* the ledger never breaks autotitle */ }
       return null;
     }
     const title = sanitizeChatTitle(raw);

@@ -775,6 +775,12 @@ function templateFor(key: string, label: string, count: number): SpecTemplate {
     ["The failing child shape is reproduced in a test and the child either returns or fails once with its verbatim reason on the record",
      "Exactly one subagent-failed ledger line still lands per genuinely failed child, so the class stays countable",
      "The full suite is green, including the sub-agent drive tests"]);
+  if (key === "autotitle-failed") return base(
+    ["chat-title.ts"],
+    "Chat autotitling stops failing silently: " + n + " ledgered failures, and a title completion must either name the chat or fail with its true cause (transport, timeout, or auth) recorded instead of leaving every new chat provisionally named with no evidence.",
+    ["The failing completer shape is reproduced in a test and the failure ledgers exactly one autotitle-failed line naming its cause, while the provisional title stays in place",
+     "Non-failure returns stay silent: no model configured, an owner rename first, and a completion that sanitizes to no title ledger nothing",
+     "The full suite is green, including the chat-title tests"]);
   if (key === "delegate-failed") return base(
     ["coding-operatives.ts"],
     "Coding delegations stop closing failed: " + n + " ledgered failures, and an approved delegation must either finish its run with its diff and test record or close failed naming the exact cause (launch, lease, worktree, or the operative's own exit) instead of recurring.",
@@ -1190,6 +1196,8 @@ export function classifyDefect(line: ActivityLine): { key: string; label: string
       return { key: "engine-blocked", label: "engine runs closing blocked" };
     case "subagent-failed":
       return { key: "subagent-failed", label: "sub-agent runs closing failed" };
+    case "autotitle-failed":
+      return { key: "autotitle-failed", label: "chat autotitle failures" };
     case "delegate-failed":
       return { key: "delegate-failed", label: "coding delegations closing failed" };
     case "team-failed":
