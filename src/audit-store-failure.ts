@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Failure visibility for the singleton audit stores, shared
 // by the five modules that each carry one copy of the same
@@ -46,8 +47,21 @@ export function auditStoreFailureSummary(store: AuditStoreName, phase: AuditStor
   return ("Audit store " + store + " " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a audit-store-failed line carries (census sprint
+ * 2026-11-17): recordAuditStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function auditStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordAuditStoreFailure(root: string, store: AuditStoreName, phase: AuditStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = auditStoreFailureReason(error);
   recordActivity(root, "sam", "audit-store-failed", auditStoreFailureSummary(store, phase, reason));
 }
 

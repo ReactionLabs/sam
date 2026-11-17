@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Failure visibility for the chat queue store
 // (.sam/chat-queue.db), shared by its two store modules:
@@ -46,8 +47,21 @@ export function chatQueueFailureSummary(phase: ChatQueuePhase, reason: string): 
   return ("Chat queue store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a chat-queue-failed line carries (census sprint
+ * 2026-11-17): recordChatQueueFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function chatQueueFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordChatQueueFailure(root: string, phase: ChatQueuePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = chatQueueFailureReason(error);
   recordActivity(root, "sam", "chat-queue-failed", chatQueueFailureSummary(phase, reason));
 }
 
