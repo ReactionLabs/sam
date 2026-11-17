@@ -12,6 +12,7 @@ import { commitTaskPaths, gitRepoRoot, headFileContent, prepareTaskBranch, workt
 import { verificationStatus } from "./verification.js";
 import { isEngineConnectionStoreLedgered, recordEngineConnectionStoreFailure } from "./engine-connection-failure.js";
 import type { GoldfishRecord } from "./goldfish.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * The managed coding-engine runtime (Phase D item 6, Dip's coder
@@ -182,8 +183,21 @@ export function engineStoreFailureSummary(phase: EngineStorePhase, reason: strin
   return ("Engine store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a engine-store-failed line carries (census sprint
+ * 2026-11-17): recordEngineStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function engineStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordEngineStoreFailure(root: string, phase: EngineStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = engineStoreFailureReason(error);
   recordActivity(root, "sam", "engine-store-failed", engineStoreFailureSummary(phase, reason));
 }
 

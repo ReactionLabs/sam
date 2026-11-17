@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Durable delivery outbox (Phase C item 1): the delivery ledger the
 // plan asks for. Before this, a changed heartbeat reply with a
@@ -67,8 +68,21 @@ export function outboxFailureSummary(phase: "append" | "read", label: string, re
   return ("Delivery outbox " + phase + " failed for " + label + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a outbox-failed line carries (census sprint
+ * 2026-11-17): recordOutboxFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function outboxFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordOutboxFailure(root: string, actor: string, phase: "append" | "read", label: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = outboxFailureReason(error);
   recordActivity(root, actor, "outbox-failed", outboxFailureSummary(phase, label, reason));
 }
 

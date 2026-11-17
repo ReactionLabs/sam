@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import { draftBlockedFor } from "./contacts.js";
+import { errorReason } from "./error-reason.js";
 
 // Outbound drafts (P12): SAM writes on the owner's behalf, but a draft is
 // where its power stops. A draft is a record in SAM's own store - there is
@@ -111,8 +112,21 @@ export function draftFailureSummary(phase: DraftPhase, reason: string): string {
   return ("Draft " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a draft-failed line carries (census sprint
+ * 2026-11-17): recordDraftFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function draftFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordDraftFailure(root: string, phase: DraftPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = draftFailureReason(error);
   recordActivity(root, "sam", "draft-failed", draftFailureSummary(phase, reason));
 }
 
