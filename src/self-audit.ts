@@ -208,9 +208,14 @@ export function runSelfAudit(root: string, env: NodeJS.ProcessEnv = process.env)
 
 /** The audit as plain text (the sam-self-audit script job's
  *  stdout shape): the map a person - or the self-work loop -
- *  reads. */
+ *  reads. The text carries NO clock reading: it is P3-diffed
+ *  as a script job's output, and the record's `at` stamp is
+ *  an ISO date fact that would announce "changed" daily at
+ *  an identical map (the eval battery's 2026-11-17 lesson).
+ *  The recorded record keeps its stamp; the text keeps the
+ *  verdicts and the inventory, which are the facts. */
 export function selfAuditText(audit: SelfAudit): string {
-  const lines: string[] = ["Capability self-audit - " + audit.at];
+  const lines: string[] = ["Capability self-audit"];
   lines.push("", "Can:");
   for (const c of audit.can) lines.push("- " + c.capability + ": " + c.detail);
   lines.push("", "Cannot:");

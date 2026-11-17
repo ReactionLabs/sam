@@ -79,7 +79,8 @@ test("self-audit: a run persists through the store, ledgers counts only, and a s
     const second = runSelfAudit(root, {});
     assert.deepEqual(readSelfAudit(root), second);
     const text = selfAuditText(second);
-    assert.match(text, /Capability self-audit - /);
+    assert.match(text, /^Capability self-audit$/m);
+    assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, "the text carries no clock reading - the record keeps its stamp");
     assert.match(text, /Cannot:/);
     assert.match(text, /send anything externally/);
   } finally { rmSync(root, { recursive: true, force: true }); }
