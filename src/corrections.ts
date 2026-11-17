@@ -1,6 +1,7 @@
 import { listActions, proposeAction, type ActionProposal } from "./actions.js";
 import { PreferenceStore, type PreferenceKind } from "./preferences.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Corrections (program P6): when the owner corrects SAM - "don't call it a
 // mini", "stop doing Y", "use X instead of Y" - the correction must not wash
@@ -123,8 +124,21 @@ export function correctionFailureSummary(actor: string, reason: string): string 
   const clean = reason.replace(/\s+/g, " ").trim() || "unknown error";
   return ("Correction propose failed for " + actor + ": " + clean).slice(0, 200);
 }
+/**
+ * The reason a correction-failed line carries (census sprint
+ * 2026-11-17): recordCorrectionFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function correctionFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordCorrectionFailure(root: string, actor: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = correctionFailureReason(error);
   recordActivity(root, actor, "correction-failed", correctionFailureSummary(actor, reason));
 }
 export function tryRouteCorrection(root: string, input: { actor: string; chatId?: string | null; text: string }): { proposal: ActionProposal; created: boolean } | null {

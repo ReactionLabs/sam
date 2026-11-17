@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // The dashboard config store: which profile the dashboard (and
 // every unbound chat, turn, and heartbeat tick) treats as the
@@ -127,8 +128,21 @@ export function dashboardConfigFailureSummary(phase: DashboardConfigPhase, reaso
   return ("Dashboard config " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a dashboard-config-failed line carries (census sprint
+ * 2026-11-17): recordDashboardConfigFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function dashboardConfigFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordDashboardConfigFailure(root: string, phase: DashboardConfigPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = dashboardConfigFailureReason(error);
   recordActivity(root, "sam", "dashboard-config-failed", dashboardConfigFailureSummary(phase, reason));
 }
 

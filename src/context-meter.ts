@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Context metering (Program H, self-knowledge item D - filed
 // requirement 5): injected-context size per turn is a
@@ -55,8 +56,21 @@ export function contextMeterFailureSummary(phase: "write" | "read", reason: stri
   return ("Context meter " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a context-failed line carries (census sprint
+ * 2026-11-17): recordContextMeterFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function contextMeterFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordContextMeterFailure(root: string, actor: string, phase: "write" | "read", error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = contextMeterFailureReason(error);
   recordActivity(root, actor, "context-failed", contextMeterFailureSummary(phase, reason));
 }
 
