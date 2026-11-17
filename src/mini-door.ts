@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { minis } from "./minis.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // The web door: how a person reaches their mini. Each mini can have one door,
 // addressed by an unguessable key in the path, the same pattern as the
@@ -163,8 +164,18 @@ export function doorFailureSummary(phase:DoorPhase,reason:string):string{
   return ("Door "+phase+" failed: "+clean).slice(0,200);
 }
 
+// The reason a door-failed line carries (census sprint
+// 2026-11-17): recordDoorFailure took error.message alone,
+// discarding error.cause. Now it composes through errorReason
+// (the 04:04 bridge seam): causeless errors keep their plain
+// message, a non-Error reads through String, bot-token segments
+// are redacted, and no record content ever enters the line.
+export function doorFailureReason(error:unknown):string{
+ return errorReason(error);
+}
+
 export function recordDoorFailure(root:string,phase:DoorPhase,error:unknown):void{
-  const reason=error instanceof Error?error.message:String(error);
+  const reason=doorFailureReason(error);
   recordActivity(root,"sam","door-failed",doorFailureSummary(phase,reason));
 }
 

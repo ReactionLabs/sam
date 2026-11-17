@@ -284,8 +284,21 @@ export function setupStoreFailureSummary(phase: SetupStorePhase, reason: string)
   return ("Setup store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a setup-store-failed line carries (census sprint
+ * 2026-11-17): recordSetupStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function setupStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSetupStoreFailure(root: string, phase: SetupStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = setupStoreFailureReason(error);
   recordActivity(root, "sam", "setup-store-failed", setupStoreFailureSummary(phase, reason));
 }
 

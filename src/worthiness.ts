@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, readFileSync, mkdirSync, lstatSync } from "
 import { join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
 import { PreferenceStore } from "./preferences.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Notification worthiness (Smarter-and-Smoother S5 + parity
@@ -148,8 +149,21 @@ export function worthinessFailureSummary(phase: "read" | "append", profile: stri
   return ("Worthiness " + phase + " failed for profile " + profile + " (" + kind + (verdict ? ", verdict " + (verdict.deliver ? "deliver" : "held") : "") + "): " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a worthiness-failed line carries (census sprint
+ * 2026-11-17): recordWorthinessFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function worthinessFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordWorthinessFailure(root: string, phase: "read" | "append", profile: string, kind: string, verdict: DeliveryAssessment | null, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = worthinessFailureReason(error);
   recordActivity(root, profile, "worthiness-failed", worthinessFailureSummary(phase, profile, kind, verdict, reason));
 }
 
@@ -165,8 +179,21 @@ export function worthinessReadFailureSummary(reason: string): string {
   return ("Worthiness read failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a worthiness-failed line carries (census sprint
+ * 2026-11-17): recordWorthinessReadFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function worthinessReadFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordWorthinessReadFailure(root: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = worthinessReadFailureReason(error);
   recordActivity(root, "sam", "worthiness-failed", worthinessReadFailureSummary(reason));
 }
 
