@@ -277,8 +277,21 @@ export function teamMessagesFailureSummary(phase: "read" | "append", label: stri
   const clean = String(reason ?? "").replace(/\s+/g, " ").trim() || "unknown error";
   return ("Team messages " + phase + " failed for " + label + ": " + clean).slice(0, 200);
 }
+/**
+ * The reason a team-messages-failed line carries (census sprint
+ * 2026-11-17): recordTeamMessagesFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function teamMessagesFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordTeamMessagesFailure(root: string, phase: "read" | "append", label: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = teamMessagesFailureReason(error);
   recordActivity(root, "sam", "team-messages-failed", teamMessagesFailureSummary(phase, label, reason));
 }
 function teamMessageLabel(message: TeamMessage): string {
