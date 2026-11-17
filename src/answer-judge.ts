@@ -377,6 +377,36 @@ export const ANSWER_JUDGE_FIXED_SCORES: Record<string, AnswerScores> = {
 export const ANSWER_JUDGE_BASELINE_MEAN = 2.75;
 export const ANSWER_JUDGE_DROP_TOLERANCE = 0.5;
 
+export const ANSWER_JUDGE_SCRIPT = "sam-answer-judge";
+
+/** The judge summary as plain text (the sam-answer-judge
+ *  script job's stdout, 2026-11-17): the trending surface the
+ *  two battery scorecards already have and the judge lacked -
+ *  until this, the box had recorded ZERO live verdicts and
+ *  nothing watched the summary move. The text carries ONLY
+ *  the scores and counts: no lastAt stamp (an ISO stamp is a
+ *  P3 date fact, so a timestamped scorecard would announce
+ *  "changed" on every tick at held scores - the stack-watch
+ *  false-change class the eval and task battery fixes closed
+ *  the same day), no judge model name, and never the latest
+ *  record's content (asks and answers are the owner's words,
+ *  not trend data). Two reads at the same recorded state are
+ *  byte-identical, so a daily script job stays P3-silent
+ *  until a new judge run actually moves a number. The full
+ *  summary record keeps its stamps; only the text drops them. */
+export function answerJudgeText(summary: AnswerJudgeSummary): string {
+  const lines = ["Answer judge - " + String(summary.judged) + " scored, " + String(summary.malformed) + " malformed"];
+  if (summary.judged === 0) {
+    lines.push("No verdicts recorded yet - the trend starts with the first recorded judge run.");
+    return lines.join("\n");
+  }
+  lines.push("Mean overall: " + String(summary.meanOverall));
+  for (const d of ANSWER_JUDGE_DIMENSIONS) lines.push(d + ": " + String(summary.byDimension[d]));
+  lines.push("Weakest dimension: " + String(summary.weakestDimension));
+  lines.push("Verdicts: " + String(summary.verdicts.strong) + " strong, " + String(summary.verdicts.mixed) + " mixed, " + String(summary.verdicts.weak) + " weak");
+  return lines.join("\n");
+}
+
 /** The fixed-set scorecard as plain text (the CLI show shape
  *  for a battery-style run): per-case overall beside the
  *  hand-checked baseline, and the drop verdict. */
