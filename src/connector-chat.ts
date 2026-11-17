@@ -9,6 +9,7 @@ import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerA
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { annotateToolResult } from "./source-citations.js";
 import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState, TurnEconomyGuard } from "./loop-guards.js";
+import { errorReason } from "./telegram.js";
 import { codeFileExists } from "./code.js";
 import { verificationStatus } from "./verification.js";
 
@@ -25,6 +26,30 @@ function safeArgs(raw:Record<string,unknown>):Record<string,unknown>|null{
  return out;
 }
 export interface OwnToolContext { actor:string; runTurn?:(chatId:string,content:string)=>Promise<string>; chatId?:string; userMessageId?:string }
+// MCP tool failures carry their reason (gap found 2026-11-17,
+// hourly run 00:04 EST): the connector loop's tool catch bound
+// no error at all and returned {error:"MCP tool failed"} for
+// every death of a connector read, discarding the classes the
+// exchange layer separates - its timeout conversion, its
+// authorization and HTTP-status errors, a missing credential,
+// and raw transport rejections whose real reason (DNS /
+// connect / socket / TLS) rides error.cause behind the bare
+// "fetch failed" wrapper. The tool result is the only record
+// of the death (no ledger line counts MCP tool failures), and
+// the model reading it is the voice that must tell the owner
+// what broke and whether a retry makes sense; the repeated-
+// failure guard's stub names this same error, so it inherited
+// the blindness. The reason now composes through errorReason
+// (the 04:04 bridge seam): the cause chain is walked bounded
+// and deduped, errno-style codes are appended, bot-token
+// segments are redacted, and whitespace collapses. The
+// "MCP tool failed" prefix stays; a causeless error now
+// surfaces its message (the old shape dropped it entirely),
+// a non-Error throw keeps String(error) through errorReason,
+// and the tool's arguments never enter the error.
+export function mcpToolFailureError(error:unknown):string{
+ return "MCP tool failed: "+errorReason(error);
+}
 async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,model:string,history:Array<{role:"system"|"user"|"assistant";content:string}>,connectorId?:string,own?:OwnToolContext,budget:ToolBudget=toolBudget("chat"),guard?:{toolsStarted:boolean},ceiling:ToolBudget|null=null,steer?:SteerProvider,poolCtx?:SpawnPoolContext,control?:TurnControl):Promise<string>{
  const connected=connectors(root).filter(c=>c.enabled&&connectorCredentialPresent(root,c)&&(!connectorId||c.id===connectorId));
  if(!connected.length)throw Error(connectorId?"Profile connector unavailable":"No configured MCP connector credentials");
@@ -259,7 +284,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
     else{
      const args=safeArgs(call.args);
      if(!args)outputs.set(call.id,{error:"Tool arguments not supported"});
-     else { sigById.set(call.id,failureSignature(call.name,call.args)); pending.push({id:call.id,run:async()=>{try{const raw=await readConnectorTool(connector,name,args,root);return annotateToolResult(root,{chatId:own?.chatId,userMessageId:own?.userMessageId,actor:own?.actor??"sam",name:call.name,args:call.args??{},result:raw,descriptors:[{kind:"connector",descriptor:connector.name+" · "+name}]});}catch{return {error:"MCP tool failed"};}}}); }
+     else { sigById.set(call.id,failureSignature(call.name,call.args)); pending.push({id:call.id,run:async()=>{try{const raw=await readConnectorTool(connector,name,args,root);return annotateToolResult(root,{chatId:own?.chatId,userMessageId:own?.userMessageId,actor:own?.actor??"sam",name:call.name,args:call.args??{},result:raw,descriptors:[{kind:"connector",descriptor:connector.name+" · "+name}]});}catch(e){return {error:mcpToolFailureError(e)};}}}); }
     }
    }
   }
