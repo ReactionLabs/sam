@@ -183,6 +183,31 @@ export function asyncToolFailureError(prefix:string,error:unknown):string{
 export function chatToolFailureError(error:unknown):string{
   return errorReason(error);
 }
+// Sync personal-tool failures carry their cause (gap found
+// 2026-11-17, hourly run 08:04 EST): the last message-alone
+// inner catches in executeOwnToolInner - the Address Book
+// catch and the skill / react / self-work family
+// (sam_list_skills, sam_read_skill, sam_react, sam_save_note,
+// sam_patch_note, sam_author_skill, sam_propose_action) -
+// returned the bare message for an Error and a bare label
+// (or String(e)) for a non-Error, discarding error.cause and
+// any errno-style code riding on the error itself, so a
+// contacts, skill, chat, note, or proposal store dying on
+// transport or a locked/torn database read as its wrapper
+// alone. The tool result is the only record of the death and
+// the model reading it is the voice that reports it, so each
+// catch now composes through errorReason (the 04:04 bridge
+// seam) via personalToolFailureError: an Error rides
+// errorReason (causeless errors read byte-identically), a
+// non-Error throw keeps its existing bare label exactly, and
+// the Address Book catch passes a null fallback so its
+// non-Error shape (String(e)) is preserved. Bot tokens are
+// redacted, and the tool's arguments (the person's name, the
+// skill name, the note content, the proposal detail) never
+// enter the error.
+export function personalToolFailureError(fallback:string|null,error:unknown):string{
+  return error instanceof Error?errorReason(error):(fallback??errorReason(error));
+}
 const collabInFlight=new Set<string>();
 /** A hire that fits no tranche of this turn returns as DATA, not an
  *  error (Defect 3): the numbers ride along, the result is marked
@@ -661,14 +686,14 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
           return {status:"removed",slug:existing.name,display:existing.display,note:"The entry for "+existing.display+" is deleted from the Address Book, their people page is gone, and they are marked never-offer: do not offer to save them again and do not save them unless the owner explicitly asks. Confirm the removal in one short line inside your answer."};
         }
         return {error:"Unknown Address Book action: "+action};
-      }catch(e){return {error:e instanceof Error?e.message:String(e)};}
+      }catch(e){return {error:personalToolFailureError(null,e)};}
     }
     if(name==="sam_list_skills"){
       // Installed skills, metadata only - the same discoverSkills the CLI
       // `skills list` rides. Instructions are never inlined here; reading
       // one is sam_read_skill, so untrusted text arrives framed as such.
       try{return {untrusted:true,skills:skillsForProfile(root,actor).map(s=>({name:s.name,description:s.description,source:s.source}))};}
-      catch(e){return {error:e instanceof Error?e.message:"Skill list failed"};}
+      catch(e){return {error:personalToolFailureError("Skill list failed",e)};}
     }
     if(name==="sam_read_skill"){
       // Same validated reader as the CLI `skills read` and the workspace
@@ -688,7 +713,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
         // dressed as a success on the rail.
         if(recordSkillUse(root,{actor,chatId:chatId??null,skill:read.name}))recordActivity(root,actor,"skill-use","Used skill "+read.name+(chatId?" in chat "+chatId.slice(0,8):""));
         return read;}
-      catch(e){return {error:e instanceof Error?e.message:"Skill read failed"};}
+      catch(e){return {error:personalToolFailureError("Skill read failed",e)};}
     }
     if(name==="sam_react"){
       // Chat reactions: SAM stamps one emoji on the owner's message -
@@ -717,7 +742,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
         if(msg.role!=="user")return {error:"Reactions go on the owner's messages, not SAM's own"};
         if(!db.setReaction(chatId,target,typeof args.reaction==="string"?args.reaction.trim():""))return {error:"Reaction could not be set"};
         return {reacted:typeof args.reaction==="string"?args.reaction.trim():"",messageId:target};
-      }catch(e){return {error:e instanceof Error?e.message:"Reaction failed"};}
+      }catch(e){return {error:personalToolFailureError("Reaction failed",e)};}
       finally{db.close();}
     }
     if(name==="sam_save_note"){
@@ -730,7 +755,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
         const r=saveNote(root,{actor,content:typeof args.content==="string"?args.content:"",kind:typeof args.kind==="string"?args.kind:undefined,chatId:chatId??null,supersedes:typeof args.supersedes==="string"?args.supersedes:null});
         if(r.status==="saved")return {status:"saved",id:r.record.id,scope:r.record.scope,note:"Saved. State in your reply that you saved this note - saving is never silent."};
         return {status:"pending_owner_approval",id:r.proposal.id,reason:r.reason,note:"This is a hard change ("+r.reason+"), so it was NOT saved directly: it is proposed for owner approval in the dashboard. Tell the owner it needs their approval; do not claim it is saved."};
-      }catch(e){return {error:e instanceof Error?e.message:"Note refused"};}
+      }catch(e){return {error:personalToolFailureError("Note refused",e)};}
     }
     if(name==="sam_patch_note"){
       // Note PATCH (Phase B item 2): the supersession verb. Always a
@@ -740,7 +765,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
       try{
         const r=patchNote(root,{actor,id:typeof args.id==="string"?args.id:"",content:typeof args.content==="string"?args.content:"",chatId:chatId??null});
         return {status:"pending_owner_approval",id:r.proposal.id,supersedes:r.supersedes,reason:r.reason,note:"This patch is NOT applied yet: it is proposed for owner approval in the dashboard. On approval the new note saves and the old record is archived, so the stale text stops surfacing. Tell the owner it needs their approval; do not claim the record is patched."};
-      }catch(e){return {error:e instanceof Error?e.message:"Patch refused"};}
+      }catch(e){return {error:personalToolFailureError("Patch refused",e)};}
     }
     if(name==="sam_author_skill"){
       // Skill authoring (Phase B item 3): SAM drafts a skill from a
@@ -751,7 +776,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
       try{
         const r=proposeAuthoredSkill(root,{actor,name:typeof args.name==="string"?args.name:"",description:typeof args.description==="string"?args.description:"",instructions:typeof args.instructions==="string"?args.instructions:"",chatId:chatId??null});
         return {status:"pending_owner_approval",id:r.proposal.id,patch:r.patch,note:"This skill draft is NOT written yet: it is proposed for owner approval in the dashboard. On approval the SKILL.md is written and joins the installed catalog. Tell the owner it needs their approval; do not claim the skill exists yet."};
-      }catch(e){return {error:e instanceof Error?e.message:"Skill draft refused"};}
+      }catch(e){return {error:personalToolFailureError("Skill draft refused",e)};}
     }
     if(name==="sam_propose_action"){
       // Creating an agent is the owner's structural act: a visitor
@@ -766,7 +791,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
       try{
         const a=proposeAction(root,{actor,kind:typeof args.kind==="string"?args.kind:"",title:typeof args.title==="string"?args.title:"",detail:typeof args.detail==="string"?args.detail:"",chatId:chatId??null});
         return {status:"pending_owner_approval",id:a.id,kind:a.kind,title:a.title,note:"Nothing executes until the owner approves this in the dashboard."};
-      }catch(e){return {error:e instanceof Error?e.message:"Proposal refused"};}
+      }catch(e){return {error:personalToolFailureError("Proposal refused",e)};}
     }
     return {error:"Tool not approved"};
   }catch(e){return {error:toolFailureError(e)};}
