@@ -129,6 +129,29 @@ export function turnFailureNoteSummary(chatId:string,error:unknown):string{
   // reaches the owner; this line is the internal record.
   return "Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+errorReason(error).slice(0,120);
 }
+export function failoverSummary(chatId:string,from:string,to:string,error:unknown):string{
+  // The hop line's reason rides the same seam (gap found
+  // 2026-11-16, hourly run 19:04 EST): it took error.message
+  // alone, the last e.message-alone seam in the turn path,
+  // so a primary route dying on transport ledgered the
+  // provider's plain conversion ("Model network request
+  // failed") and dropped the sanitized code-only cause the
+  // provider attached at 09:04 precisely so a ledger line
+  // could name it. When the failover succeeds this line is
+  // the ONLY record of the first route's death - no
+  // turn-failed line is written for a rescued turn - so
+  // its blindness hid the cause entirely, not just beside
+  // a diagnosable sibling. errorReason walks the cause
+  // chain (bounded, deduped), appends errno-style codes,
+  // redacts bot-token segments, and collapses whitespace;
+  // causeless errors and plain strings read
+  // byte-identically, and the prefix and the 160-char
+  // reason slice are exactly the old shape. The
+  // eligibility check and the hop itself are untouched,
+  // and the person's message content still never enters
+  // the line.
+  return "Failover in chat "+chatId.slice(0,8)+": "+from+" -> "+to+" ("+errorReason(error).slice(0,160)+")";
+}
 export function recordTurnFailure(root:string,chatId:string,route:TurnRoute,error:unknown):void{
   let actor="sam";
   try{
@@ -420,8 +443,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       if(control.invalidated())throw new TurnInvalidatedError(chatId);
       const next=routes[i+1];
       if(next&&failoverEligible(error,guard)){
-        const reason=error instanceof Error?error.message:String(error);
-        recordActivity(root,profileName,"failover","Failover in chat "+chatId.slice(0,8)+": "+conn.providerId+"/"+ (conn.model??"(none)")+" -> "+next.providerId+"/"+(next.model??"(none)")+" ("+reason.slice(0,160)+")");
+        recordActivity(root,profileName,"failover",failoverSummary(chatId,conn.providerId+"/"+ (conn.model??"(none)"),next.providerId+"/"+(next.model??"(none)"),error));
         continue;
       }
       // Rate-limit grace (Dip, 2026-11-12): on the chat route, for
