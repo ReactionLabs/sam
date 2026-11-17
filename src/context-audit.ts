@@ -218,9 +218,14 @@ export function runContextAudit(root: string): ContextAudit {
 }
 
 /** The audit as plain text (the sam-context-audit script job's
- *  stdout shape): the scorecard a person reads. */
+ *  stdout shape): the scorecard a person reads. It carries NO
+ *  clock reading - the recorded record keeps `at`, but the
+ *  text is P3-diffed by the daily script job, and an ISO stamp
+ *  is a date fact that would announce "changed" every day at
+ *  an identical score. Only the facts ride the text: the pass
+ *  counts, the named findings, the per-profile loads. */
 export function contextAuditText(audit: ContextAudit): string {
-  const lines: string[] = ["Context audit - " + audit.at + " - " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks passed"];
+  const lines: string[] = ["Context audit - " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks passed"];
   for (const dim of audit.dimensions) lines.push("- " + dim.label + ": " + String(dim.passed) + "/" + String(dim.total));
   if (audit.findings.length) {
     lines.push("", "Findings:");
