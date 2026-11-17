@@ -1,6 +1,6 @@
 import { connectors, connectorCredentialPresent, testConnector, readConnectorTool, type Connector } from "./connectors.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
-import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt } from "./own-tools.js";
+import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt, toolFailureError } from "./own-tools.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import type { SpawnPoolContext } from "./subagents.js";
@@ -277,7 +277,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
     outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
    }else if(own&&call.name.startsWith("sam_")){
     sigById.set(call.id,failureSignature(call.name,call.args));
-    pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId,own.userMessageId);}catch(e){return {error:e instanceof Error?e.message:String(e)};}}});
+    pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId,own.userMessageId);}catch(e){return {error:toolFailureError(e)};}}});
    }else{
     const name=toolMap.get(call.name);
     if(!name)outputs.set(call.id,{error:"Tool not approved"});
