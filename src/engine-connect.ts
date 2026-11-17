@@ -7,6 +7,7 @@ import { engineBinary } from "./engine.js";
 import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { recordActivity } from "./activity.js";
 import { failEngineConnectionStore } from "./engine-connection-failure.js";
+import { errorReason } from "./error-reason.js";
 
 // CLI dressing item 3 (Dip, 2026-11-10; OpenClaw borrow, research doc
 // section 6 item 4): "Connect Claude Code" the CLI-reuse way. Before
@@ -216,7 +217,7 @@ export async function probeEngineAuthFor(provider: EngineProvider, env: NodeJS.P
   try {
     result = await run(binary, [...def.authArgv], AUTH_TIMEOUT_MS);
   } catch (err) {
-    return { provider, state: "unknown", binary, method: null, reason: "The auth probe could not run: " + (err instanceof Error ? err.message : String(err)), exitCode: null };
+    return { provider, state: "unknown", binary, method: null, reason: "The auth probe could not run: " + errorReason(err), exitCode: null };
   }
   if (result.timedOut) {
     return { provider, state: "unknown", binary, method: null, reason: "`" + def.command + " " + def.authArgv.join(" ") + "` timed out, so the login state is unknown; SAM will not claim a connection.", exitCode: null };

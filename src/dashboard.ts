@@ -25,6 +25,7 @@ import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, 
 import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, mergeQueueIntoMessages, resendFailedMessage, resetChatTurn, resumeChatQueues, type QueueItem } from "./chat-queue.js";
 import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
 import { grooveEnabled, makeTheme } from "./theme.js";
+import { errorReason } from "./error-reason.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -298,7 +299,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         let userReaction:string|null=null;let replyId:string|null=null;let replyText="";let replyCitation:ResolvedCitation|null=null;let replySources:RunSource[]|null=null;try{const db2=new ChatStore(workspace);try{const msgs=db2.messages(id);for(let i=msgs.length-1;i>=0;i--){if(msgs[i].role==="user"&&userReaction===null){userReaction=msgs[i].reaction;}if(msgs[i].role==="assistant"&&replyId===null){replyId=msgs[i].id;replyText=msgs[i].content;}}}finally{db2.close();}if(replyId){replyCitation=citationViewForMessage(workspace,replyId);const storedSources=sourcesForMessage(workspace,replyId);replySources=storedSources&&storedSources.cited.length?storedSources.cited:null;}}catch{/* the badge is garnish */}
         let turnArtifacts:ArtifactSummary[]=[];try{turnArtifacts=artifactsForChat(workspace,id).filter(a=>a.updatedAt>=turnStart);}catch{/* the artifact card is garnish: a dead artifact store never takes the reply down */}
         json(200,{reply:{role:"assistant",content:replyText,id:replyId,citation:replyCitation,sources:replySources},userReaction,actions:listActions(workspace).filter(a=>a.chatId===id&&a.createdAt>=turnStart),artifacts:turnArtifacts});
-      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",message);json(400,{error:safe});}return;
+      }catch(error){const message=error instanceof Error?error.message:"Unknown model error";const known=["Model not configured","Chat history limit reached","Remote model requires an API key","Model request timed out","Model network request failed","Invalid model response content","Model returned no safe visible content","Model returned unterminated reasoning content","Invalid model JSON response","Model response too large","Empty model response","Unsafe model output","Profile connector unavailable"];const http=/^Model request failed \(HTTP (\d{3})\)$/.exec(message);const safe=known.includes(message)?message:http?message:"Message failed. Check model configuration and server logs.";console.error("[SAM dashboard chat]",safe,"| cause:",errorReason(error));json(400,{error:safe});}return;
     }
     // Artifacts API (owner door, under the dashboard token like every
     // other /api route): list/get/create/update plus version history.
@@ -378,7 +379,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
               const reply=await runChatTurn(workspace,fresh,content.trim(),{surface:"scoped"});json(200,{reply:{role:"assistant",content:reply}});
             }else throw error;
           }
-        }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";console.error("[SAM door chat]",safe,"| cause:",message);json(400,{error:safe});}
+        }catch(error){const message=error instanceof Error?error.message:"Door error";const safe=["Model not configured","Profile connector unavailable","Invalid door message","Invalid session"].includes(message)?message:"Message failed.";console.error("[SAM door chat]",safe,"| cause:",errorReason(error));json(400,{error:safe});}
         return;
       }
       res.writeHead(405);res.end();return;

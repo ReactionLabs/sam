@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Senses (Plan Phase E item 2; the full-agent program's P2 order:
@@ -167,7 +168,7 @@ export async function runSense(root: string, actor: string, name: SenseName, opt
   try {
     raw = await runner(binary, args, SENSE_TIMEOUT_MS);
   } catch (e) {
-    raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) };
+    raw = { exitCode: null, output: errorReason(e) };
   }
   const durationMs = Date.now() - start;
   const notInstalled = raw.exitCode === null && !raw.output && !raw.timedOut;

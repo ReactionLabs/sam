@@ -193,7 +193,7 @@ function checkExtracted(dir: string, archive: string): VerifyReport {
         const row = db.pragma("integrity_check", { simple: true });
         if (row !== "ok") errors.push("integrity_check failed for " + name + ": " + String(row));
       } finally { db.close(); }
-    } catch (e) { errors.push("cannot open database " + name + ": " + (e instanceof Error ? e.message : String(e))); }
+    } catch (e) { errors.push("cannot open database " + name + ": " + backupFailureReason(e)); }
   }
   return { ok: errors.length === 0, archive, files: manifest.files.length, databases: manifest.databases, errors };
 }
@@ -221,7 +221,7 @@ export function runRestoreDrill(archivePath: string): DrillReport {
         const missions = new MissionStore(join(fakeRoot, ".sam", "missions.db")); try { report.missions = missions.list().length; } finally { missions.close(); }
         const memories = new MemoryStore(join(fakeRoot, ".sam", "missions.db")); try { report.memories = memories.list(undefined).length; } finally { memories.close(); }
         const prefs = new PreferenceStore(fakeRoot); try { report.preferences = prefs.list().length; } finally { prefs.close(); }
-      } catch (e) { report.ok = false; report.errors.push("drill could not boot the copy: " + (e instanceof Error ? e.message : String(e))); }
+      } catch (e) { report.ok = false; report.errors.push("drill could not boot the copy: " + backupFailureReason(e)); }
     } finally { rmSync(fakeRoot, { recursive: true, force: true }); }
     return report;
   } finally { rmSync(dir, { recursive: true, force: true }); }

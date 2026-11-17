@@ -453,7 +453,7 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     try {
       const group = createLink(root, a.actor + " + " + spec.name, [a.actor, spec.name]);
       linkNote = "; linked to " + a.actor + " ('" + group.name + "') so they can work together through the link";
-    } catch (e) { linkNote = "; the agent exists but linking it to " + a.actor + " failed: " + (e instanceof Error ? e.message : "unknown error"); }
+    } catch (e) { linkNote = "; the agent exists but linking it to " + a.actor + " failed: " + (e instanceof Error ? errorReason(e) : "unknown error"); }
     return "Agent " + mini.name + " created for " + mini.person + " (profile + welcome chat 'Meet " + mini.person + "'" + (spec.starterHeartbeat ? " + a starter daily digest" : "") + ")" + linkNote;
   }
   if (a.kind === "pair") {

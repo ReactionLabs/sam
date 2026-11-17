@@ -246,7 +246,7 @@ export async function runGoldfishReview(root: string, spec: string, model: strin
     malformed = true;
     review = {
       verdict: "BLOCK",
-      summary: "Goldfish verifier output was malformed (" + (error instanceof Error ? error.message : "unknown") + "); fail-closed block. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 300),
+      summary: "Goldfish verifier output was malformed (" + (error instanceof Error ? errorReason(error) : "unknown") + "); fail-closed block. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 300),
       findings: [{ severity: "BLOCKER", detail: "Verifier output could not be validated; the change cannot be reported done on an unreadable review.", evidence: "validateReview refused the model response", patternId: null }],
     };
   }
@@ -338,7 +338,7 @@ export async function runGoldfishDiffReview(root: string, spec: string, changes:
     malformed = true;
     review = {
       verdict: "BLOCK",
-      summary: "Goldfish verifier output was malformed (" + (error instanceof Error ? error.message : "unknown") + "); fail-closed block. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 300),
+      summary: "Goldfish verifier output was malformed (" + (error instanceof Error ? errorReason(error) : "unknown") + "); fail-closed block. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 300),
       findings: [{ severity: "BLOCKER", detail: "Verifier output could not be validated; the change cannot be reported done on an unreadable review.", evidence: "validateReview refused the model response", patternId: null }],
     };
   }

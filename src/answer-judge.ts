@@ -275,7 +275,7 @@ export async function judgeAnswer(root: string, turn: AnswerTurnInput, model: st
   } catch (error) {
     record = {
       ...base, scores: null, notes: null, overall: null, verdict: null, malformed: true,
-      summary: ("Judge output was malformed (" + (error instanceof Error ? error.message : "unknown") + "); no score recorded. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 200)).slice(0, 300),
+      summary: ("Judge output was malformed (" + (error instanceof Error ? errorReason(error) : "unknown") + "); no score recorded. Raw output excerpt: " + String(response.message.content ?? "").slice(0, 200)).slice(0, 300),
     };
   }
   appendRecord(root, record);

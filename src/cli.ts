@@ -78,6 +78,7 @@ import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, withSpawnPool } from "./subagents.js";
+import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, planJob, remainingPool } from "./orchestration.js";
 import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
@@ -856,7 +857,7 @@ program.command("talk").description("Interactive terminal conversation with conf
           // Keep bounded in-memory context; no transcript is written to disk.
           if (messages.length>40) messages.splice(0,messages.length-40);
         } catch(error) {
-          if (journal && loop) journal.finish(loop.id,"failed",error instanceof Error?error.message:"Unknown error");
+          if (journal && loop) journal.finish(loop.id,"failed",error instanceof Error?errorReason(error):"Unknown error");
           console.error("SAM request failed:",error instanceof Error?error.message:"Unknown error");
         } finally { journal?.close(); }
       }
@@ -873,7 +874,7 @@ daemon.command("status").action(async()=>{
     output(reply);
     if(!reply.ok)process.exitCode=1;
   }
-  catch(error){output({ok:false,reason:error instanceof Error?error.message:String(error)});process.exitCode=1;}
+  catch(error){output({ok:false,reason:errorReason(error)});process.exitCode=1;}
 });
 daemon.command("stop").action(async()=>{
   try{
@@ -881,7 +882,7 @@ daemon.command("stop").action(async()=>{
     output(reply);
     if(!reply.ok)process.exitCode=1;
   }
-  catch(error){output({ok:false,reason:error instanceof Error?error.message:String(error)});process.exitCode=1;}
+  catch(error){output({ok:false,reason:errorReason(error)});process.exitCode=1;}
 });
 
 const memory=program.command("memory").description("Durable mission memory (evidence, never authority over policy)");

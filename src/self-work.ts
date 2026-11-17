@@ -11,6 +11,7 @@ import { codeRoot } from "./code.js";
 import { getCodingTask, listCodingTasks, queueCodingTask, type CodingTask } from "./coding.js";
 import { addScheduledJob, heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
 import { readSelfAudit, type SelfAudit } from "./self-audit.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * The self-work spec picker (SELF-WORK program, Dip 2026-11-11,
@@ -1517,7 +1518,7 @@ export function reconcileSelfWorkFixes(root: string, now: Date = new Date()): Se
       else {
         try {
           proposalId = proposeAction(root, { actor: task.actor, kind: "git-push", title: "Push " + branch + " (self-work fix " + fix.specId + ": " + fix.defectKey + ")", detail: JSON.stringify({ branch }), chatId: task.chatId }).id;
-        } catch (e) { proposalNote = " (push proposal refused: " + (e instanceof Error ? e.message : "unknown") + ")"; }
+        } catch (e) { proposalNote = " (push proposal refused: " + (e instanceof Error ? errorReason(e) : "unknown") + ")"; }
       }
     }
     fix.proposalId = proposalId;
@@ -1540,7 +1541,7 @@ export function advanceSelfWork(root: string, now: Date = new Date()): { queued:
   let queued: SelfWorkFix | null = null;
   let queueNote: string | null = null;
   try { queued = queueSelfWorkFix(root, now); }
-  catch (e) { queueNote = e instanceof Error ? e.message : "queue refused"; }
+  catch (e) { queueNote = e instanceof Error ? errorReason(e) : "queue refused"; }
   return { queued, queueNote, fixes: reconcileSelfWorkFixes(root, now) };
 }
 

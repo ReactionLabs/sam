@@ -290,7 +290,7 @@ async function runResearch(): Promise<TaskBatteryCaseResult> {
       return { id: "research-citations", label, passed: scored.passed, evidence: scored.evidence, durationMs: Date.now() - started, execution: "harness" };
     });
   } catch (error) {
-    return { id: "research-citations", label, passed: false, evidence: "Research job threw: " + (error instanceof Error ? error.message : String(error)), durationMs: Date.now() - started, execution: "harness" };
+    return { id: "research-citations", label, passed: false, evidence: "Research job threw: " + errorReason(error), durationMs: Date.now() - started, execution: "harness" };
   }
 }
 
@@ -321,7 +321,7 @@ async function runMultiFile(): Promise<TaskBatteryCaseResult> {
       } finally { rmSync(codeDir, { recursive: true, force: true }); }
     });
   } catch (error) {
-    return { id: "multi-file-coding", label, passed: false, evidence: "Multi-file coding job threw: " + (error instanceof Error ? error.message : String(error)), durationMs: Date.now() - started, execution: "harness" };
+    return { id: "multi-file-coding", label, passed: false, evidence: "Multi-file coding job threw: " + errorReason(error), durationMs: Date.now() - started, execution: "harness" };
   }
 }
 
@@ -375,7 +375,7 @@ async function runBuildLane(): Promise<TaskBatteryCaseResult> {
     });
   } catch (error) {
     setOrchestrationRunnerForTests(null);
-    return { id: "orchestration-build-lane", label, passed: false, evidence: "Orchestration job threw: " + (error instanceof Error ? error.message : String(error)), durationMs: Date.now() - started, execution: "harness" };
+    return { id: "orchestration-build-lane", label, passed: false, evidence: "Orchestration job threw: " + errorReason(error), durationMs: Date.now() - started, execution: "harness" };
   }
 }
 
@@ -409,7 +409,7 @@ async function runDoNotStore(): Promise<TaskBatteryCaseResult> {
       return { id: "memory-do-not-store", label, passed: scored.passed, evidence: scored.evidence, durationMs: Date.now() - started, execution: "harness" };
     });
   } catch (error) {
-    return { id: "memory-do-not-store", label, passed: false, evidence: "Memory do-not-store threw: " + (error instanceof Error ? error.message : String(error)), durationMs: Date.now() - started, execution: "harness" };
+    return { id: "memory-do-not-store", label, passed: false, evidence: "Memory do-not-store threw: " + errorReason(error), durationMs: Date.now() - started, execution: "harness" };
   }
 }
 
@@ -438,7 +438,7 @@ async function runColdChat(): Promise<TaskBatteryCaseResult> {
       } finally { chats.close(); }
     });
   } catch (error) {
-    return { id: "cold-chat-simple", label, passed: false, evidence: "Cold chat threw: " + (error instanceof Error ? error.message : String(error)), durationMs: Date.now() - started, execution: "harness" };
+    return { id: "cold-chat-simple", label, passed: false, evidence: "Cold chat threw: " + errorReason(error), durationMs: Date.now() - started, execution: "harness" };
   }
 }
 

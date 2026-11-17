@@ -347,7 +347,7 @@ export const defaultOperativeSpawn: OperativeSpawn = (spec) => new Promise(done 
   child.stdout?.on("data", take);
   child.stderr?.on("data", take);
   child.on("error", err => {
-    output += redactOperativeOutput(err instanceof Error ? err.message : String(err));
+    output += redactOperativeOutput(errorReason(err));
     finish(null);
   });
   child.on("close", code => finish(code));

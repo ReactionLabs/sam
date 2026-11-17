@@ -7,6 +7,7 @@ import { modelRoutingTable } from "./model-routing.js";
 import { workspaceEnvPath } from "./setup.js";
 import { daemonTokenStatus, samVersion } from "./daemon-auth.js";
 import { requestDaemon, socketPath, type DaemonReply } from "./daemon.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * sam doctor (issue #33, sprint item 5). Each check reports a
@@ -103,7 +104,7 @@ function isSymlink(path: string): boolean {
 }
 
 function reasonOf(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim().slice(0, 180);
+  return errorReason(error).replace(/\s+/g, " ").trim().slice(0, 180);
 }
 
 function storeChecks(root: string): DoctorCheck[] {
@@ -195,7 +196,7 @@ function envCheck(root: string, env: NodeJS.ProcessEnv): DoctorCheck {
     if (!endpoint) missing.push("SAM_MODEL_PROVIDER=minimax or SAM_MODEL_ENDPOINT");
     if (!keyPresent) missing.push("SAM_MODEL_API_KEY (or MINIMAX_API_KEY for minimax)");
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorReason(error);
     return check("env", "fail", "Configuration could not be parsed: " + reason, "Fix the named variable. Doctor does not write sam.env or any credential.", "write-env");
   }
   const envFile = existsSync(workspaceEnvPath(root)) ? "sam.env is present" : "sam.env is absent";
@@ -224,7 +225,7 @@ async function modelCheck(env: NodeJS.ProcessEnv, connectHost: (host: string, po
     endpoint = modelEndpoint(env);
     key = modelApiKey(env);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+    const reason = errorReason(error);
     return check("model", "fail", "Model endpoint could not be read: " + reason, "Correct the endpoint. Doctor does not call the model or change credentials.", "reach-model");
   }
   if (!endpoint) return check("model", "skip", "No model endpoint configured (see env).");
@@ -255,7 +256,7 @@ async function versionCheck(root: string, env: NodeJS.ProcessEnv, ping: (workspa
     if (code === "ECONNREFUSED" || code === "ENOENT" || code === "ECONNRESET") {
       return check("daemon-version", "skip", "Daemon is not running.");
     }
-    return check("daemon-version", "fail", "Daemon version could not be read: " + message, "Inspect `sam daemon status`. Doctor will not stop a live daemon.", "restart-daemon");
+    return check("daemon-version", "fail", "Daemon version could not be read: " + errorReason(error), "Inspect `sam daemon status`. Doctor will not stop a live daemon.", "restart-daemon");
   }
 }
 

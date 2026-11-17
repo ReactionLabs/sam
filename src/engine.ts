@@ -583,7 +583,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       // unbranched tree or on top of the owner's uncommitted work.
       let gitState: CodingGitState | null = null;
       try { gitState = prepareTaskBranch(root, current); }
-      catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? e.message : "Git preparation failed" }; }
+      catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? errorReason(e) : "Git preparation failed" }; }
       current.git = gitState;
       updateEngineTask(root, task.id, { git: gitState });
       if (gitState.mode !== "branch") {
@@ -607,7 +607,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       const runner = deps.runEngine ?? defaultEngineRunner;
       let outcome: { exitCode: number | null; output: string; timedOut?: boolean };
       try { outcome = await runner(binary, engineArgv(current, provider), base, ENGINE_TIMEOUT_MS); }
-      catch (e) { outcome = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+      catch (e) { outcome = { exitCode: null, output: errorReason(e) }; }
       current.exitCode = outcome.exitCode;
       current.output = (outcome.output ?? "").slice(-OUTPUT_TAIL_CHARS);
       updateEngineTask(root, task.id, { exitCode: current.exitCode, output: current.output });
@@ -625,7 +625,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       // base and ledger each recordable one through the C1 shape.
       let changes: Array<{ path: string; deleted: boolean }> = [];
       try { changes = worktreeChanges(root); }
-      catch (e) { close("blocked", "The engine finished, but SAM could not enumerate its changes: " + (e instanceof Error ? e.message : String(e)).slice(0, 200)); continue; }
+      catch (e) { close("blocked", "The engine finished, but SAM could not enumerate its changes: " + errorReason(e).slice(0, 200)); continue; }
       const recorded: string[] = []; const unreviewable: string[] = [];
       for (const change of changes) {
         if (change.deleted) { unreviewable.push(change.path + " (deleted)"); continue; }
@@ -655,7 +655,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       try {
         await runCodeCommand(root, current.actor, "build", { runner: deps.codeRunner });
         await runCodeCommand(root, current.actor, "test", { runner: deps.codeRunner });
-      } catch (e) { verifyError = e instanceof Error ? e.message : String(e); }
+      } catch (e) { verifyError = errorReason(e); }
       const vstate = verificationStatus(root).state;
       current.verification = verifyError ? "unavailable: " + verifyError.slice(0, 160) : vstate;
       updateEngineTask(root, task.id, { verification: current.verification });
@@ -673,7 +673,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
           const record = await deps.review(current);
           reviewOutcome = record.verdict + ": " + record.summary;
           recordActivity(root, current.actor, "engine-review", "Self-review " + record.verdict + " for engine run: " + current.title);
-        } catch (e) { reviewUnavailable = e instanceof Error ? e.message : "Self-review failed"; }
+        } catch (e) { reviewUnavailable = e instanceof Error ? errorReason(e) : "Self-review failed"; }
         current.review = reviewUnavailable ? "unavailable: " + reviewUnavailable.slice(0, 240) : reviewOutcome;
         updateEngineTask(root, task.id, { review: current.review });
         if (reviewUnavailable) {
@@ -689,7 +689,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       // branch (C4). Anything left pending closes blocked.
       gitState.pending = [...recorded];
       try { commitTaskPaths(root, gitState, [...recorded], 1, current.title); gitState.error = null; }
-      catch (e) { gitState.error = e instanceof Error ? e.message : "git commit failed"; }
+      catch (e) { gitState.error = e instanceof Error ? errorReason(e) : "git commit failed"; }
       current.git = gitState;
       updateEngineTask(root, task.id, { git: gitState });
       if (gitState.pending.length) {

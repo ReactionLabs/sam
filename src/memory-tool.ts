@@ -1,6 +1,7 @@
 import { MemoryStore } from "./memory.js";
 import type { Message } from "./model-conversation.js";
 import { executeWorkspaceTool } from "./workspace-tools.js";
+import { errorReason } from "./error-reason.js";
 
 export interface ToolCall {
   id: string;
@@ -24,6 +25,18 @@ export const MEMORY_SEARCH_TOOL = {
     }
   }
 } as const;
+
+/** The error text a failed memory-tool dispatch returns
+ * (census sprint 2026-11-17): the dispatch catch took
+ * error.message alone, discarding error.cause, so the model
+ * saw a wrapper with no diagnosis. Now it composes through
+ * errorReason (the 04:04 bridge seam): causeless errors keep
+ * their plain message, a non-Error keeps the "Tool failed"
+ * label, bot-token segments are redacted, and no record
+ * content ever enters the text. */
+export function memoryToolFailureError(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Tool failed";
+}
 
 export function validateToolTurn(value: unknown, workspaceTools = false): ToolTurn {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid model tool response");
@@ -110,7 +123,7 @@ export async function runMemoryToolTurn(
         onAudit?.({ tool: call.function.name, status: "completed", detail: call.id });
       } catch (error) {
         onAudit?.({ tool: call.function.name, status: "failed", detail: call.id });
-        result = JSON.stringify({ error: error instanceof Error ? error.message : "Tool failed" });
+        result = JSON.stringify({ error: memoryToolFailureError(error) });
       }
       conversation.push({ role: "tool", tool_call_id: call.id, content: result });
     }

@@ -548,7 +548,7 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
   try { addWorktree(repo, worktree, slice.branch, job.baseSha as string); }
   catch (e) {
     slice.status = "failed";
-    slice.error = e instanceof Error ? e.message : "worktree creation failed";
+    slice.error = e instanceof Error ? errorReason(e) : "worktree creation failed";
     slice.durationMs = Date.now() - started;
     return;
   }
@@ -569,7 +569,7 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
     const fakeTask = { spec: prompt, provider } as unknown as EngineTask;
     let outcome: { exitCode: number | null; output: string; timedOut?: boolean };
     try { outcome = await runner(depsBinary(deps, provider), engineArgv(fakeTask, provider), worktree, job.sliceTimeoutMs); }
-    catch (e) { outcome = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+    catch (e) { outcome = { exitCode: null, output: errorReason(e) }; }
     slice.output = (outcome.output ?? "").slice(-OUTPUT_TAIL_CHARS);
     if (outcome.timedOut || outcome.exitCode !== 0) {
       lastFailure = outcome.timedOut
@@ -579,7 +579,7 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
     }
     let changes: Array<{ path: string; deleted: boolean }> = [];
     try { changes = changesIn(worktree); }
-    catch (e) { lastFailure = "Could not enumerate the slice's changes: " + (e instanceof Error ? e.message : String(e)); continue; }
+    catch (e) { lastFailure = "Could not enumerate the slice's changes: " + errorReason(e); continue; }
     const deleted = changes.filter(c => c.deleted).map(c => c.path);
     if (deleted.length) {
       lastFailure = "The slice deleted file(s) (" + deleted.join(", ") + ") - deletions are outside the parallel shape (SAM cannot diff-review a deletion through this door). Restore them and make the change another way.";
@@ -603,7 +603,7 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
         slice.error = "Isolated verify failed (recorded); the slice's work is committed and the coordinator battery decides the job.";
       } catch (e) {
         slice.status = "failed";
-        slice.error = e instanceof Error ? e.message : "slice commit failed";
+        slice.error = e instanceof Error ? errorReason(e) : "slice commit failed";
       }
       slice.durationMs = Date.now() - started;
       return;
@@ -614,7 +614,7 @@ async function runSlice(root: string, repo: string, job: ParallelJob, slice: Par
       slice.status = "done";
       slice.error = null;
     } catch (e) {
-      lastFailure = "Committing the slice's work failed: " + (e instanceof Error ? e.message : String(e));
+      lastFailure = "Committing the slice's work failed: " + errorReason(e);
       continue;
     }
     slice.durationMs = Date.now() - started;
@@ -743,7 +743,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       // SURVEY: the read the slices are cut against.
       let survey: RepoSurvey;
       try { survey = surveyRepo(root); }
-      catch (e) { close("blocked", "The repo survey refused the job: " + (e instanceof Error ? e.message : String(e))); continue; }
+      catch (e) { close("blocked", "The repo survey refused the job: " + errorReason(e)); continue; }
       job.survey = survey;
       job.baseSha = survey.baseSha;
       saveParallelJob(root, job);
@@ -765,7 +765,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       // into the job branch inside its own worktree.
       const mergedTree = join(worktreeBase(root, job.id), "_merged");
       try { addWorktree(repo, mergedTree, job.branch as string, job.baseSha as string); }
-      catch (e) { close("blocked", "The coordinator worktree could not be created: " + (e instanceof Error ? e.message : String(e))); continue; }
+      catch (e) { close("blocked", "The coordinator worktree could not be created: " + errorReason(e)); continue; }
       for (const slice of job.slices) {
         if (slice.status !== "done") continue;
         // --no-ff writes a merge commit, so the identity has to ride
@@ -802,7 +802,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
           const fakeTask = { spec: fixPrompt, provider } as unknown as EngineTask;
           let outcome: { exitCode: number | null; output: string; timedOut?: boolean };
           try { outcome = await runner(depsBinary(deps, provider), engineArgv(fakeTask, provider), mergedTree, job.sliceTimeoutMs); }
-          catch (e) { outcome = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+          catch (e) { outcome = { exitCode: null, output: errorReason(e) }; }
           let fixChanges: string[] = [];
           if (!outcome.timedOut && outcome.exitCode === 0) {
             try {
@@ -860,7 +860,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
             continue;
           }
         } catch (e) {
-          const message = e instanceof Error ? e.message : "Self-review failed";
+          const message = e instanceof Error ? errorReason(e) : "Self-review failed";
           job.review = "unavailable: " + message.slice(0, 240);
           close("blocked", "The merged work verified, but the fresh-context self-review could not run (" + message.slice(0, 200) + ") - unreviewed work is not done. The merged work stays on " + job.branch + ".");
           continue;

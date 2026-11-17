@@ -423,7 +423,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       // the owner's uncommitted work into its branch.
       let gitState: CodingGitState | null = null;
       try { gitState = prepareTaskBranch(root, current); }
-      catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? e.message : "Git preparation failed" }; }
+      catch (e) { gitState = { mode: "refused", branch: null, baseSha: null, commits: [], pending: [], error: e instanceof Error ? errorReason(e) : "Git preparation failed" }; }
       current.git = gitState;
       updateCodingTask(root, task.id, { git: gitState });
       if (gitState.mode === "refused") {
@@ -459,7 +459,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
             for (const p of newPaths) if (!gitState.pending.includes(p)) gitState.pending.push(p);
             if (gitState.pending.length) {
               try { commitTaskPaths(root, gitState, [...gitState.pending], iteration, current.title); gitState.error = null; }
-              catch (e) { gitState.error = e instanceof Error ? e.message : "git commit failed"; }
+              catch (e) { gitState.error = e instanceof Error ? errorReason(e) : "git commit failed"; }
               updateCodingTask(root, task.id, { git: gitState });
             }
           }
@@ -478,7 +478,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
               verdict = { state: "verified", pending: [], note: "A fresh-context reviewer BLOCKED the verified diff: " + record.summary + (blockers ? " Blockers: " + blockers : "") + " Fix what the findings name; the next review covers the new changes." };
               continue; // a block is data: the next iteration gets the findings
             } catch (e) {
-              const message = e instanceof Error ? e.message : "Self-review failed";
+              const message = e instanceof Error ? errorReason(e) : "Self-review failed";
               // A standing BLOCK with no new changes to review is
               // still a block, not an infrastructure failure.
               if (reviewOutcome?.startsWith("BLOCK") && /No unreviewed changes/.test(message)) break;

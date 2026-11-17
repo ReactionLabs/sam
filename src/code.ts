@@ -643,7 +643,7 @@ export async function runCodeCommand(root: string, actor: string, name: string, 
   try {
     raw = await runner(spec.file, spec.args, spec.cwd, timeoutMs);
   } catch (e) {
-    raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) };
+    raw = { exitCode: null, output: errorReason(e) };
   }
   const durationMs = Date.now() - start;
   // ENOENT surfaces as exitCode null with empty output from the default
@@ -795,7 +795,7 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     spec = buildCloneSpec(root, canonical, destination);
     mkdirSync(dirname(spec.args[spec.args.length - 1]), { recursive: true });
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errorReason(e);
     const shown = canonical ? canonical + " into " + oneLine(destination) : "an invalid URL into " + oneLine(destination);
     recordActivity(root, actor, "git-clone", boundedLedger("Refused clone of " + shown + ": " + oneLine(msg), oneLine(destination)));
     throw e;
@@ -806,7 +806,7 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
   const start = Date.now();
   let raw: { exitCode: number | null; output: string; timedOut?: boolean };
   try { raw = await runner(spec.file, spec.args, spec.cwd, timeoutMs); }
-  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  catch (e) { raw = { exitCode: null, output: errorReason(e) }; }
   const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
   const result: CodeRunResult = {
     command: "git-clone", description: spec.description, url: canonical, destination,
@@ -944,7 +944,7 @@ export async function runPython(root: string, actor: string, rel: string, opts: 
     const start = Date.now();
     let raw: { exitCode: number | null; output: string; timedOut?: boolean };
     try { raw = await runner(located.interpreter, [located.abs], located.cwd, timeoutMs, built.env); }
-    catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+    catch (e) { raw = { exitCode: null, output: errorReason(e) }; }
     const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
     const result: PythonRunResult = {
       path: rel, sandbox, sha256: digest, interpreter: located.interpreter, passThrough: requested,
@@ -958,7 +958,7 @@ export async function runPython(root: string, actor: string, rel: string, opts: 
     recordActivity(root, actor, "python-run", boundedLedger("sha256:" + digest + " pass-through:" + pass + " path:" + rel + (sandbox ? " sandbox:" + sandbox : "") + " -> " + status, "sha256:" + digest));
     return result;
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
+    const msg = errorReason(e);
     recordActivity(root, actor, "python-run", "Refused python " + oneLine(rel) + (digest ? " sha256:" + digest : "") + ": " + msg);
     throw e;
   }
@@ -1048,7 +1048,7 @@ export async function createSandbox(root: string, actor: string, name: string, o
   const runner = opts.runner ?? defaultCodeRunner;
   let raw: { exitCode: number | null; output: string; timedOut?: boolean };
   try { raw = await runner(python, ["-m", "venv", venvDir], dir, timeoutMs); }
-  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  catch (e) { raw = { exitCode: null, output: errorReason(e) }; }
   const py = venvPythonPath(dir);
   if (raw.exitCode !== 0 || raw.timedOut || !existsSync(py)) {
     try {
@@ -1130,7 +1130,7 @@ export async function installSandboxPackage(root: string, actor: string, name: s
   const start = Date.now();
   let raw: { exitCode: number | null; output: string; timedOut?: boolean };
   try { raw = await runner(argv.file, argv.args, argv.cwd, timeoutMs); }
-  catch (e) { raw = { exitCode: null, output: e instanceof Error ? e.message : String(e) }; }
+  catch (e) { raw = { exitCode: null, output: errorReason(e) }; }
   const output = (raw.output ?? "").slice(0, MAX_OUTPUT_CHARS);
   const result: SandboxPipResult = {
     sandbox: name, package: pkg, version,
