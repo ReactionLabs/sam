@@ -164,6 +164,25 @@ export function toolFailureError(error:unknown):string{
 export function asyncToolFailureError(prefix:string,error:unknown):string{
   return prefix+": "+errorReason(error);
 }
+// Sync chat-family failures carry their cause (gap found
+// 2026-11-17, hourly run 06:04 EST): the inner catches for
+// sam_search_chats, sam_manage_chats, and sam_open_loop in
+// executeOwnToolInner returned the bare message for an Error
+// and String(e) for a non-Error - discarding error.cause and
+// any errno-style code riding on the error itself, so a chat
+// store, a search index, or a loop store dying on transport
+// or a locked/torn database read as its wrapper message
+// alone. The tool result is the only record of the death and
+// the model reading it is the voice that reports it, so each
+// catch now composes through errorReason (the 04:04 bridge
+// seam) via chatToolFailureError: no prefix is added (the
+// error was the message alone), causeless errors read
+// byte-identically, a non-Error throw keeps String(error),
+// bot tokens are redacted, and the tool's arguments (the
+// search query, the loop question) never enter the error.
+export function chatToolFailureError(error:unknown):string{
+  return errorReason(error);
+}
 const collabInFlight=new Set<string>();
 /** A hire that fits no tranche of this turn returns as DATA, not an
  *  error (Defect 3): the numbers ride along, the result is marked
@@ -452,7 +471,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
     // the citation pass can validate the model's selection.
     if(chatId&&userMessageId)recordSearchHits(chatId,userMessageId,hits);
     return {untrusted:true,hits,citationGuidance:CITATION_GUIDANCE};
-   }catch(e){return {error:e instanceof Error?e.message:String(e)};}
+   }catch(e){return {error:chatToolFailureError(e)};}
   }
   if(name==="sam_manage_chats"){
    try{
@@ -474,7 +493,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
      case "search":{const hits=searchManagedChats(root,actor,String(args.query??""));if(chatId&&userMessageId)recordSearchHits(chatId,userMessageId,hits);return {hits,citationGuidance:CITATION_GUIDANCE};}
      default:return {error:"Unknown chat action: "+action};
     }
-   }catch(e){return {error:e instanceof Error?e.message:String(e)};}
+   }catch(e){return {error:chatToolFailureError(e)};}
   }
   if(name==="sam_open_loop"){
    try{
@@ -482,7 +501,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
     const loop=openLoop(root,{profile:actor,chatId:chatId??null,question:String(args.question??""),answer:String(args.answer??""),watchFor:String(args.watchFor??""),dueInHours:typeof args.dueInHours==="number"?args.dueInHours:undefined});
     recordActivity(root,actor,"loop-open","Opened loop: "+loop.question.slice(0,120));
     return {status:"open",id:loop.id,dueAt:loop.dueAt,note:"This loop will greet the owner at the next session start under 'Where things stand'."};
-   }catch(e){return {error:e instanceof Error?e.message:String(e)};}
+   }catch(e){return {error:chatToolFailureError(e)};}
   }
   try{
     if(name==="sam_memory_search"||name==="sam_memory_list"){
