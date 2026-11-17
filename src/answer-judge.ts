@@ -4,6 +4,7 @@ import { recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * The answer-quality judge (QUEUED NEXT Q2, Dip 2026-11-14
@@ -111,8 +112,21 @@ export function answerJudgeFailureSummary(phase: "read" | "append", reason: stri
   return ("Answer judge " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a answer-judge-failed line carries (census sprint
+ * 2026-11-17): recordAnswerJudgeFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function answerJudgeFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordAnswerJudgeFailure(root: string, phase: "read" | "append", error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = answerJudgeFailureReason(error);
   recordActivity(root, "sam", "answer-judge-failed", answerJudgeFailureSummary(phase, reason));
 }
 
