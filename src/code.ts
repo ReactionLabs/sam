@@ -11,6 +11,7 @@ import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { readFileProviders } from "./providers.js";
 import { recordChange, recordVerification } from "./verification.js";
 import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Coder hands (Phase D item 2, Dip's coder program 2026-11-09: C1 write
@@ -163,8 +164,21 @@ export function codeStoreFailureSummary(phase: CodeStorePhase, reason: string): 
   return ("Code store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a code-store-failed line carries (census sprint
+ * 2026-11-17): recordCodeStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function codeStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordCodeStoreFailure(root: string, phase: CodeStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = codeStoreFailureReason(error);
   recordActivity(root, "sam", "code-store-failed", codeStoreFailureSummary(phase, reason));
 }
 
@@ -353,8 +367,21 @@ export function codeWriteFailureSummary(phase: "read" | "append", eventLabel: st
   return ("Code write " + phase + " failed for " + eventLabel + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a code-write-failed line carries (census sprint
+ * 2026-11-17): recordCodeWriteFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function codeWriteFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordCodeWriteFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = codeWriteFailureReason(error);
   recordActivity(root, "sam", "code-write-failed", codeWriteFailureSummary(phase, eventLabel, reason));
 }
 

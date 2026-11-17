@@ -5,6 +5,7 @@ import { mkdirSync } from "node:fs";
 import { join,resolve } from "node:path";
 import { normalizeMessageSource, type StoredMessageSource } from "./message-provenance.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
@@ -68,8 +69,21 @@ export function chatStoreFailureSummary(phase: ChatStorePhase, reason: string): 
   return ("Chat store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a chat-store-failed line carries (census sprint
+ * 2026-11-17): recordChatStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function chatStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordChatStoreFailure(root: string, phase: ChatStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = chatStoreFailureReason(error);
   recordActivity(root, "sam", "chat-store-failed", chatStoreFailureSummary(phase, reason));
 }
 
