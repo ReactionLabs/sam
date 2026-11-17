@@ -3,6 +3,7 @@ import { turnRoutes } from "./failover.js";
 import { OpenAICompatibleProvider, type TokenUsage } from "./openai-compatible.js";
 import { recordUsage } from "./usage.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 
 // Relay (sprint item 3): the same prompt, sent to two or more configured
 // models, answered side by side. This compares brains; it does not merge
@@ -79,6 +80,20 @@ async function defaultComplete(root: string, env: NodeJS.ProcessEnv, actor: stri
   return { content: res.message.content, usage };
 }
 
+// A failed route's reason composes through errorReason (the
+// 2026-11-16 04:04 bridge seam; gap found 2026-11-16, hourly
+// run 22:04 EST): the per-target catch took error.message
+// alone over provider.complete, so a route dying on transport
+// labeled its row with the bare undici wrapper "fetch failed"
+// and named nothing - the real reason (DNS / connect / socket
+// / TLS) rides error.cause. errorReason walks the cause chain
+// (bounded, deduped), appends errno codes, and redacts any
+// bot<token> segment; causeless errors read byte-identically
+// and a non-Error throw keeps String(error).
+export function relayFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : String(error);
+}
+
 export async function relayPrompt(root: string, prompt: string, targets: RelayTarget[], opts?: { env?: NodeJS.ProcessEnv; actor?: string; complete?: RelayCompleter }): Promise<RelayResult> {
   const text = prompt.trim();
   if (!text || text.length > 8000) throw new Error("Relay prompt must be 1 to 8000 characters");
@@ -95,7 +110,7 @@ export async function relayPrompt(root: string, prompt: string, targets: RelayTa
         : await defaultComplete(root, env, actor, target, text);
       return { provider: target.provider, model: target.model, ok: true, content: done.content, error: null, latencyMs: Date.now() - started, usage: done.usage };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = relayFailureReason(error);
       return { provider: target.provider, model: target.model, ok: false, content: null, error: message.slice(0, 200), latencyMs: Date.now() - started, usage: null };
     }
   }));
