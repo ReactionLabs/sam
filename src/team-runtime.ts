@@ -12,6 +12,7 @@ import { OperativeRegistry } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { profileToolNames } from "./subagents.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 
 export interface TeamMember { name:string; role:string }
@@ -404,6 +405,27 @@ async function defaultStandingComplete(env: NodeJS.ProcessEnv): Promise<Standing
   };
 }
 
+// Standing team run failures carry their cause (gap found
+// 2026-11-16, hourly run 21:04 EST): runStandingTeam's catch
+// took error.message alone over the worker and reviewer
+// model completions (provider.complete over fetch), and that
+// one bare message fed both records of the death - the run's
+// stored result and the terminal team-failed activity line,
+// the ONE such line per failed run - so a member call dying
+// on transport read the bare undici wrapper "fetch failed"
+// in both and named nothing. The reason now composes
+// through errorReason (the 04:04 bridge seam): the cause
+// chain is walked bounded and deduped, errno-style codes
+// are appended, and bot-token segments are redacted, so a
+// member call dying on a DNS failure names the lookup in
+// both records in the same shape. Causeless errors read
+// byte-identically, a non-Error throw keeps the existing
+// "Team run failed" fallback, and the task text never
+// enters a failure record.
+export function teamFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "Team run failed";
+}
+
 export async function runStandingTeam(root: string, task: string, opts?: { lead?: string; maxRounds?: number; complete?: StandingCompleter; env?: NodeJS.ProcessEnv }): Promise<TeamRunRecord> {
   const text = task.trim();
   if (!text || text.length > 2000) throw new Error("Team task must be 1 to 2000 characters");
@@ -489,7 +511,7 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
     ledger(root, { at: new Date().toISOString(), runId: run.id, from: lead, to: lead, kind: "result", text: (run.result ?? "").slice(0, 2000) }, run.chatId);
   } catch (error) {
     run.status = "failed";
-    run.result = error instanceof Error ? error.message : "Team run failed";
+    run.result = teamFailureReason(error);
     // No ledger line here: the terminal line below is the ONE
     // team-failed line per failed run (it now carries this reason) -
     // a second line in the catch double-counted the thrown shape.
