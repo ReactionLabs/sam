@@ -4,6 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Preference memory: what the person likes, captured from their own chats with a
 // profile, and the path by which a preference becomes LAW for that profile.
@@ -58,8 +59,21 @@ export function preferenceStoreFailureSummary(phase: PreferenceStorePhase, reaso
   return ("Preference store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a preference-store-failed line carries (census sprint
+ * 2026-11-17): recordPreferenceStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function preferenceStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordPreferenceStoreFailure(root: string, phase: PreferenceStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = preferenceStoreFailureReason(error);
   recordActivity(root, "sam", "preference-store-failed", preferenceStoreFailureSummary(phase, reason));
 }
 

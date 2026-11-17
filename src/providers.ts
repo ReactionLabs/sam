@@ -6,6 +6,7 @@ import { recordActivity } from "./activity.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { resolveModelForRoute, tierForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
 import type { TurnRoute } from "./budgets.js";
+import { errorReason } from "./error-reason.js";
 
 // Multi-provider (sprint item 1). SAM used to run one provider: the
 // env triple SAM_MODEL_PROVIDER / SAM_MODEL_ENDPOINT / SAM_MODEL_API_KEY
@@ -166,8 +167,21 @@ export function providerStoreFailureSummary(phase: ProviderStorePhase, reason: s
   return ("Provider store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a provider-store-failed line carries (census sprint
+ * 2026-11-17): recordProviderStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function providerStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordProviderStoreFailure(root: string, phase: ProviderStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = providerStoreFailureReason(error);
   recordActivity(root, "sam", "provider-store-failed", providerStoreFailureSummary(phase, reason));
 }
 
