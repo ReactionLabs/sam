@@ -2,6 +2,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Perplexity-style source citations for factual answers (Dip ruling
@@ -241,8 +242,19 @@ export function peekRunSources(chatId: string, userMessageId: string): RunSource
 // crosses two dispatch wrappers is numbered exactly once.
 // ----------------------------------------------------------------
 
+/** The reason a source-citation-failed line carries
+ * (census sprint 2026-11-17): sourceCitationFailureSummary
+ * took error.message alone, discarding error.cause. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no source content ever enters the line. */
+export function sourceCitationFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function sourceCitationFailureSummary(phase: string, error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 160);
+  const reason = sourceCitationFailureReason(error).replace(/\s+/g, " ").slice(0, 160);
   return "Source citation " + phase + " failed: " + reason;
 }
 

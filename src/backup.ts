@@ -9,6 +9,7 @@ import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
 import { MissionStore } from "./storage.js";
+import { errorReason } from "./error-reason.js";
 
 // Reliability (program P9): SAM's whole .sam state is the product - every
 // chat, law, episode, door key, and ledger line lives there, and until now
@@ -63,10 +64,22 @@ function snapshotDatabase(source: string, dest: string): void {
 // throw anywhere in the work below used to exist only on the CLI's
 // stderr - on the box that is the systemd journal of the sam-backup
 // oneshot, invisible to the owner console, the brief, and self-work.
-// The summary carries the error's own message only (collapsed,
+// The summary carries the composed failure reason only (collapsed,
 // capped by recordActivity), never a file's contents.
+/** The reason a backup-failed line carries (census sprint
+ * 2026-11-17): backupFailureSummary took error.message
+ * alone, discarding error.cause, so a backup that died
+ * behind a wrapper was countable but never diagnosable.
+ * Now it composes through errorReason (the 04:04 bridge
+ * seam): causeless errors keep their plain message, a
+ * non-Error reads through String, bot-token segments are
+ * redacted, and no file content ever enters the line. */
+export function backupFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function backupFailureSummary(error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
+  const reason = backupFailureReason(error).replace(/\s+/g, " ").trim();
   return "Backup failed: " + (reason || "unknown error");
 }
 

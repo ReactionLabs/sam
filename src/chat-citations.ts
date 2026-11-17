@@ -4,6 +4,7 @@ import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { isManagedChat, type ChatSearchHit } from "./chat-manage.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Clickable chat-history citations (GitHub issue #92, Dip 2026-11-14).
@@ -150,8 +151,19 @@ function citationsDbFile(root: string): string {
   return join(resolve(root), ".sam", "chat-citations.db");
 }
 
+/** The reason a chat-citation-failed line carries (census
+ * sprint 2026-11-17): chatCitationFailureSummary took
+ * error.message alone, discarding error.cause. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no citation content ever enters the line. */
+export function chatCitationFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function chatCitationFailureSummary(phase: string, error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").slice(0, 160);
+  const reason = chatCitationFailureReason(error).replace(/\s+/g, " ").slice(0, 160);
   return "Chat citation " + phase + " failed: " + reason;
 }
 
