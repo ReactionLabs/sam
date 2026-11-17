@@ -8,6 +8,7 @@ import { openDatabase } from "./sqlite.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./telegram.js";
 import { OperativeRegistry, OPERATIVE_HEARTBEAT_TTL_MS, type Operative } from "./operatives.js";
 
 // Coding-agent operatives (item 9). SAM delegates a repo job to a
@@ -368,6 +369,35 @@ function postReport(root: string, job: Delegation, text: string): void {
   } catch { /* the report still lives on the delegation record */ }
 }
 
+// Delegation failures carry their cause (gap found
+// 2026-11-17, hourly run 01:04 EST): runApprovedDelegation's
+// catch took error.message alone over the operative
+// registry and lease doors, worktree git, filesystem
+// writes, and the operative spawn, and that one bare
+// message fed every record of the death - the delegation's
+// stored summary, the ONE delegate-failed (or
+// delegate-cancelled) activity line per failed run, and
+// the report posted into the originating chat, which
+// carries the summary - so an error carrying its real
+// reason on error.cause, or an errno-style code the
+// message omits, named nothing (launch vs lease vs
+// worktree vs store indistinguishable). The reason now
+// composes through errorReason (the 04:04 bridge seam):
+// the cause chain is walked bounded and deduped,
+// errno-style codes are appended, and bot-token segments
+// are redacted, so a delegation dying on a coded store or
+// transport-shaped error names it in every record in the
+// same shape. Causeless errors read byte-identically, a
+// non-Error throw keeps the existing "failed" fallback,
+// and the delegation prompt never enters a failure record.
+export function delegateFailureReason(error: unknown): string {
+  return error instanceof Error ? errorReason(error) : "failed";
+}
+
+export function delegateFailedSummary(status: string, error: unknown): string {
+  return "Delegation " + status + ": " + delegateFailureReason(error);
+}
+
 export async function runApprovedDelegation(root: string, action: { id: string; actor: string; chatId: string | null; detail: string }, env: NodeJS.ProcessEnv = process.env, spawnImpl: OperativeSpawn = defaultOperativeSpawn): Promise<Delegation> {
   const existing = readAll(root).find(d => d.actionId === action.id);
   if (existing?.status === "cancelled") throw new Error("Delegation was cancelled before it ran");
@@ -444,7 +474,7 @@ export async function runApprovedDelegation(root: string, action: { id: string; 
   } catch (error) {
     job.status = getDelegation(root, job.id)?.status === "cancelled" ? "cancelled" : "failed";
     job.finishedAt = new Date().toISOString();
-    job.summary = "Delegation " + job.status + ": " + (error instanceof Error ? error.message : "failed");
+    job.summary = delegateFailedSummary(job.status, error);
     put(root, job);
     recordActivity(root, job.actor, "delegate-" + job.status, job.summary.slice(0, 280));
     postReport(root, job, job.summary);
