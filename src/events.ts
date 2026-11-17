@@ -8,6 +8,7 @@ import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
 import type { TurnRoute } from "./budgets.js";
+import { errorReason } from "./error-reason.js";
 
 // Event door (sprint item 6). A local webhook accepts a signed event
 // (lead arrived, deploy finished, email received) and wakes the bound
@@ -97,8 +98,21 @@ export function eventFailureSummary(phase: EventPhase, reason: string): string {
   return ("Event " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a event-failed line carries (census sprint
+ * 2026-11-17): recordEventFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function eventFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordEventFailure(root: string, phase: EventPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = eventFailureReason(error);
   recordActivity(root, "sam", "event-failed", eventFailureSummary(phase, reason));
 }
 

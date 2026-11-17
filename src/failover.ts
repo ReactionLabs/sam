@@ -5,6 +5,7 @@ import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
+import { errorReason } from "./error-reason.js";
 
 // Model failover (sprint item 2). A profile's primary route is its
 // provider+model pin (or the environment provider when it has none).
@@ -79,8 +80,21 @@ export function failoverFailureSummary(phase: FailoverPhase, reason: string): st
   return ("Failover " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a failover-failed line carries (census sprint
+ * 2026-11-17): recordFailoverFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function failoverStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordFailoverFailure(root: string, phase: FailoverPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = failoverStoreFailureReason(error);
   recordActivity(root, "sam", "failover-failed", failoverFailureSummary(phase, reason));
 }
 
