@@ -9,6 +9,7 @@ import { installedSkills } from "./skill-registry.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
 import { ChatStore } from "./chats.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 // Skill authoring + curator (Plan Phase B item 3, Hermes borrow: the
 // agent writes its own skills and a background curator keeps the
@@ -165,8 +166,21 @@ export function skillAuthorsStoreFailureSummary(phase: SkillAuthorsStorePhase, r
   return ("Skill authors store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a skill-authors-store-failed line carries (census sprint
+ * 2026-11-17): recordSkillAuthorsStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function skillAuthorsStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSkillAuthorsStoreFailure(root: string, phase: SkillAuthorsStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = skillAuthorsStoreFailureReason(error);
   recordActivity(root, "sam", "skill-authors-store-failed", skillAuthorsStoreFailureSummary(phase, reason));
 }
 
@@ -607,8 +621,21 @@ export function skillCuratorStoreFailureSummary(phase: SkillCuratorStorePhase, r
   return ("Skill curator store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a skill-curator-store-failed line carries (census sprint
+ * 2026-11-17): recordSkillCuratorStoreFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function skillCuratorStoreFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSkillCuratorStoreFailure(root: string, phase: SkillCuratorStorePhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = skillCuratorStoreFailureReason(error);
   recordActivity(root, "sam", "skill-curator-store-failed", skillCuratorStoreFailureSummary(phase, reason));
 }
 

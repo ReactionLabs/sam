@@ -3,6 +3,7 @@ import { MemoryStore, type MemoryRecord } from "./memory.js";
 import { visibleScopes } from "./links.js";
 import { listLoops } from "./loops.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Recall that lands (Smarter-and-Smoother pass S1, Dip mandate
@@ -229,8 +230,21 @@ export function recallFailureSummary(actor: string, phase: RecallPhase, reason: 
   return ("Recall " + phase + " failed for " + actor + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a recall-failed line carries (census sprint
+ * 2026-11-17): recordRecallFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function recallFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordRecallFailure(root: string, actor: string, phase: RecallPhase, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = recallFailureReason(error);
   recordActivity(root, actor, "recall-failed", recallFailureSummary(actor, phase, reason));
 }
 

@@ -2,6 +2,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
 import { recordActivity } from "./activity.js";
+import { errorReason } from "./error-reason.js";
 
 /**
  * Cheap session caps (Harness Implementation Order item 3, Dip
@@ -121,8 +122,21 @@ export function sessionCapsFailureSummary(what: string, chatId: string, reason: 
   return ("Session caps " + what + " failed" + chat + ": " + clean).slice(0, 200);
 }
 
+/**
+ * The reason a session-caps-failed line carries (census sprint
+ * 2026-11-17): recordSessionCapsFailure took error.message alone,
+ * discarding error.cause, so a failure whose wrapper hid
+ * its cause was countable but never diagnosable. Now it
+ * composes through errorReason (the 04:04 bridge seam):
+ * causeless errors keep their plain message, a non-Error
+ * reads through String, bot-token segments are redacted,
+ * and no record content ever enters the line. */
+export function sessionCapsFailureReason(error: unknown): string {
+  return errorReason(error);
+}
+
 export function recordSessionCapsFailure(root: string, what: string, chatId: string, error: unknown): void {
-  const reason = error instanceof Error ? error.message : String(error);
+  const reason = sessionCapsFailureReason(error);
   recordActivity(root, "sam", "session-caps-failed", sessionCapsFailureSummary(what, chatId, reason));
 }
 
