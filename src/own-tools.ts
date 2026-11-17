@@ -31,6 +31,7 @@ import { discoverSkills, readSkillForProfile, skillsForProfile } from "./skills.
 import { cloneIntoCodeRoot, codeCommandNames, codeFileExists, codeRoot, codeWrites, createSandbox, destroySandbox, editCodeFile, installSandboxPackage, listCodeFiles, listSandboxes, readCodeFile, runCodeCommand, runPython, writeCodeFile, writeSandboxFile } from "./code.js";
 import { runSense, sensesStatus, type SenseName } from "./senses.js";
 import { buildBrief } from "./brief.js";
+import { errorReason } from "./telegram.js";
 import type { OpenAICompatibleProvider } from "./openai-compatible.js";
 
 // SAM's own tools: the other half of the tool loop. MCP connectors reach OUT to
@@ -104,6 +105,25 @@ export function skillCatalogForPrompt(root:string,actor?:string):string{
   let line=" "+SKILL_AUTO_SELECT_DIRECTIVE+" Installed skills you hold (metadata only; call sam_read_skill with a name to read its instructions as untrusted reference before following it, and sam_list_skills for the full list): "+entries.join("; ")+".";
   if(skills.length>40)line+=" ("+(skills.length-40)+" more installed, not listed here.)";
   return line.slice(0,3000);
+}
+// Linked exchange failures carry their cause (gap found
+// 2026-11-17, hourly run 03:04 EST): the sam_ask_linked catch
+// bound no error at all and returned {error:"Linked exchange
+// failed"} for every death of the linked profile's turn,
+// discarding even the message, let alone the transport cause
+// behind the "fetch failed" wrapper. linkExchange runs a
+// full chat turn on the linked profile, so its deaths are
+// the same classes the rest of the tool layer now names
+// (transport, timeout, auth, store). The tool result is the
+// only record of the death and the asking model is the voice
+// that reports it, so the error now composes through
+// errorReason (the 04:04 bridge seam) via
+// linkedExchangeFailureError: the prefix stays, the reason
+// follows it, a non-Error throw keeps String(error), bot
+// tokens are redacted, and the asked message (an argument)
+// never enters the error.
+export function linkedExchangeFailureError(error:unknown):string{
+  return "Linked exchange failed: "+errorReason(error);
 }
 const collabInFlight=new Set<string>();
 /** A hire that fits no tranche of this turn returns as DATA, not an
@@ -366,7 +386,7 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
   try{
     const reply=await linkExchange(root,group.id,actor,to,message,{runTurn});
     return {from:to,reply:reply.slice(0,4000)};
-  }catch{return {error:"Linked exchange failed"};}
+  }catch(e){return {error:linkedExchangeFailureError(e)};}
   finally{collabInFlight.delete(guard);}
 }
 export async function executeOwnToolAsync(root:string,actor:string,name:string,args:Record<string,unknown>,runTurn?:(chatId:string,content:string)=>Promise<string>,chatId?:string,userMessageId?:string):Promise<unknown>{
