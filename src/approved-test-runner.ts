@@ -4,6 +4,7 @@ import { recordVerification } from "./verification.js";
 import { recordActivity } from "./activity.js";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { errorReason } from "./error-reason.js";
 
 export type TestKind="build"|"test";
 type Request={version:1;id:string;kind:TestKind;workspace:string;digest:string;createdAt:number};
@@ -42,8 +43,18 @@ export function executionAuditFailureSummary(phase:"read"|"append",eventLabel:st
   const clean=String(reason??"").replace(/\s+/g," ").trim()||"unknown error";
   return ("Execution audit "+phase+" failed for "+eventLabel+": "+clean).slice(0,200);
 }
+// The reason a execution-audit-failed line carries (census sprint
+// 2026-11-17): recordExecutionAuditFailure took error.message alone,
+// discarding error.cause. Now it composes through errorReason
+// (the 04:04 bridge seam): causeless errors keep their plain
+// message, a non-Error reads through String, bot-token segments
+// are redacted, and no record content ever enters the line.
+export function executionAuditFailureReason(error:unknown):string{
+ return errorReason(error);
+}
+
 export function recordExecutionAuditFailure(root:string,phase:"read"|"append",eventLabel:string,error:unknown):void{
-  const reason=error instanceof Error?error.message:String(error);
+  const reason=executionAuditFailureReason(error);
   recordActivity(root,"sam","execution-audit-failed",executionAuditFailureSummary(phase,eventLabel,reason));
 }
 function auditEventLabel(entry:Record<string,unknown>):string{

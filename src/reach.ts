@@ -10,6 +10,7 @@
 // (RATE_LIMITED, PLATFORM_BLOCKED, NEED_LOGIN, BUSY) end the attempt.
 
 import { execFile } from "node:child_process";
+import { errorReason } from "./error-reason.js";
 
 export interface ReachChannel {
   id: string;
@@ -132,7 +133,7 @@ export async function runReach(
   try {
     channels = await listReachChannels(env);
   } catch (e) {
-    return { ok: false, error: { code: "UNAVAILABLE", message: e instanceof Error ? e.message : "agent-reach unavailable" } };
+    return { ok: false, error: { code: "UNAVAILABLE", message: e instanceof Error ? errorReason(e) : "agent-reach unavailable" } };
   }
   const channel = channels.find((c) => c.id.toLowerCase() === String(input.channel ?? "").toLowerCase());
   if (!channel) {
