@@ -10,7 +10,7 @@ import { detectCorrection, proposeCorrection, withoutCorrectedRules } from "./co
 import { readDashboardConfig } from "./dashboard.js";
 import { channels } from "./channels.js";
 import { errorReason, loadBridgeState } from "./telegram.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { writeEpisode, type EpisodeChat } from "./episodes.js";
 import { drainBackgroundTasks } from "./background.js";
 import { drainCodingTasks, type CodingTask } from "./coding.js";
@@ -738,6 +738,69 @@ export function heartbeatFailedSummary(jobName:string,error:unknown):string{
 }
 export function heartbeatScriptFailedSummary(jobName:string,error:unknown):string{
  return "Heartbeat '"+jobName+"' script failed: "+heartbeatFailureReason(error).slice(0,160);
+}
+// The heartbeat-failure scorecard (2026-11-18, the
+// measured-proof series): Phase C's failure isolation made
+// job deaths countable - every death ledgers one
+// heartbeat-failed activity line beside its job-failed
+// heartbeats.jsonl line - but no daily surface ever counted
+// the class: the brief folds only the last day's failed
+// jobs, and self-work ranks the class as a defect queue,
+// not a measurement. This text folds the whole ledger's
+// heartbeat-failed lines to counts only: the total, counts
+// per fixed mode parsed from the summary's own shape
+// (agent / script / script-exit), and counts per fixed
+// reason bucket (the turn-failure enum shapes; a reason
+// matching no shape is "other" and is never printed). No
+// stamp, no job name, no actor, and no verbatim reason
+// enters the text, so a day no job dies is byte-identical
+// and P3-silent, and the first new failed job is the news.
+// A pure read: it creates nothing, spends no model call,
+// and retries nothing - the ledger and the tick are
+// untouched.
+export type HeartbeatFailureMode = "agent" | "script" | "script-exit";
+export type HeartbeatFailureBucket = "unsafe-output" | "empty-response" | "too-many-tool-calls" | "timeout" | "not-configured" | "provider-error" | "invalid-request" | "other";
+export function heartbeatFailureBucket(reason:string):HeartbeatFailureBucket{
+ if(/unsafe model output/i.test(reason))return "unsafe-output";
+ if(/empty model response/i.test(reason))return "empty-response";
+ if(/too many tool calls/i.test(reason))return "too-many-tool-calls";
+ if(/timed out|timeout/i.test(reason))return "timeout";
+ if(/not configured/i.test(reason))return "not-configured";
+ if(/connector request failed|http \d{3}/i.test(reason))return "provider-error";
+ if(/^invalid /i.test(reason))return "invalid-request";
+ return "other";
+}
+export function parseHeartbeatFailure(summary:string):{mode:HeartbeatFailureMode;reason:string}{
+ const exit=summary.match(/^Heartbeat '[\s\S]*?' script exited \d+:?\s?([\s\S]*)$/);
+ if(exit)return {mode:"script-exit",reason:exit[1]??""};
+ const script=summary.match(/^Heartbeat '[\s\S]*?' script failed: ([\s\S]*)$/);
+ if(script)return {mode:"script",reason:script[1]??""};
+ const agent=summary.match(/^Heartbeat '[\s\S]*?' failed: ([\s\S]*)$/);
+ if(agent)return {mode:"agent",reason:agent[1]??""};
+ // A legacy or hand-shaped line that matches no summary
+ // shape still counts: mode agent, the whole summary as
+ // its (never printed) reason, so the count is never hidden.
+ return {mode:"agent",reason:summary};
+}
+export function heartbeatFailureScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"heartbeat-failed"});
+ const modes=new Map<HeartbeatFailureMode,number>();
+ const buckets=new Map<HeartbeatFailureBucket,number>();
+ for(const line of lines){
+  const parsed=parseHeartbeatFailure(line.summary);
+  modes.set(parsed.mode,(modes.get(parsed.mode)??0)+1);
+  const bucket=heartbeatFailureBucket(parsed.reason);
+  buckets.set(bucket,(buckets.get(bucket)??0)+1);
+ }
+ const byMode=[...modes.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+ const byBucket=[...buckets.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+ const out:string[]=[];
+ out.push("Heartbeat failures: "+(lines.length>0?"attention":"clear"));
+ out.push("Failed jobs: "+String(lines.length));
+ out.push("By mode: "+(byMode.length?byMode.map(([mode,n])=>mode+" "+String(n)).join(", "):"none"));
+ out.push("By reason: "+(byBucket.length?byBucket.map(([bucket,n])=>bucket+" "+String(n)).join(", "):"none"));
+ out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a job or prints a job name or reason; a new failed job is the news");
+ return out.join("\n");
 }
 // Consolidation sub-step failures ledger in the activity
 // record (gap found 2026-11-13, hourly run 10:04): inside
