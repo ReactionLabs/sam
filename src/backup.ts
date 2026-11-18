@@ -227,6 +227,78 @@ export function runRestoreDrill(archivePath: string): DrillReport {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 }
 
+export const BACKUP_DRILL_SCRIPT = "sam-backup-drill";
+
+/** Where the newest backup lives, resolved the way installs
+ *  actually lay it out: an explicit directory wins, then the
+ *  SAM_BACKUP_DIR env name, then the CLI default
+ *  (<workspace>/backups), then the sibling directory the
+ *  box's systemd unit writes to (<workspace>/../backups for a
+ *  workspace at /opt/sam/home). The candidate holding the
+ *  newest archive (names sort chronologically) is the one
+ *  the drill reads; when none holds an archive, the CLI
+ *  default is returned so the no-archive report names the
+ *  canonical place. */
+export function backupDrillDest(root: string, explicit?: string): string {
+  if (explicit) return resolve(explicit);
+  const candidates: string[] = [];
+  const envDir = process.env.SAM_BACKUP_DIR;
+  if (envDir) candidates.push(resolve(envDir));
+  candidates.push(join(resolve(root), "backups"));
+  candidates.push(join(resolve(root), "..", "backups"));
+  let best: string | null = null;
+  let bestNewest = "";
+  for (const dir of candidates) {
+    const newest = listBackups(dir).at(-1);
+    if (newest && newest.archive > bestNewest) { best = dir; bestNewest = newest.archive; }
+  }
+  return best ?? join(resolve(root), "backups");
+}
+
+/** Run the restore drill over the NEWEST backup and ledger
+ *  ONE backup-drill line carrying counts only (never the
+ *  archive name, never any file content). Returns the drill
+ *  report, or null when there is nothing to drill: no .sam
+ *  state yet (a stateless install ledgers nothing, the
+ *  createBackup usage-error precedent), or state with no
+ *  archive yet (that absence IS ledgered once per run - a
+ *  nightly backup that stopped landing is a fact the owner
+ *  console should be able to count). */
+export function runBackupDrill(root: string, explicitDest?: string): DrillReport | null {
+  if (!existsSync(samDir(root))) return null;
+  const dest = backupDrillDest(root, explicitDest);
+  const newest = listBackups(dest).at(-1);
+  if (!newest) {
+    recordActivity(root, "sam", "backup-drill", "Restore drill recorded: no state backup archive found in " + dest);
+    return null;
+  }
+  const report = runRestoreDrill(newest.path);
+  recordActivity(root, "sam", "backup-drill", "Restore drill recorded: " + (report.ok ? "OK" : "FAILED") + ", " + String(report.files) + " files, " + String(report.databases.length) + " databases, boot counts " + String(report.chats) + " chats / " + String(report.missions) + " missions / " + String(report.memories) + " memories / " + String(report.preferences) + " preferences, " + String(report.errors.length) + " error(s)");
+  return report;
+}
+
+/** The drill as plain text (the sam-backup-drill script
+ *  job's stdout shape): the scorecard a person reads. It
+ *  carries NO clock reading and NO archive name - the name
+ *  embeds the backup's creation stamp, an ISO date fact P3
+ *  fact diffing would read as changed news every night at
+ *  an identical OK. Only the drill facts ride the text: the
+ *  verdict, the manifest and integrity counts, the boot
+ *  counts the drill exists to prove, and any error lines.
+ *  The no-archive state is a stable two-line text, not an
+ *  error (the answer-judge empty-state precedent). */
+export function backupDrillText(report: DrillReport | null): string {
+  if (!report) return ["Restore drill - no backup to drill", "No state backup archive exists yet, so there is nothing to verify or boot; the nightly backup must land first."].join("\n");
+  const lines: string[] = ["Restore drill - " + (report.ok ? "OK (verified and booted)" : "FAILED")];
+  lines.push("Newest state backup: " + String(report.files) + " files manifest-checked, " + String(report.databases.length) + " databases integrity-checked");
+  lines.push("Boot counts: " + String(report.chats) + " chats, " + String(report.missions) + " missions, " + String(report.memories) + " memories, " + String(report.preferences) + " preferences");
+  if (report.errors.length) {
+    lines.push("", "Errors:");
+    for (const e of report.errors) lines.push("- " + e);
+  } else lines.push("", "Errors: none - the newest backup verifies against its manifest and boots as a working SAM state.");
+  return lines.join("\n");
+}
+
 export function restoreBackup(root: string, archivePath: string, force = false): { restored: string; keptAside: string | null } {
   const dir = extract(archivePath);
   try {
