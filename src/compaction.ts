@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { ChatStore, type ChatCompaction, type ChatMessage } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { episodeScope } from "./episodes.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { activeSuppressions, needleMatches, recordSuppressionBlock, MemorySuppressedError, type CaptureSuppression } from "./capture-guard.js";
 import { readLawSnapshot, verifyLawAcrossFold, recordFenceIntegrityFailure, fenceIntegrityFailureSummary, digestLaw, type LawSnapshot } from "./fence-integrity.js";
 import { errorReason } from "./error-reason.js";
@@ -257,8 +257,7 @@ export function buildChatContext(
       covered = boundary;
       compactedNow = true;
       recordActivity(root, profile, "compaction",
-        "Compacted chat " + chatId.slice(0, 8) + ": folded " + foldedCount + " messages (" + covered + " covered), " +
-        (history.length - covered) + " kept verbatim" + (visitor ? ", visitor chat (no memory flush)" : ", memory flush written first"));
+        compactionLedgerSummary(chatId, foldedCount, covered, history.length - covered, visitor));
     }
   }
   let kept = summary ? history.slice(covered) : history.slice(-COMPACT_TRIGGER_MESSAGES);
@@ -281,6 +280,59 @@ export function forceCompactChat(root: string, chatId: string): ChatContext & { 
     history = store.messages(chatId);
   } finally { store.close(); }
   return { chatId, ...buildChatContext(root, { chatId, profile, visitor, history, force: true }) };
+}
+
+// The ONE writer for a fold's activity line, so the scorecard's
+// parser below can never drift from the seam it counts.
+export function compactionLedgerSummary(chatId: string, foldedCount: number, covered: number, keptVerbatim: number, visitor: boolean): string {
+  return "Compacted chat " + chatId.slice(0, 8) + ": folded " + foldedCount + " messages (" + covered + " covered), " +
+    keptVerbatim + " kept verbatim" + (visitor ? ", visitor chat (no memory flush)" : ", memory flush written first");
+}
+
+// The compaction scorecard (2026-11-18, the measured-proof
+// series): every successful fold ledgers one "compaction" line
+// carrying the chat id prefix and the fold's counts - but no
+// daily surface ever counted the folds, so a chat that stopped
+// compacting, or a fold habit that started chewing far more
+// history per fold, was invisible in aggregate. This text folds
+// those lines to counts only: the total folds, counts per fixed
+// route bucket (flushed / visitor / other), and the summed
+// folded and kept-verbatim counts parsed from the fixed
+// summaries. A summary matching no fixed shape counts as a fold
+// under "other" and contributes no counts, and no chat id is
+// ever printed. No stamp, no actor, and no verbatim summary
+// enters the text, so a day no chat folds is byte-identical and
+// P3-silent, and the first new fold is the news. A pure read:
+// it creates nothing, spends no model call, and folds nothing -
+// the ledger and the fold seam are untouched, and folding a
+// chat stays compaction's job. The failure side is measured
+// elsewhere: compaction-failed lines feed the self-work queue.
+const COMPACTION_ROUTES = ["flushed", "visitor", "other"] as const;
+export function parseCompactionSummary(summary: string): { folded: number; covered: number; kept: number; route: string } | null {
+  const m = /^Compacted chat \S+: folded (\d+) messages \((\d+) covered\), (\d+) kept verbatim(, visitor chat \(no memory flush\)|, memory flush written first)$/.exec(summary);
+  if (!m) return null;
+  return { folded: Number(m[1]), covered: Number(m[2]), kept: Number(m[3]), route: m[4].startsWith(", visitor") ? "visitor" : "flushed" };
+}
+export function compactionScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "compaction" });
+  const routes: Record<string, number> = {};
+  let folded = 0;
+  let kept = 0;
+  for (const line of lines) {
+    const parsed = parseCompactionSummary(line.summary);
+    const route = parsed ? parsed.route : "other";
+    routes[route] = (routes[route] ?? 0) + 1;
+    if (parsed) { folded += parsed.folded; kept += parsed.kept; }
+  }
+  const routeText = (COMPACTION_ROUTES as readonly string[]).filter(r => routes[r]).map(r => r + " " + String(routes[r])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Compactions: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Folds: " + String(lines.length));
+  out.push("By route: " + routeText);
+  out.push("Messages folded: " + String(folded));
+  out.push("Kept verbatim: " + String(kept));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never folds a chat or prints a chat id or summary; a new fold is the news");
+  return out.join("\n");
 }
 
 export function getCompaction(root: string, chatId: string): ChatCompaction | null {
