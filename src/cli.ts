@@ -47,7 +47,7 @@ import { renderImageFile } from "./term-image.js";
 import { listReachChannels, reachDoctor, runReach } from "./reach.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { findChannel, issuePairingCode, pairingStatus, redeemPairingCode } from "./pairing.js";
-import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog } from "./telegram.js";
+import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog, bridgePollScorecardText } from "./telegram.js";
 import { serveWebhookChannel } from "./webhook.js";
 import { acceptEvent, bindEvent, eventBindings, serveEvents, signEvent, unbindEvent } from "./events.js";
 import { postDiscord } from "./discord.js";
@@ -281,6 +281,7 @@ channelCmd.command("add").argument("<name>").argument("<profile>").argument("<to
 channelCmd.command("add-discord").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"discord",name,profile,tokenEnv)));
 channelCmd.command("add-webhook").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"webhook",name,profile,tokenEnv)));
 channelCmd.command("list").action(()=>output(channels(program.opts().workspace)));
+channelCmd.command("poll-scorecard").description("Telegram bridge poll failures as plain text with no clock reading - verdict, the total failed-burst count, and counts per fixed reason bucket (timeout, reset, http, network, other; never a stamp, a channel name, an actor, or a verbatim reason), the trending surface a daily script job P3-diffs, so a day no poll fails stays silent and the first new failed burst is the news (this is the sam-bridge-polls script job's stdout; a pure read over the same activity ledger the bridge ledgers: creates nothing, spends no model call, retries nothing; exits 0 always, the verdict lives in the text)").action(()=>output(bridgePollScorecardText(program.opts().workspace)));
 channelCmd.command("owners").argument("<id>").argument("<ids>").action((id:string,ids:string)=>output(setChannelOwners(program.opts().workspace,id,ids.split(",").map(x=>Number(x.trim())))));
 channelCmd.command("pair").argument("<idOrName>").description("Issue a pairing code for a telegram channel (Phase A item 3): 8 characters, shown once, hash stored, expires in 1 hour, single use; issuing retires the previous live code").action((idOrName:string)=>output(issuePairingCode(program.opts().workspace,idOrName)));
 channelCmd.command("pairs").description("Pairing state per telegram channel: live code + expiry, owner count, recent failed attempts, lockout").action(()=>output(pairingStatus(program.opts().workspace)));

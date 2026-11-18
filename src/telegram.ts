@@ -5,7 +5,7 @@ import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
 import { pairingAttemptCode, redeemPairingCode } from "./pairing.js";
 import { resolveBindingProfile } from "./bindings.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 import type { MessageSource } from "./message-provenance.js";
 
@@ -363,6 +363,48 @@ export function recordBridgeFailure(root:string,channel:Channel,updateId:number,
 }
 export function recordBridgePollFailure(root:string,channel:Channel,error:unknown):void{
  recordActivity(root,channel.profile,"bridge-poll-failed",bridgePollFailureSummary(channel.name,error));
+}
+// The bridge-poll scorecard (2026-11-18, the measured-proof
+// series): the bridge ledgers every poll failure burst as a
+// "bridge-poll-failed" line - coalesced, one line per burst,
+// the poll re-arming on the next success - and it is the
+// largest failure class in the ledger, but no daily surface
+// ever counted it, so a degrading network path to Telegram
+// was invisible except as scattered ledger lines. This text
+// folds the whole ledger's bridge-poll-failed lines to
+// counts only: the total (in bursts, the honest unit the
+// coalescing writes), and counts per fixed reason bucket
+// folded from the summary's own reason text. A reason
+// matching no shape is "other" and is never printed. No
+// stamp, no channel name, no actor, and no verbatim reason
+// enters the text, so a day no poll fails is byte-identical
+// and P3-silent, and the first new failed burst is the
+// news. A pure read: it creates nothing, spends no model
+// call, and retries nothing - the ledger and the bridge are
+// untouched, and fixing the network path stays the
+// operator's call, not this surface's.
+export type BridgePollBucket = "timeout" | "reset" | "http" | "network" | "other";
+export function bridgePollBucket(summary:string):BridgePollBucket{
+ if(/ETIMEDOUT|connect timeout|timed out|timeout/i.test(summary))return "timeout";
+ if(/ECONNRESET|ECONNREFUSED|socket hang up/i.test(summary))return "reset";
+ if(/Telegram request failed \(HTTP \d{3}\)/i.test(summary))return "http";
+ if(/fetch failed/i.test(summary))return "network";
+ return "other";
+}
+export function bridgePollScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"bridge-poll-failed"});
+ const buckets=new Map<BridgePollBucket,number>();
+ for(const line of lines){
+  const bucket=bridgePollBucket(line.summary);
+  buckets.set(bucket,(buckets.get(bucket)??0)+1);
+ }
+ const byBucket=[...buckets.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+ const out:string[]=[];
+ out.push("Bridge poll failures: "+(lines.length>0?"attention":"clear"));
+ out.push("Failed poll bursts: "+String(lines.length));
+ out.push("By reason: "+(byBucket.length?byBucket.map(([bucket,n])=>bucket+" "+String(n)).join(", "):"none"));
+ out.push("Note: counts only, cumulative over the activity ledger, in coalesced bursts (one line per failure burst, not per attempt) - the scorecard never retries a poll or prints a channel name or reason; a new failed burst is the news");
+ return out.join("\n");
 }
 export async function runTelegramBridge(opts:{root:string;channel:Channel;sam:SamClient;api:TelegramApi;pollTimeoutSec?:number;pollRetryDelayMs?:number;stop?:()=>boolean}):Promise<void>{
  const state=loadBridgeState(opts.root);
