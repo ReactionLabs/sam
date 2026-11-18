@@ -197,6 +197,109 @@ export function recordWorthinessReadFailure(root: string, error: unknown): void 
   recordActivity(root, "sam", "worthiness-failed", worthinessReadFailureSummary(reason));
 }
 
+export const DELIVERY_SCORECARD_SCRIPT = "sam-deliveries-scorecard";
+
+/** The deterministic class a ledger reason belongs to (the
+ *  scorecard's held breakdown): the gate's reason strings are
+ *  code-shaped - "worthy" on a delivery, and on a hold one of
+ *  the duplicate / rate / law families - so the class is a
+ *  prefix read, never a parse of content. A law reason names
+ *  the law's own term ("never alert about crypto"); the term
+ *  is the owner's words and never reaches the scorecard, only
+ *  the class does. An unrecognized held reason is "other",
+ *  counted, never dropped. */
+export function deliveryReasonClass(entry: DeliveryLedgerEntry): string {
+  if (entry.deliver) return "worthy";
+  const r = entry.reason;
+  if (r.startsWith("duplicate")) return "duplicate";
+  if (r.startsWith("rate")) return "rate limit";
+  if (r.startsWith("law: never alert")) return "law deny";
+  if (r.startsWith("law: outside")) return "law allowlist";
+  return "other";
+}
+
+const HELD_CLASS_LABELS: [string, string][] = [
+  ["duplicate", "held as duplicate"],
+  ["rate limit", "held by rate limit"],
+  ["law deny", "held by law deny"],
+  ["law allowlist", "held by law allowlist"],
+  ["other", "held (other reason)"],
+];
+
+export interface DeliveryLedgerSummary {
+  total: number;
+  delivered: number;
+  held: number;
+  heldByClass: Record<string, number>;
+  profiles: { profile: string; delivered: number; held: number }[];
+  kinds: { kind: string; delivered: number; held: number }[];
+}
+
+/** The whole ledger folded into counts (the scorecard's
+ *  record): every assessment the gate has ever made on this
+ *  install, by verdict, by held class, by profile, by kind.
+ *  The read rides the ledger's own seam (a failed read
+ *  ledgers its worthiness-failed line there and rethrows -
+ *  the scorecard never folds a dead read into zeros that
+ *  would read as a gate that held nothing). */
+export function deliveryLedgerSummary(root: string): DeliveryLedgerSummary {
+  const entries = readDeliveryLedger(root, 1_000_000);
+  const heldByClass: Record<string, number> = {};
+  const byProfile = new Map<string, { delivered: number; held: number }>();
+  const byKind = new Map<string, { delivered: number; held: number }>();
+  let delivered = 0;
+  for (const e of entries) {
+    if (e.deliver) delivered++;
+    else heldByClass[deliveryReasonClass(e)] = (heldByClass[deliveryReasonClass(e)] ?? 0) + 1;
+    const p = byProfile.get(e.profile) ?? { delivered: 0, held: 0 };
+    if (e.deliver) p.delivered++; else p.held++;
+    byProfile.set(e.profile, p);
+    const k = byKind.get(e.kind) ?? { delivered: 0, held: 0 };
+    if (e.deliver) k.delivered++; else k.held++;
+    byKind.set(e.kind, k);
+  }
+  const rows = (m: Map<string, { delivered: number; held: number }>, key: string) =>
+    [...m.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([name, v]) => ({ [key]: name, ...v }));
+  return {
+    total: entries.length,
+    delivered,
+    held: entries.length - delivered,
+    heldByClass,
+    profiles: rows(byProfile, "profile") as DeliveryLedgerSummary["profiles"],
+    kinds: rows(byKind, "kind") as DeliveryLedgerSummary["kinds"],
+  };
+}
+
+/** The ledger summary as plain text (the
+ *  sam-deliveries-scorecard script job's stdout, 2026-11-17):
+ *  the trending surface the worthiness ledger lacked - until
+ *  this, the gate had never held a delivery on the box and
+ *  nothing would have shown the first hold arrive (status
+ *  folds only delivered/suppressed totals, no reasons). The
+ *  text carries ONLY counts: no entry stamp (an ISO stamp is
+ *  a P3 date fact), no fingerprint, no preview, and no law
+ *  term - previews and terms are the owner's words, not
+ *  trend data. Two reads over an unchanged ledger are
+ *  byte-identical, so a daily script job stays P3-silent
+ *  until the gate actually judges something new, and a held
+ *  verdict or a moved count is the news. The ledger itself
+ *  keeps every stamp and preview; only the text drops them. */
+export function deliveryLedgerText(summary: DeliveryLedgerSummary): string {
+  const lines = ["Worthiness ledger - " + String(summary.total) + " assessments, " + String(summary.delivered) + " delivered, " + String(summary.held) + " held"];
+  if (summary.total === 0) {
+    lines.push("No assessments recorded yet - the trend starts with the first proactive delivery the gate judges.");
+    return lines.join("\n");
+  }
+  lines.push("worthy: " + String(summary.delivered) + " delivered");
+  for (const [cls, label] of HELD_CLASS_LABELS) {
+    const n = summary.heldByClass[cls] ?? 0;
+    if (n > 0) lines.push(label + ": " + String(n));
+  }
+  for (const p of summary.profiles) lines.push("profile " + p.profile + ": " + String(p.delivered) + " delivered, " + String(p.held) + " held");
+  for (const k of summary.kinds) lines.push("kind " + k.kind + ": " + String(k.delivered) + " delivered, " + String(k.held) + " held");
+  return lines.join("\n");
+}
+
 export function assessDelivery(root: string, input: { profile: string; kind: string; text: string; now?: Date }): DeliveryAssessment {
   const now = input.now ?? new Date();
   const fingerprint = deliveryFingerprint(input.text);
