@@ -1,3 +1,4 @@
+import { readActivity } from "./activity.js";
 import type { VerificationStatus } from "./verification.js";
 
 /**
@@ -343,4 +344,55 @@ export class TurnEconomyGuard {
     const action = typeof args?.action === "string" ? args.action : "";
     if (action === "write" || action === "edit") this.codingGranted = true;
   }
+}
+
+// The tripwire scorecard (2026-11-18, the measured-proof
+// series): the turn-economy guard ledgers exactly one line
+// per tripped turn per wire - kind "spelunk-tripwire" when
+// code digging passes CODE_SEARCH_LIMIT with no code change
+// landed, kind "research-tripwire" when sam_reach passes
+// REACH_CALL_LIMIT - but no daily surface ever counted the
+// trips, so a model that started escalating ordinary
+// questions into codebase digs or research sweeps was
+// invisible in aggregate. This text folds both kinds' lines
+// to counts only: the total tripped turns, counts per fixed
+// wire (spelunk / research, an unmatched shape "other"), and
+// the summed calls at trip parsed from the fixed summaries.
+// A summary matching neither fixed shape counts as a trip
+// and contributes no calls, and is never printed. No stamp,
+// no actor, and no verbatim summary enters the text, so a
+// day no wire trips is byte-identical and P3-silent, and the
+// first new tripped turn is the news. A pure read: it
+// creates nothing, spends no model call, and retries nothing
+// - the ledger and the guard seam are untouched, and
+// steering a tripped turn stays the guard's job.
+export type TripwireWire = "spelunk" | "research";
+export function parseTripwireSummary(summary: string): { wire: TripwireWire; calls: number } | null {
+  const spelunk = /^Code digging cut in a chat turn after (\d+) code lookups/.exec(summary);
+  if (spelunk) return { wire: "spelunk", calls: Number(spelunk[1]) };
+  const research = /^Research calls cut in a chat turn after (\d+) sam_reach calls/.exec(summary);
+  if (research) return { wire: "research", calls: Number(research[1]) };
+  return null;
+}
+export function tripwireScorecardText(root: string): string {
+  const lines = [
+    ...readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "spelunk-tripwire" }),
+    ...readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "research-tripwire" }),
+  ];
+  const wires: Record<string, number> = {};
+  let calls = 0;
+  for (const line of lines) {
+    const parsed = parseTripwireSummary(line.summary);
+    const wire = parsed ? parsed.wire : "other";
+    wires[wire] = (wires[wire] ?? 0) + 1;
+    if (parsed) calls += parsed.calls;
+  }
+  const wireText = (["spelunk", "research", "other"] as const).filter(w => wires[w]).map(w => w + " " + String(wires[w])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Tripwires: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Tripped turns: " + String(lines.length));
+  out.push("By wire: " + wireText);
+  out.push("Calls at trip: " + String(calls));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a summary; a new tripped turn is the news");
+  return out.join("\n");
 }
