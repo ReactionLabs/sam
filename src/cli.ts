@@ -97,7 +97,7 @@ import { homedir } from "node:os";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
 import { MissionStore } from "./storage.js";
-import { listActions, proposeAction, decideAction, settleAutoApprovals, ACTION_KINDS } from "./actions.js";
+import { listActions, proposeAction, decideAction, settleAutoApprovals, actionScorecardText, ACTION_KINDS } from "./actions.js";
 import { loadApprovalPolicy, saveApprovalPolicy, scanNeverList, neverListSummary, classifyProposal, APPROVAL_MODES } from "./approval-policy.js";
 import { listContacts, getContact, upsertContact, removeContact, addressBookOrder, writeAddressBook } from "./contacts.js";
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
@@ -463,6 +463,7 @@ linkCmd.command("remove").argument("<id>").argument("<member>").action((id:strin
 linkCmd.command("talk").argument("<id>").argument("<from>").argument("<to>").argument("<message>").description("Run one linked exchange: from speaks, to answers as itself").action(async(id:string,from:string,to:string,message:string)=>{const root=program.opts().workspace as string;output({reply:await linkExchange(root,id,from,to,message,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content)})});});
 linkCmd.command("delete").argument("<id>").action((id:string)=>output({deleted:deleteLink(program.opts().workspace,id)}));
 const actCmd=program.command("actions").description("Proposed actions: SAM proposes, the owner approves, then it executes");
+actCmd.command("scorecard").description("The approval gate's queue as plain text with no clock reading - counts only (pending, done, rejected, failed, and pending per kind; no stamps, titles, details, actors, or results), the trending surface a daily script job P3-diffs, so a day nothing is proposed or decided stays silent and the first new pending proposal is the news (this is the sam-actions script job's stdout; a pure read over the same fold actions list performs: creates nothing, approves nothing, rejects nothing, executes nothing; exits 0 always, the verdict lives in the text)").action(()=>output(actionScorecardText(program.opts().workspace)));
 actCmd.command("list").option("--pending","Only pending").option("--chat <id>","Only this chat").option("--actor <name>","Only this profile").action((o:{pending?:boolean;chat?:string;actor?:string})=>output(actionsView(program.opts().workspace,{pending:!!o.pending,chat:o.chat,actor:o.actor})));
 actCmd.command("propose").argument("<profile>").argument("<kind>").argument("<title>").argument("<detail>").option("--chat <id>","Stamp the chat this proposal belongs to").action(async(profile:string,kind:string,title:string,detail:string,o:{chat?:string})=>{const root=program.opts().workspace as string;const a=proposeAction(root,{actor:profile,kind,title,detail,chatId:o.chat??null});const settled=await settleAutoApprovals(root,a.id);output(settled[0]??a);});
 actCmd.command("approve").argument("<id>").action(async(id:string)=>output(await decideAction(program.opts().workspace,id,true)));

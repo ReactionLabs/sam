@@ -187,6 +187,40 @@ function failActionStore(root: string, phase: ActionStorePhase, error: unknown):
   tagActionStoreLedgered(error);
   throw error;
 }
+// The approval-gate queue as a plain-text scorecard - the
+// trending surface a daily script job P3-diffs (2026-11-18,
+// the measured-proof series): the worthiness scorecard
+// trends the delivery gate's verdicts and the outbox
+// scorecard trends the queue downstream of it, but the ONE
+// gate's own queue - proposals waiting on the owner - had no
+// trending surface; the only folds counting pending
+// proposals were the overview (never P3-silent) and the
+// brief's needs-you section (the brief job is not installed
+// everywhere). Counts only: totals per status and the
+// pending count per kind (kinds are a fixed in-code enum,
+// never free text) - never a stamp, a title, a detail, an
+// actor, or a result, so a day nothing is proposed or
+// decided is byte-identical and P3-silent, and the first
+// new pending proposal - or the day the backlog clears -
+// is the news. A pure read over the same fold listActions
+// performs: it creates nothing (listActions on an install
+// with no store returns [] without opening one), approves
+// nothing, rejects nothing, and executes nothing.
+export function actionScorecardText(root: string): string {
+  const all = listActions(root);
+  const count = (status: ActionStatus) => all.filter(a => a.status === status).length;
+  const pending = count("pending");
+  const pendingKinds = [...new Set(all.filter(a => a.status === "pending").map(a => a.kind))].sort();
+  const lines: string[] = [];
+  lines.push("Approval gate: " + (pending > 0 ? "attention" : "clear"));
+  lines.push("Pending: " + String(pending));
+  lines.push("Done: " + String(count("done")));
+  lines.push("Rejected: " + String(count("rejected")));
+  lines.push("Failed: " + String(count("failed")));
+  lines.push("Pending by kind: " + (pendingKinds.length ? pendingKinds.map(k => k + " " + String(all.filter(a => a.status === "pending" && a.kind === k).length)).join(", ") : "none"));
+  lines.push("Note: counts only - the scorecard never approves, rejects, or executes a proposal; deciding stays the owner's act");
+  return lines.join("\n");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
