@@ -1,3 +1,5 @@
+import { readActivity } from "./activity.js";
+
 // Reply guard (Dip catch, 2026-11-14 ~19:39Z): SAM put its raw
 // internal planning into the chat as a SAM bubble - a first-person
 // monologue about loading sam_artifact / sam_manage_chats for a
@@ -70,4 +72,52 @@ export const REASONING_BLOCKED_REPLY = "I tangled that one up in my own working 
 
 export function reasoningBlockedLedgerSummary(signals: ReasoningSignal[], seam: string): string {
   return "Blocked a reasoning-shaped reply at the " + seam + " seam (signals: " + signals.map(s => s.name).join(", ") + ") - the narration was withheld; the turn was steered to answer directly or closed with the honest line";
+}
+
+// The reasoning-leak scorecard (2026-11-18, the measured-proof
+// series): the reply guard ledgers every reply it blocks as a
+// "reasoning-leak-blocked" line - the seam that withheld it and
+// the fixed signal names that condemned it. But no daily
+// surface ever counted the class, so a model that started
+// narrating its process regularly was invisible until the
+// owner read a reply closely. This text folds the whole
+// ledger's blocked lines to counts only: the blocked replies,
+// counts per fixed seam bucket (save, connector, own-tools,
+// other), and counts per fixed signal name. A summary that
+// does not match the fixed shape still counts as a block and
+// contributes no seam or signal counts, and is never printed.
+// No stamp, no actor, and no verbatim summary enters the text,
+// so a day no reply is blocked is byte-identical and
+// P3-silent, and the first new blocked reply is the news. A
+// pure read: it creates nothing, spends no model call, and
+// retries nothing - the ledger and the guard are untouched,
+// and fixing a narrating model stays the work lane's act.
+export const REASONING_LEAK_SEAMS = ["save", "connector", "own-tools", "other"] as const;
+export const REASONING_LEAK_SIGNALS = ["process-verb", "meta-ask", "tool-names", "machinery", "loading-gerund", "fragment-ending"] as const;
+export function parseReasoningLeakBlocked(summary: string): { seam: string; signals: string[] } | null {
+  const m = /^Blocked a reasoning-shaped reply at the (.+?) seam \(signals: ([^)]*)\) - /.exec(summary);
+  if (!m) return null;
+  const seam = m[1] === "save" ? "save" : m[1] === "connector loop" ? "connector" : m[1] === "own-tools loop" ? "own-tools" : "other";
+  const signals = m[2].split(", ").map(s => s.trim()).filter(s => (REASONING_LEAK_SIGNALS as readonly string[]).includes(s));
+  return { seam, signals };
+}
+export function reasoningLeakScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "reasoning-leak-blocked" });
+  const seams: Record<string, number> = {};
+  const signals: Record<string, number> = {};
+  for (const line of lines) {
+    const parsed = parseReasoningLeakBlocked(line.summary);
+    const seam = parsed ? parsed.seam : "other";
+    seams[seam] = (seams[seam] ?? 0) + 1;
+    if (parsed) for (const s of parsed.signals) signals[s] = (signals[s] ?? 0) + 1;
+  }
+  const seamText = REASONING_LEAK_SEAMS.filter(s => seams[s]).map(s => s + " " + String(seams[s])).join(", ") || "none";
+  const signalText = REASONING_LEAK_SIGNALS.filter(s => signals[s]).map(s => s + " " + String(signals[s])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Reasoning leaks: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Blocked replies: " + String(lines.length));
+  out.push("By seam: " + seamText);
+  out.push("By signal: " + signalText);
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a reply or prints a summary; a new blocked reply is the news");
+  return out.join("\n");
 }
