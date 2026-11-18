@@ -1,4 +1,5 @@
 import { errorReason } from "./telegram.js";
+import { readActivity } from "./activity.js";
 
 // Tool budgets tier by route (program P5). Not every turn deserves the same
 // leash: a heartbeat poll is SAM glancing at a gauge and must stay cheap, an
@@ -123,6 +124,45 @@ export function turnRetrySummary(error: unknown): string {
 export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
   if (reason === "steps") return "Turn step limit reached: " + executed.length + " calls used (" + (executed.join(", ") || "none") + ") - the call budget (" + maxCalls + ") was NOT reached" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
   return "Tool budget exhausted: " + executed.length + "/" + maxCalls + " calls used (" + (executed.join(", ") || "none") + ")" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
+}
+// The tool-budget scorecard (2026-11-18, the measured-proof
+// series): the graceful-exhaustion seam ledgers every turn
+// that ends on its budget as a "tool-budget" line, in the
+// two honest shapes budgetLedgerSummary writes - the call
+// cap really hit, or the rounds ran out with the cap NOT
+// reached. Self-work ranks the class as a top recurring
+// defect, but no daily surface ever counted it, so a turn
+// that keeps truncating its work was invisible until the
+// owner watched it happen. This text folds the whole
+// ledger's tool-budget lines to counts only: the total,
+// and counts per fixed end. A summary matching neither
+// shape is "other" and is never printed. No stamp, no
+// actor, no tool name, no verbatim summary enters the
+// text, so a day no turn ends on budget is byte-identical
+// and P3-silent, and the first new truncated turn is the
+// news. A pure read: it creates nothing, spends no model
+// call, and retries nothing - the ledger and the budget
+// seam are untouched.
+export type ToolBudgetEnd = "calls" | "steps" | "other";
+export function parseToolBudgetEnding(summary: string): ToolBudgetEnd {
+  if (summary.startsWith("Tool budget exhausted:")) return "calls";
+  if (summary.startsWith("Turn step limit reached:")) return "steps";
+  return "other";
+}
+export function toolBudgetScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "tool-budget" });
+  const ends = new Map<ToolBudgetEnd, number>();
+  for (const line of lines) {
+    const end = parseToolBudgetEnding(line.summary);
+    ends.set(end, (ends.get(end) ?? 0) + 1);
+  }
+  const byEnd = [...ends.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  out.push("Tool budget endings: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Ended turns: " + String(lines.length));
+  out.push("By end: " + (byEnd.length ? byEnd.map(([end, n]) => end + " " + String(n)).join(", ") : "none"));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a tool name; a new truncated turn is the news");
+  return out.join("\n");
 }
 export function budgetFallbackAnswer(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
   // The ending must be named honestly (owner defect 2026-11-10: a turn
