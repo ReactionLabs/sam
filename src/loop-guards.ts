@@ -396,3 +396,51 @@ export function tripwireScorecardText(root: string): string {
   out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a summary; a new tripped turn is the news");
   return out.join("\n");
 }
+
+// The scratch-refusal scorecard (2026-11-18, the
+// measured-proof series): the turn-economy guard's third
+// wire refuses a chat turn's creation of a throwaway
+// scratch script in the code root and ledgers one
+// "scratch-write-refused" line per refusal, carrying the
+// invented path only - but no daily surface ever counted
+// the refusals, so a model that started inventing scratch
+// scripts as a habit was invisible in aggregate. This text
+// folds those lines to counts only: the total refused
+// writes and counts per fixed extension bucket (py / sh /
+// js / mjs / cjs, an unmatched shape "other") parsed from
+// the fixed summary's path. A summary matching the fixed
+// shape with an extension outside the set, and a summary
+// matching no fixed shape at all, both count as a refusal
+// under "other" and contribute nothing else, and no path
+// is ever printed. No stamp, no actor, and no verbatim
+// summary enters the text, so a day no write is refused is
+// byte-identical and P3-silent, and the first refusal is
+// the news. A pure read: it creates nothing, spends no
+// model call, and retries nothing - the ledger and the
+// guard seam are untouched, and refusing a scratch write
+// stays the guard's job.
+const SCRATCH_EXTENSIONS = ["py", "sh", "js", "mjs", "cjs"] as const;
+export function parseScratchRefusalSummary(summary: string): { extension: string } | null {
+  const m = /^Refused a scratch script write in a chat turn: (\S+) in the code root - /.exec(summary);
+  if (!m) return null;
+  const base = m[1].split(/[\\/]+/).pop() ?? "";
+  const dot = base.lastIndexOf(".");
+  const ext = dot > 0 ? base.slice(dot + 1).toLowerCase() : "";
+  return { extension: (SCRATCH_EXTENSIONS as readonly string[]).includes(ext) ? ext : "other" };
+}
+export function scratchScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "scratch-write-refused" });
+  const exts: Record<string, number> = {};
+  for (const line of lines) {
+    const parsed = parseScratchRefusalSummary(line.summary);
+    const ext = parsed ? parsed.extension : "other";
+    exts[ext] = (exts[ext] ?? 0) + 1;
+  }
+  const extText = ([...SCRATCH_EXTENSIONS, "other"] as const).filter(e => exts[e]).map(e => e + " " + String(exts[e])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Scratch writes: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Refused writes: " + String(lines.length));
+  out.push("By extension: " + extText);
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a write or prints a path or summary; a new refused write is the news");
+  return out.join("\n");
+}
