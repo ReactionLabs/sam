@@ -151,6 +151,67 @@ export function messageFailedSummary(chatId: string, count: number, error: unkno
   return ("A queued turn in chat " + chatId.slice(0, 8) + " failed: " + errorReason(error) + "; its " + count + " message(s) are marked failed in the queue, not lost").slice(0, 200);
 }
 
+// The message-failure scorecard (2026-11-18, the measured-proof
+// series): the drain catch above ledgers every queued turn that
+// dies as a "message-failed" line - the person's messages marked
+// failed in the queue, accounted for, never lost - and since
+// 2026-11-16 the line carries its reason. But no daily surface
+// ever counted the class, so a queue that starts failing
+// regularly was invisible until the owner hit a failed bubble.
+// This text folds the whole ledger's message-failed lines to
+// counts only: the failed queued turns, the failed messages
+// (each line's own count, parsed from its accounting half), and
+// counts per fixed reason bucket - the turn-failure enum, folded
+// from the reason messageFailedSummary composed. A legacy
+// pre-cause-fix line carries no reason, and an unmatched reason
+// matches no shape: both are "other" and are never printed. No
+// stamp, no chat id, no actor, and no verbatim reason enters
+// the text, so a day no queued turn dies is byte-identical and
+// P3-silent, and the first new failed queued turn is the news.
+// A pure read: it creates nothing, spends no model call, and
+// retries nothing - the ledger, the queue, and the drain are
+// untouched, and resending a failed message stays the owner's
+// act on the dashboard or the CLI resend door.
+export type MessageFailureBucket = "unsafe-output" | "empty-response" | "too-many-tool-calls" | "timeout" | "not-configured" | "provider-error" | "invalid-request" | "other";
+export function messageFailureReason(summary: string): string {
+  const start = summary.indexOf(" failed: ");
+  const end = summary.indexOf("; its ");
+  if (start < 0 || end < 0 || end <= start) return "";
+  return summary.slice(start + " failed: ".length, end);
+}
+export function messageFailureBucket(reason: string): MessageFailureBucket {
+  if (/unsafe model output/i.test(reason)) return "unsafe-output";
+  if (/empty model response/i.test(reason)) return "empty-response";
+  if (/too many tool calls/i.test(reason)) return "too-many-tool-calls";
+  if (/timed out|timeout/i.test(reason)) return "timeout";
+  if (/not configured/i.test(reason)) return "not-configured";
+  if (/connector request failed|http \d{3}/i.test(reason)) return "provider-error";
+  if (/^invalid /i.test(reason)) return "invalid-request";
+  return "other";
+}
+export function messageFailureMessages(summary: string): number {
+  const m = /; its (\d+) message\(s\) are marked failed/.exec(summary);
+  return m ? Number(m[1]) : 0;
+}
+export function messageFailureScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-failed" });
+  const buckets = new Map<MessageFailureBucket, number>();
+  let messages = 0;
+  for (const line of lines) {
+    const bucket = messageFailureBucket(messageFailureReason(line.summary));
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+    messages += messageFailureMessages(line.summary);
+  }
+  const byBucket = [...buckets.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  out.push("Queued message failures: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Failed queued turns: " + String(lines.length));
+  out.push("Failed messages: " + String(messages));
+  out.push("By reason: " + (byBucket.length ? byBucket.map(([bucket, n]) => bucket + " " + String(n)).join(", ") : "none"));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries or resends a message or prints a chat id or reason; a new failed queued turn is the news");
+  return out.join("\n");
+}
+
 export function listChatQueue(root: string, chatId: string, limit = 12): QueueItem[] {
   return chatQueueTouch(root, "read", () => {
     const db = openStore(root);
