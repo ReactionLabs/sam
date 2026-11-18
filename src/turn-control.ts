@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { chatQueueTouch } from "./chat-queue-failure.js";
+import { readActivity } from "./activity.js";
 
 // Interactive turn control (Dip, 2026-11-14, after Test Chat
 // 8d7f4341 burned dozens of model calls inside one turn while his
@@ -220,4 +221,44 @@ export function turnDeadlineFallbackAnswer(ask: string): string {
 
 export function turnDeadlineLedgerSummary(executed: string[], roundsUsed: number, deadlineMs: number): string {
   return "Interactive turn hit its " + Math.round(deadlineMs / 1000) + "s deadline after " + executed.length + " call(s) over " + roundsUsed + " round(s) (" + (executed.join(", ") || "none") + ") - no new tool rounds started; the turn closes with a status synthesis. Long work belongs in the background, not in the owner's open chat";
+}
+
+// The turn-deadline scorecard (2026-11-18, the measured-proof
+// series): both chat loops ledger every turn the deadline
+// closes as a "turn-deadline" line - the calls and rounds the
+// turn had already spent when the wall clock cut it. But no
+// daily surface ever counted the class, so a chat surface
+// hitting its deadline regularly was invisible until the
+// owner watched a turn stall for three minutes. This text
+// folds the whole ledger's turn-deadline lines to counts
+// only: the deadline-hit turns, and the calls and rounds
+// summed from each line's own accounting. A line that does
+// not match the fixed ledger shape still counts as a hit
+// and contributes no calls or rounds. No stamp, no actor,
+// no tool name, no deadline reading, and no verbatim summary
+// enters the text, so a day no turn hits its deadline is
+// byte-identical and P3-silent, and the first new
+// deadline-hit turn is the news. A pure read: it creates
+// nothing, spends no model call, and retries nothing - the
+// ledger and the turn control are untouched, and moving or
+// shortening the deadline stays the operator's act.
+export function parseTurnDeadlineSummary(summary: string): { calls: number; rounds: number } | null {
+  const m = /^Interactive turn hit its \d+s deadline after (\d+) call\(s\) over (\d+) round\(s\)/.exec(summary);
+  return m ? { calls: Number(m[1]), rounds: Number(m[2]) } : null;
+}
+export function turnDeadlineScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-deadline" });
+  let calls = 0;
+  let rounds = 0;
+  for (const line of lines) {
+    const parsed = parseTurnDeadlineSummary(line.summary);
+    if (parsed) { calls += parsed.calls; rounds += parsed.rounds; }
+  }
+  const out: string[] = [];
+  out.push("Turn deadlines: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Deadline-hit turns: " + String(lines.length));
+  out.push("Calls before deadline: " + String(calls));
+  out.push("Rounds before deadline: " + String(rounds));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a tool name or deadline; a new deadline-hit turn is the news");
+  return out.join("\n");
 }
