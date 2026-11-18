@@ -121,3 +121,50 @@ export function reasoningLeakScorecardText(root: string): string {
   out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a reply or prints a summary; a new blocked reply is the news");
   return out.join("\n");
 }
+
+/** The narration-channel ledger line's one writer: a turn's
+ *  withheld tool-round narration, by size only (chars and
+ *  rounds) - the words themselves never land in any record. */
+export function narrationChannelLedgerSummary(chars: number, rounds: number, chatId: string): string {
+  return "Withheld " + String(chars) + " chars of tool-round narration across " + String(rounds) + " round(s) from the message path in chat " + chatId.slice(0, 8) + ": narration is turn-internal and never becomes a message";
+}
+
+// The narration scorecard (2026-11-18, the measured-proof
+// series): the narration channel withholds every tool-round's
+// process narration from the message path, and agent-turn
+// ledgers one "narration-channel" line per affected turn, by
+// size only. But no daily surface ever counted the class, so
+// a model that started narrating heavily in its tool rounds
+// was invisible in aggregate. This text folds the whole
+// ledger's narration lines to counts only: the withheld
+// turns, the summed withheld rounds, and the summed withheld
+// chars. A summary that does not match the fixed shape still
+// counts as a withholding turn and contributes no rounds or
+// chars, and is never printed. No stamp, no actor, no chat
+// id, and no verbatim summary enters the text, so a day no
+// narration is withheld is byte-identical and P3-silent, and
+// the first new withholding is the news. A pure read: it
+// creates nothing, spends no model call, and retries nothing
+// - the ledger and the channel are untouched, and quieting a
+// narrating model stays the work lane's act.
+export function parseNarrationChannel(summary: string): { chars: number; rounds: number } | null {
+  const m = /^Withheld (\d+) chars of tool-round narration across (\d+) round\(s\) from the message path in chat /.exec(summary);
+  if (!m) return null;
+  return { chars: Number(m[1]), rounds: Number(m[2]) };
+}
+export function narrationScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "narration-channel" });
+  let rounds = 0;
+  let chars = 0;
+  for (const line of lines) {
+    const parsed = parseNarrationChannel(line.summary);
+    if (parsed) { rounds += parsed.rounds; chars += parsed.chars; }
+  }
+  const out: string[] = [];
+  out.push("Narration withheld: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Withheld turns: " + String(lines.length));
+  out.push("Withheld rounds: " + String(rounds));
+  out.push("Withheld chars: " + String(chars));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never prints the withheld narration or a summary; a new withholding is the news");
+  return out.join("\n");
+}

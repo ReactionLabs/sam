@@ -26,7 +26,7 @@ import { isProviderOverloadError, PROVIDER_OVERLOAD_MESSAGE } from "./provider-r
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, turnDeadlineFallbackAnswer, type TurnControl } from "./turn-control.js";
-import { REASONING_BLOCKED_REPLY, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
+import { REASONING_BLOCKED_REPLY, isReasoningNarration, narrationChannelLedgerSummary, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
 import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
@@ -546,7 +546,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // only: the class stays countable (a turn whose model narrates
   // heavily shows up here) without the words ever landing in a
   // record the owner can open.
-  if(narrationRounds>0){try{recordActivity(root,profileName,"narration-channel","Withheld "+narrationChars+" chars of tool-round narration across "+narrationRounds+" round(s) from the message path in chat "+chatId.slice(0,8)+": narration is turn-internal and never becomes a message");}catch{/* the ledger never breaks a turn */}}
+  if(narrationRounds>0){try{recordActivity(root,profileName,"narration-channel",narrationChannelLedgerSummary(narrationChars,narrationRounds,chatId));}catch{/* the ledger never breaks a turn */}}
   // The final save verifies the turn is still current: a reset
   // that landed while the last synthesis composed discards the
   // reply here, before any of it can reach the transcript.
