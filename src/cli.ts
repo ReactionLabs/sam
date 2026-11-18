@@ -70,7 +70,7 @@ import { authoredSkills, curatorFindings, proposeAuthoredSkill, runSkillCurator,
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
-import { runDoctor } from "./doctor.js";
+import { doctorScorecardText, runDoctor } from "./doctor.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { recallMemory } from "./memory-recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
@@ -1064,12 +1064,18 @@ mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-de
     if(!decision.allowed)process.exitCode=1;
   });
 
-program.command("doctor").description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials")
+const doctorCmd=program.command("doctor").description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials");
+doctorCmd.command("run",{isDefault:true}).description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials")
   .option("--fix [id]","Apply allowlisted fixes. Omit the id to apply every allowlisted fix for a current failure. An id off the allowlist is refused and nothing is changed.")
   .action(async(o:{fix?:true|string})=>{
     const report=await runDoctor(resolve(program.opts().workspace),{env:process.env,fix:o.fix===undefined?false:o.fix});
     output(report);
     if(report.checks.some(c=>c.status==="fail")||report.refused.length)process.exitCode=1;
+  });
+doctorCmd.command("scorecard").description("The diagnosis as plain text with no clock reading - verdict, per-status counts, and one id: status line per check (never evidence, a fix text, a version, a host, a mode, or a reason), the trending surface a daily script job P3-diffs, so a held install stays silent and a flipped check is the news (this is the sam-doctor script job's stdout; it runs the diagnosis with NO fix requested and spends no model call - the model check is a TCP connect that sends no request and never uses the key; `sam doctor --fix` stays the operator's act)").action(async()=>{
+    const report=await runDoctor(resolve(program.opts().workspace),{env:process.env});
+    output(doctorScorecardText(report));
+    if(report.checks.some(c=>c.status==="fail"))process.exitCode=1;
   });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());

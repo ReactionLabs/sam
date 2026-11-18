@@ -356,3 +356,39 @@ export async function runDoctor(root: string, options: DoctorOptions = {}): Prom
   const checks = await diagnose(root, env, options);
   return { checks, allowlist: DOCTOR_FIX_ALLOWLIST, applied, refused };
 }
+
+/**
+ * The doctor as a P3-stable scorecard (gap found 2026-11-18):
+ * doctor was the one diagnostic surface with no plain-text
+ * trending form - no scorecard, no script allowlist entry, no
+ * daily job - so a live store corrupting, a socket going
+ * stale, or the control token loosening would surface only
+ * when a turn died on it or someone ran doctor by hand. The
+ * text carries ONLY the verdict, the per-status counts, and
+ * one id: status line per check in report order: never the
+ * evidence, a fix text, a version, a host, a mode, or a
+ * reason, each free text or a moving value. Two diagnoses of
+ * the same install state produce byte-identical text P3
+ * judges the same news; a check flipping status, or a store
+ * appearing or vanishing, changes the text and is the news.
+ * The scorecard path never requests a fix (runDoctor's fix
+ * path is not entered) and spends no model call - the model
+ * check is doctor's own TCP connect, which sends no request
+ * and never uses the key. `sam doctor --fix` stays the
+ * operator's act, never a job's.
+ */
+export function doctorScorecardText(report: DoctorReport): string {
+  const counts: Record<DoctorStatus, number> = { ok: 0, warn: 0, fail: 0, skip: 0 };
+  for (const item of report.checks) counts[item.status] += 1;
+  const verdict = counts.fail > 0 ? "failing" : counts.warn > 0 ? "attention" : "healthy";
+  const lines: string[] = [];
+  lines.push("Doctor: " + verdict);
+  lines.push(
+    "Checks: " + String(report.checks.length) + " total, " +
+    String(counts.ok) + " ok, " + String(counts.warn) + " warn, " +
+    String(counts.fail) + " fail, " + String(counts.skip) + " skip",
+  );
+  for (const item of report.checks) lines.push(item.id + ": " + item.status);
+  lines.push("Fixes: none applied - the scorecard never fixes; `sam doctor --fix` stays the operator's act");
+  return lines.join("\n");
+}
