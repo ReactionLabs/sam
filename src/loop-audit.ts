@@ -249,9 +249,14 @@ export function runLoopAudit(root: string): LoopAudit {
 }
 
 /** The audit as plain text (the sam-loop-audit script job's
- *  stdout shape): the scorecard a person reads. */
+ *  stdout shape): the scorecard a person reads. It carries NO
+ *  clock reading - the recorded record keeps `at`, but the
+ *  text is P3-diffed by the daily script job, and an ISO stamp
+ *  is a date fact that would announce "changed" every day at
+ *  an identical score. Only the facts ride the text: the pass
+ *  counts, the named findings, the live loop state. */
 export function loopAuditText(audit: LoopAudit): string {
-  const lines: string[] = ["Loop audit - " + audit.at + " - " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks passed"];
+  const lines: string[] = ["Loop audit - " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks passed"];
   for (const dim of audit.dimensions) lines.push("- " + dim.label + ": " + String(dim.passed) + "/" + String(dim.total));
   if (audit.findings.length) {
     lines.push("", "Findings:");
