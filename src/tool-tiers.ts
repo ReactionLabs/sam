@@ -2,7 +2,7 @@ import { existsSync, readFileSync, renameSync, mkdirSync, lstatSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -234,6 +234,56 @@ export function prepLoopLedgerSummary(executed: string[], pureLoader: boolean): 
 
 export function prepLoopSteer(): string {
   return "Preparation-loop guard: you have spent two steps in a row on preparation - loading tools, or hire calls that created nothing - without using a single loaded tool. Preparation is not progress. The loader is now OFF for the rest of this turn. On your next step, call one of the tools already loaded for this chat and do the work, or answer from what you already have.";
+}
+
+// The loader-loop scorecard (2026-11-18, the measured-proof
+// series): the loader-loop guard and its preparation-loop
+// generalization ledger every stopped turn - kind
+// "loader-loop" for a pure loader trip, "preparation-loop"
+// for the generalized one, the steered variant carrying the
+// same base summary plus its suffix - but no daily surface
+// ever counted the stops, so a chat that started looping on
+// preparation again was invisible until the owner watched a
+// turn die. This text folds both kinds' lines to counts
+// only: the total, counts per fixed kind (loader /
+// preparation, an unmatched shape "other"), and the summed
+// calls the stopped turns spent. A summary matching neither
+// fixed shape counts as a stop and contributes no calls,
+// and is never printed. No stamp, no actor, no tool name,
+// no verbatim summary enters the text, so a day no turn is
+// stopped is byte-identical and P3-silent, and the first
+// new stopped turn is the news. A pure read: it creates
+// nothing, spends no model call, and retries nothing - the
+// ledger and the guard seam are untouched.
+export type LoaderLoopKind = "loader" | "preparation";
+export function parseLoaderLoopSummary(summary: string): { kind: LoaderLoopKind; calls: number } | null {
+  const loader = /^Loader loop stopped: \d+ consecutive loader-only rounds, (\d+) calls used/.exec(summary);
+  if (loader) return { kind: "loader", calls: Number(loader[1]) };
+  const prep = /^Preparation loop stopped: \d+ consecutive preparation-only rounds, (\d+) calls used/.exec(summary);
+  if (prep) return { kind: "preparation", calls: Number(prep[1]) };
+  return null;
+}
+export function loaderLoopScorecardText(root: string): string {
+  const lines = [
+    ...readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loader-loop" }),
+    ...readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "preparation-loop" }),
+  ];
+  const kinds = new Map<string, number>();
+  let calls = 0;
+  for (const line of lines) {
+    const parsed = parseLoaderLoopSummary(line.summary);
+    const kind = parsed ? parsed.kind : "other";
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+    if (parsed) calls += parsed.calls;
+  }
+  const byKind = [...kinds.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  out.push("Loader loops: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Stopped turns: " + String(lines.length));
+  out.push("By kind: " + (byKind.length ? byKind.map(([kind, n]) => kind + " " + String(n)).join(", ") : "none"));
+  out.push("Calls used: " + String(calls));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a tool name; a new stopped turn is the news");
+  return out.join("\n");
 }
 
 export function loaderDisabledStubContent(): string {
