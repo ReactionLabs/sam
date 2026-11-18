@@ -292,6 +292,43 @@ export function authCheckOk(status: { routes: AuthTarget[] }): boolean {
   return true;
 }
 
+// The auth status as a plain-text scorecard - the trending
+// surface a daily script job (sam-auth-status) P3-diffs, so a
+// held install stays silent and drift is the news (a key env
+// vanishing, a pin resolving to a different model, the engine
+// route going stale, a probe verdict landing). The status
+// record carries clock readings (the setup baseline's
+// verifiedAt, each probe's stamp and latency, the codex
+// expiry) and free-text probe reasons; NONE of them enter the
+// text - a probe contributes its bucket only, so two reads at
+// the same detected state are byte-identical. The scorecard
+// is a pure read: it creates nothing and spends no model
+// call, and probing stays the operator's --live act exactly
+// as item 2 left it.
+export function authStatusText(status: AuthStatus): string {
+  const lines: string[] = [];
+  lines.push("Auth status: " + (status.healthy ? "healthy" : "NOT healthy"));
+  lines.push("Provider: " + status.provider + " via " + (status.endpoint ?? "no endpoint") + ", key " + status.keyEnv + " " + status.key);
+  lines.push(status.setupVerified
+    ? "Setup baseline: " + status.setupVerified.model + (status.setupVerified.current ? " (still the chat route's model)" : " (no longer the chat route's model)")
+    : "Setup baseline: none recorded");
+  const row = (t: AuthTarget): string =>
+    t.target + ": " + (t.model ?? "no model") + " (" + t.source + ", tier " + t.tier + "), key " + t.keyEnv + " " + t.key + ", probe " + (t.lastProbe ? t.lastProbe.bucket : "never");
+  for (const t of status.routes) lines.push(row(t));
+  for (const t of status.profiles) lines.push(row(t));
+  for (const p of status.providers) lines.push("provider:" + p.id + ": " + (p.model ?? "no model") + " via " + (p.endpoint ?? "no endpoint") + ", key " + p.keyEnv + " " + p.key + ", probe " + (p.lastProbe ? p.lastProbe.bucket : "never"));
+  const probed = [...status.routes, ...status.profiles].filter(t => t.lastProbe).length + status.providers.filter(p => p.lastProbe).length;
+  const total = status.routes.length + status.profiles.length + status.providers.length;
+  lines.push(probed === 0
+    ? "Probes: none recorded - probing spends one real completion per distinct model and stays the operator's --live act"
+    : "Probes: recorded for " + String(probed) + " of " + String(total) + " targets");
+  const e = status.engine;
+  lines.push("Engine: " + e.provider + " cli-reuse, " + (!e.installed ? "not installed" : e.stale ? "installed, connection stale" : e.connected ? "installed and connected" : "installed, not connected"));
+  lines.push("Senses: " + (status.senses.installed ? "installed (" + (status.senses.binary ?? "unknown binary") + ")" : "not installed"));
+  lines.push("Codex: " + (status.codex.loggedIn ? "logged in" : status.codex.pending ? "login pending" : "not logged in"));
+  return lines.join("\n");
+}
+
 // Bucket a probe failure the way OpenClaw's models status --probe
 // does: the owner (and a script) needs the KIND of failure, not a
 // raw stack. Order matters: a 429 that mentions quota is a rate
