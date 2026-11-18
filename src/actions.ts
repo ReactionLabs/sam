@@ -10,7 +10,7 @@ import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./
 import { channels } from "./channels.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
@@ -220,6 +220,63 @@ export function actionScorecardText(root: string): string {
   lines.push("Pending by kind: " + (pendingKinds.length ? pendingKinds.map(k => k + " " + String(all.filter(a => a.status === "pending" && a.kind === k).length)).join(", ") : "none"));
   lines.push("Note: counts only - the scorecard never approves, rejects, or executes a proposal; deciding stays the owner's act");
   return lines.join("\n");
+}
+
+// The action-failure scorecard (2026-11-18, the measured-proof
+// series): when an approved action's execution throws, the
+// decision seam ledgers one "failed" line ("<kind>: <title> -
+// <reason>") and the proposal lands failed. The gate scorecard
+// above counts failed proposals as a status, but no daily
+// surface ever folded the ledger lines themselves, so an
+// install source failing for every skill was invisible until
+// the owner watched an install die. This text folds the whole
+// ledger's failed lines to counts only: the total, counts per
+// action kind (the summary's prefix, validated against the
+// fixed ACTION_KINDS enum - an unknown prefix is "other",
+// never printed as free text), and counts per fixed reason
+// bucket folded from the reason half (the text after the
+// first " - "). No stamp, no title, no detail, no actor, no
+// URL, and no verbatim reason enters the text, so a day no
+// action fails is byte-identical and P3-silent, and the first
+// new failed action is the news. A pure read: it creates
+// nothing, spends no model call, and retries nothing - the
+// ledger and the gate are untouched, and re-executing a
+// failed action stays the owner's act.
+export type ActionFailureBucket = "http" | "not-found" | "other";
+export function actionFailureKind(summary: string): string {
+  const i = summary.indexOf(": ");
+  if (i <= 0) return "other";
+  const kind = summary.slice(0, i);
+  return (KINDS as string[]).includes(kind) ? kind : "other";
+}
+export function actionFailureReasonPart(summary: string): string {
+  const i = summary.indexOf(" - ");
+  return i < 0 ? "" : summary.slice(i + 3);
+}
+export function actionFailureBucket(reason: string): ActionFailureBucket {
+  if (/fetch failed|http \d{3}/i.test(reason)) return "http";
+  if (/no skill\.md found|not found/i.test(reason)) return "not-found";
+  return "other";
+}
+export function actionFailureScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "failed" });
+  const kinds = new Map<string, number>();
+  const buckets = new Map<ActionFailureBucket, number>();
+  for (const line of lines) {
+    const kind = actionFailureKind(line.summary);
+    kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+    const bucket = actionFailureBucket(actionFailureReasonPart(line.summary));
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+  }
+  const byKind = [...kinds.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const byBucket = [...buckets.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  out.push("Action failures: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Failed actions: " + String(lines.length));
+  out.push("By kind: " + (byKind.length ? byKind.map(([kind, n]) => kind + " " + String(n)).join(", ") : "none"));
+  out.push("By reason: " + (byBucket.length ? byBucket.map(([bucket, n]) => bucket + " " + String(n)).join(", ") : "none"));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries or re-executes an action or prints a title, detail, or reason; a new failed action is the news");
+  return out.join("\n");
 }
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
