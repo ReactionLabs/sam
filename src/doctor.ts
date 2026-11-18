@@ -375,7 +375,12 @@ export async function runDoctor(root: string, options: DoctorOptions = {}): Prom
  * path is not entered) and spends no model call - the model
  * check is doctor's own TCP connect, which sends no request
  * and never uses the key. `sam doctor --fix` stays the
- * operator's act, never a job's.
+ * operator's act, never a job's. The scorecard command exits
+ * 0 even when checks fail (unlike `sam doctor run`, whose
+ * exit contract stands): a script job's non-zero exit makes
+ * the heartbeat runner discard its stdout as job-failed, so
+ * a failing install - exactly when the trend matters - must
+ * still deliver its text.
  */
 export function doctorScorecardText(report: DoctorReport): string {
   const counts: Record<DoctorStatus, number> = { ok: 0, warn: 0, fail: 0, skip: 0 };

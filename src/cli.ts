@@ -1075,7 +1075,6 @@ doctorCmd.command("run",{isDefault:true}).description("Diagnose stores, the daem
 doctorCmd.command("scorecard").description("The diagnosis as plain text with no clock reading - verdict, per-status counts, and one id: status line per check (never evidence, a fix text, a version, a host, a mode, or a reason), the trending surface a daily script job P3-diffs, so a held install stays silent and a flipped check is the news (this is the sam-doctor script job's stdout; it runs the diagnosis with NO fix requested and spends no model call - the model check is a TCP connect that sends no request and never uses the key; `sam doctor --fix` stays the operator's act)").action(async()=>{
     const report=await runDoctor(resolve(program.opts().workspace),{env:process.env});
     output(doctorScorecardText(report));
-    if(report.checks.some(c=>c.status==="fail"))process.exitCode=1;
   });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
