@@ -103,7 +103,7 @@ import { listContacts, getContact, upsertContact, removeContact, addressBookOrde
 import { listDrafts, getDraft, createDraft, removeDraft } from "./drafts.js";
 import { createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, updateArtifact } from "./artifacts.js";
 import { activityView, actionsView, chatView, turnActions, statusSnapshot } from "./cli-views.js";
-import { observabilityReport } from "./observability.js";
+import { observabilityReport, turnFailureScorecardText } from "./observability.js";
 import { listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { revisitDueLoops } from "./loop-revisit.js";
@@ -591,7 +591,9 @@ program.command("relay").description("Send one prompt to 2 or more configured mo
 });
 program.command("activity").description("The activity ledger: everything SAM did, newest last").option("--limit <n>","How many lines").option("--actor <name>","Only this actor").option("--kind <kind>","Only this kind").action((o:{limit?:string;actor?:string;kind?:string})=>output(activityView(program.opts().workspace,{limit:o.limit?Number(o.limit):20,actor:o.actor,kind:o.kind})));
 program.command("overview").description("One status snapshot, the same payload as the dashboard /api/status route").action(()=>output(statusSnapshot(program.opts().workspace)));
-program.command("observe").description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability").action(()=>output(observabilityReport(program.opts().workspace)));
+const observeCmd=program.command("observe").description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability");
+observeCmd.command("run",{isDefault:true}).description("Observability data: provider health, per-agent activity, token spend, and turn failures with reasons. Same shape as /api/status observability").action(()=>output(observabilityReport(program.opts().workspace)));
+observeCmd.command("scorecard").description("Turn failures as plain text with no clock reading - verdict, the total dead-turn count, and counts per fixed reason bucket (never a stamp, a chat id, an actor, or a verbatim reason), the trending surface a daily script job P3-diffs, so a day no turn dies stays silent and the first new dead turn is the news (this is the sam-turn-failures script job's stdout; a pure read over the same activity ledger the observability report folds: creates nothing, spends no model call, retries nothing; exits 0 always, the verdict lives in the text)").action(()=>output(turnFailureScorecardText(program.opts().workspace)));
 const eventCmd=program.command("events").description("Event door: a signed local webhook that wakes a profile with one heartbeat-budget turn. The payload is data, never an instruction, and it cannot skip the approval gate");
 eventCmd.command("bind").argument("<name>").argument("<profile>").requiredOption("--secret-env <NAME>","Environment variable NAME holding the HMAC secret").description("Bind an event name to a profile. The secret value stays in the environment").action((name:string,profile:string,o:{secretEnv:string})=>{const root=program.opts().workspace as string;const known=knownProfileNames(root);if(!known.includes(profile))throw new Error("Unknown profile: "+profile);const row=bindEvent(root,{name,profile,secretEnv:o.secretEnv});recordActivity(root,"owner","event-bind","Event "+row.name+" bound to "+row.profile+" (secret env "+row.secretEnv+")");output(row);});
 eventCmd.command("list").description("Event bindings. Secret values are never printed").action(()=>{const root=program.opts().workspace as string;output(eventBindings(root).map(b=>({...b,secret:process.env[b.secretEnv]?.trim()?"present":"absent"})));});

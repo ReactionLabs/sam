@@ -81,3 +81,47 @@ export function observabilityReport(root: string, env: NodeJS.ProcessEnv = proce
   }));
   return { providerHealth, agents, spend, failures };
 }
+
+// The turn-failure scorecard (2026-11-18, the measured-proof
+// series): the 2026-11-10 turn-failed seam made dead turns
+// countable, but no daily surface ever counted them - the
+// observability fold above is a last-200 list carrying
+// stamps, actors, and verbatim reasons, so it can never be
+// P3-diffed. This text folds the whole ledger's turn-failed
+// lines to counts only: the total, and counts per fixed
+// in-code reason bucket. The buckets mirror the self-work
+// defect classifier's turn-failed shapes, extended only
+// with the two buckets the live ledger proves (provider
+// HTTP failures, invalid requests); a reason matching no
+// shape is "other" and is never printed. No stamp, no chat
+// id, no actor, no verbatim reason enters the text, so a
+// day no turn dies is byte-identical and P3-silent, and
+// the first new dead turn is the news. A pure read: it
+// creates nothing, spends no model call, and retries
+// nothing - the ledger and the turn seam are untouched.
+export type TurnFailureBucket = "unsafe-output" | "empty-response" | "too-many-tool-calls" | "timeout" | "not-configured" | "provider-error" | "invalid-request" | "other";
+export function turnFailureBucket(reason: string): TurnFailureBucket {
+  if (/unsafe model output/i.test(reason)) return "unsafe-output";
+  if (/empty model response/i.test(reason)) return "empty-response";
+  if (/too many tool calls/i.test(reason)) return "too-many-tool-calls";
+  if (/timed out|timeout/i.test(reason)) return "timeout";
+  if (/not configured/i.test(reason)) return "not-configured";
+  if (/connector request failed|http \d{3}/i.test(reason)) return "provider-error";
+  if (/^invalid /i.test(reason)) return "invalid-request";
+  return "other";
+}
+export function turnFailureScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-failed" });
+  const buckets = new Map<TurnFailureBucket, number>();
+  for (const line of lines) {
+    const bucket = turnFailureBucket(failureReason(line.summary));
+    buckets.set(bucket, (buckets.get(bucket) ?? 0) + 1);
+  }
+  const byBucket = [...buckets.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const out: string[] = [];
+  out.push("Turn failures: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Failed turns: " + String(lines.length));
+  out.push("By reason: " + (byBucket.length ? byBucket.map(([bucket, n]) => bucket + " " + String(n)).join(", ") : "none"));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a turn or prints a reason; a new dead turn is the news");
+  return out.join("\n");
+}
