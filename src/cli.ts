@@ -21,7 +21,7 @@ import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
 import { heartbeatJobs, addHeartbeatJob, addScheduledJob, jobNextRun, removeHeartbeatJob, runHeartbeat, deliverToChannel } from "./heartbeat.js";
 import { describeSchedule, scriptCommandNames, SCRIPT_JOB_COMMANDS } from "./schedule.js";
-import { deliverySummary, readDeliveries } from "./delivery-outbox.js";
+import { deliverySummary, outboxScorecardText, readDeliveries } from "./delivery-outbox.js";
 import { listBackgroundTasks, queueBackgroundTask, drainBackgroundTasks } from "./background.js";
 import { listCodingTasks, queueCodingTask, drainCodingTasks } from "./coding.js";
 import { drainEngineTasks, engineStatus, listEngineTasks, queueEngineTask } from "./engine.js";
@@ -344,6 +344,7 @@ hbCmd.command("schedule").description("Add a job on the real schedule surface (P
 hbCmd.command("scripts").description("The no-agent script allowlist: SAM's own read-only CLI reports a script job may run").action(()=>output(scriptCommandNames().map(n=>({name:n,description:SCRIPT_JOB_COMMANDS[n].description}))));
 hbCmd.command("next").description("When each job next fires, on its own schedule and timezone").action(()=>output(heartbeatJobs(program.opts().workspace).map(j=>({name:j.name,schedule:describeSchedule(j),mode:j.mode??"agent",nextRun:jobNextRun(j)?.toISOString()??null,lastRun:j.lastRun}))));
 hbCmd.command("deliveries").description("The durable delivery outbox: every queued channel delivery with its state (pending, delivered, suppressed, failed, recovered)").option("--all","Include delivered and suppressed records").action((o:{all?:boolean})=>{const all=readDeliveries(program.opts().workspace);output(o.all?all:all.filter(d=>d.status==="pending"||d.status==="failed"));});
+hbCmd.command("outbox-scorecard").description("The delivery outbox as plain text with no clock reading - counts only (pending, delivered, suppressed, failed, recovered; no stamps, delivery texts, job names, channel ids, or reasons), the trending surface a daily script job P3-diffs, so a day nothing moves stays silent and the first pending, recovered, or failed delivery is the news (this is the sam-outbox script job's stdout; a pure read over the same fold heartbeats deliveries performs: creates nothing, sends nothing, retries nothing, settles nothing - redelivery rides the heartbeat tick; exits 0 always, the verdict lives in the text)").action(()=>output(outboxScorecardText(program.opts().workspace)));
 hbCmd.command("list").action(()=>output(heartbeatJobs(program.opts().workspace)));
 hbCmd.command("remove").argument("<id>").action((id:string)=>output({removed:removeHeartbeatJob(program.opts().workspace,id)}));
 program.command("heartbeat").description("Run one heartbeat tick now: consolidate preference memory, promote law, run due jobs")

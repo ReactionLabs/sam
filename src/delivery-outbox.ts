@@ -209,3 +209,35 @@ export function deliverySummary(root: string): { pending: number; delivered: num
     recovered: all.filter(d => d.deliveredAt && d.recovered).length,
   };
 }
+
+/**
+ * The outbox as a plain-text scorecard (daily-measurement
+ * wiring, 2026-11-18, the measured-proof series' census
+ * tail): the worthiness scorecard trends the gate's
+ * verdicts, but nothing trended the queue's outcomes - a
+ * delivery the gate approved can still fail to send, sit
+ * pending across ticks, land recovered, or settle failed,
+ * and the only surfaces were the brief's needs-you section
+ * (its job is not installed) and the JSON record dump.
+ * Counts are the only facts here: no stamp, no delivery
+ * text, no job name, no channel id, no reason - so a day
+ * nothing moves is byte-identical and P3-silent, and the
+ * first pending, recovered, or failed delivery is the
+ * news. A pure read over the same fold deliverySummary
+ * performs: it creates nothing, sends nothing, retries
+ * nothing, and settles nothing - redelivery rides the
+ * heartbeat tick exactly as before.
+ */
+export function outboxScorecardText(root: string): string {
+  const summary = deliverySummary(root);
+  const owed = summary.pending + summary.failed;
+  const lines: string[] = [];
+  lines.push("Delivery outbox: " + (owed > 0 ? "attention" : "clear"));
+  lines.push("Pending: " + String(summary.pending));
+  lines.push("Delivered: " + String(summary.delivered));
+  lines.push("Suppressed: " + String(summary.suppressed));
+  lines.push("Failed: " + String(summary.failed));
+  lines.push("Recovered: " + String(summary.recovered));
+  lines.push("Note: counts only - the scorecard never sends, retries, or settles a delivery; redelivery rides the heartbeat tick");
+  return lines.join("\n");
+}
