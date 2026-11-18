@@ -15,7 +15,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { verificationGate, verificationStatus } from "./verification.js";
-import { defaultCodingReviewer, defaultDiffReviewer, goldfishStatus, runGoldfishReview, sessionGate, type GoldfishChangeInput } from "./goldfish.js";
+import { defaultCodingReviewer, defaultDiffReviewer, goldfishStatus, runGoldfishReview, sessionGate, verifyScorecardText, type GoldfishChangeInput } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore } from "./preferences.js";
@@ -240,6 +240,7 @@ testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
     output(await executeApprovedTestRun(program.opts().workspace,options.id,options.confirm,Number(options.timeout))));
 const verifyCmd=program.command("verify").description("Verify-on-stop: applied changes stay unverified until a fresh approved build AND test pass after the last change; the gate is the only 'done' check");
 verifyCmd.command("status").description("Show the verification ledger state and whether a session holding these changes may close").action(()=>{const root=program.opts().workspace;output({status:verificationStatus(root),gate:verificationGate(root),goldfish:goldfishStatus(root),session:sessionGate(root)});});
+verifyCmd.command("scorecard").description("The verify-on-stop state as plain text with no clock reading - verification state, pending count, build/test-after-change, goldfish state with total and uncovered counts, and the session gate's closable/outcome, with no pending path, hash, gate reason, finding, or spec - the trending surface a daily script job P3-diffs, so a held state stays silent and a flip (a change landing unverified, a verification failing, goldfish coverage slipping) is the news (this is the sam-verify script job's stdout; a pure read over the same folds verify status performs: records nothing, runs no build or test, spends no model call, and never reviews - the approved test runner and `sam goldfish review` stay the operator's acts; exits 0 always, the verdict lives in the text)").action(()=>output(verifyScorecardText(program.opts().workspace)));
 const capsCmd=program.command("caps").description("Session caps: per-chat per-day turn and token ceilings, checked at every turn entry; 0 disables a cap (SAM_SESSION_MAX_TURNS / SAM_SESSION_MAX_TOKENS)");
 capsCmd.command("status").description("Show the cap configuration and today's per-chat usage against it").action(()=>{const root=program.opts().workspace;output({caps:sessionCaps(),sessions:sessionUsageToday(root)});});
 const goldfishCmd=program.command("goldfish").description("Goldfish verifier: fresh-context review (diff + spec + live source + Pattern Catalog, no conversation history) with the last word on 'done'");

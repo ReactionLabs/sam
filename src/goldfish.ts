@@ -305,6 +305,41 @@ export function sessionGate(root: string): { closable: boolean; outcome: "done" 
   return { closable: false, outcome: null, reasons: ["Goldfish review has not covered the current changes (" + goldfish.uncoveredChanges + " uncovered); same-context self-review does not count."] };
 }
 
+/**
+ * The verify-on-stop scorecard (2026-11-18, the measured-proof
+ * series' next instrument): `verify status` was a JSON read
+ * nobody trended, so the harness's own done-discipline - the
+ * verification ledger, goldfish coverage, and the combined
+ * session gate - could sit unverified and unreviewed for days
+ * with nothing surfacing it (the box's live ledger did exactly
+ * that from 2026-11-14). This folds the same three reads
+ * `verify status` performs into a P3-stable plain-text
+ * scorecard for a daily script job: states and counts only -
+ * never a clock reading, a pending path, a hash, a gate
+ * reason, a finding, or a spec, each free text or a moving
+ * value. The scorecard is a pure read over the folds: it
+ * records nothing, runs no build or test, spends no model
+ * call, and never reviews - verifying through the approved
+ * test runner and `goldfish review` stay the operator's
+ * acts, exactly as doctor's --fix stayed the operator's in
+ * the 00:04 split.
+ */
+export function verifyScorecardText(root: string): string {
+  const status = verificationStatus(root);
+  const goldfish = goldfishStatus(root);
+  const session = sessionGate(root);
+  const lines: string[] = [];
+  lines.push("Verification: " + status.state);
+  lines.push("Pending changes: " + String(status.pendingChanges.length));
+  lines.push("Build after change: " + (status.buildPassedAfterChange ? "passed" : "not passed"));
+  lines.push("Test after change: " + (status.testPassedAfterChange ? "passed" : "not passed"));
+  lines.push("Goldfish: " + goldfish.state);
+  lines.push("Goldfish changes: " + String(goldfish.totalChanges) + " total, " + String(goldfish.uncoveredChanges) + " uncovered");
+  lines.push("Session: " + (session.closable ? "closable" : "not closable") + ", outcome " + (session.outcome ?? "open"));
+  lines.push("Review: none run - the scorecard never verifies or reviews; the approved test runner and `sam goldfish review` stay the operator's acts");
+  return lines.join("\n");
+}
+
 /** The diff-carrying sibling of runGoldfishReview (Program E,
  *  2026-11-14): the parallel coding coordinator's merged result
  *  never enters the workspace change ledger - its changes live on
