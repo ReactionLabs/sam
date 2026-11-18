@@ -1551,15 +1551,22 @@ export function advanceSelfWork(root: string, now: Date = new Date()): { queued:
  *  fix lines when the work bridge has records (a fix in flight,
  *  a queue refusal worth naming, and the per-fix digests).
  *  Stable text when nothing changed is what Phase C diffing
- *  silences on. */
+ *  silences on, so the text carries NO clock reading: the
+ *  recorded run keeps at / auditAt / lastAt in full, but the
+ *  header, the capability line, and the ranked lines state
+ *  only the facts (counts, labels, the spec, the digests) -
+ *  a fresh run stamp, a fresh self-audit stamp, or a class's
+ *  last-sighting time would read as a changed date fact to
+ *  P3 every single day and the daily job could never be
+ *  silent, even on a perfectly quiet ledger. */
 export function selfWorkText(run: SelfWorkRun, opts: { fixes?: SelfWorkFixView[]; queueNote?: string | null } = {}): string {
-  const lines: string[] = ["Self-work - " + run.at];
-  lines.push("Capability map: " + (run.auditAt ? "self-audit recorded " + run.auditAt : "none recorded"));
+  const lines: string[] = ["Self-work"];
+  lines.push("Capability map: " + (run.auditAt ? "self-audit recorded" : "none recorded"));
   if (!run.ranked.length) {
     lines.push("", "No ledgered defect classes. Nothing to spec.");
   } else {
     lines.push("", "Defect queue (ranked; known defects seeded beside the ledger):");
-    for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x, last " + d.lastAt + " - " + d.label + (d.source === "known" ? " [known defect, seeded]" : ""));
+    for (const d of run.ranked.slice(0, 5)) lines.push("- " + d.key + ": " + String(d.count) + "x - " + d.label + (d.source === "known" ? " [known defect, seeded]" : ""));
     const spec = run.spec;
     if (spec) {
       lines.push("", "Top spec " + spec.id + " - " + spec.label + " (" + String(spec.count) + "x)");
