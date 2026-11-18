@@ -4,7 +4,7 @@ import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, 
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { channels } from "./channels.js";
 import { connectors } from "./connectors.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
@@ -955,13 +955,89 @@ export async function runPython(root: string, actor: string, rel: string, opts: 
     };
     const status = result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""));
     const pass = requested.length ? requested.join(",") : "none";
-    recordActivity(root, actor, "python-run", boundedLedger("sha256:" + digest + " pass-through:" + pass + " path:" + rel + (sandbox ? " sandbox:" + sandbox : "") + " -> " + status, "sha256:" + digest));
+    recordActivity(root, actor, "python-run", pythonRunLedgerSummary(digest, pass, rel, sandbox, status));
     return result;
   } catch (e) {
     const msg = errorReason(e);
-    recordActivity(root, actor, "python-run", "Refused python " + oneLine(rel) + (digest ? " sha256:" + digest : "") + ": " + msg);
+    recordActivity(root, actor, "python-run", pythonRunRefusedLedgerSummary(rel, digest, msg));
     throw e;
   }
+}
+
+// The ONE writers for a Python run's activity lines, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The completed shape rides boundedLedger with the
+// content hash as the must-keep piece, exactly as runPython
+// wrote it inline before these writers existed.
+export function pythonRunLedgerSummary(digest: string, pass: string, rel: string, sandbox: string | null, status: string): string {
+  return boundedLedger("sha256:" + digest + " pass-through:" + pass + " path:" + rel + (sandbox ? " sandbox:" + sandbox : "") + " -> " + status, "sha256:" + digest);
+}
+export function pythonRunRefusedLedgerSummary(rel: string, digest: string | null, msg: string): string {
+  return "Refused python " + oneLine(rel) + (digest ? " sha256:" + digest : "") + ": " + msg;
+}
+
+// The Python-run scorecard (2026-11-18, the measured-proof
+// series): every Python run ledgers one "python-run" line
+// carrying the script's hash, its pass-through env names,
+// its path, an optional sandbox name, and the outcome - but
+// no daily surface ever counted the runs, so a runner that
+// started failing, or a first pass-through of a scrubbed env
+// name, was invisible in aggregate. This text folds those
+// lines to counts only: the total runs, counts per fixed
+// outcome bucket (ok / failed / refused / other), the
+// sandbox run count, and the pass-through run count parsed
+// from the fixed summaries. A summary matching no fixed
+// shape counts as a run under "other" and contributes no
+// sandbox or pass-through count, and no hash, path, sandbox
+// name, pass-through name, or verbatim summary is ever
+// printed. The verdict is attention when any run failed,
+// was refused, or is unparseable, else clear. No stamp and
+// no actor enters the text, so a day no run goes wrong is
+// byte-identical and P3-silent, and the first bad run is
+// the news. A pure read: it creates nothing, spends no
+// model call, and runs nothing - the ledger and the runner
+// seam are untouched, and running Python stays the
+// runner's job.
+const PYTHON_RUN_OUTCOMES = ["ok", "failed", "refused", "other"] as const;
+export function parsePythonRunSummary(summary: string): { outcome: string; sandbox: boolean; passThrough: boolean; timedOut: boolean } | null {
+  if (/^Refused python /.test(summary)) return { outcome: "refused", sandbox: false, passThrough: false, timedOut: false };
+  const m = /^sha256:[0-9a-f]+ pass-through:(\S+) path:\S+( sandbox:\S+)? -> (.+)$/.exec(summary);
+  if (!m) return null;
+  const status = m[3];
+  return {
+    outcome: status === "ok" ? "ok" : "failed",
+    sandbox: !!m[2],
+    passThrough: m[1] !== "none",
+    timedOut: status.includes("(timed out)"),
+  };
+}
+export function pythonRunScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "python-run" });
+  const outcomes: Record<string, number> = {};
+  let sandboxRuns = 0;
+  let passThroughRuns = 0;
+  let timedOutRuns = 0;
+  for (const line of lines) {
+    const parsed = parsePythonRunSummary(line.summary);
+    const outcome = parsed ? parsed.outcome : "other";
+    outcomes[outcome] = (outcomes[outcome] ?? 0) + 1;
+    if (parsed) {
+      if (parsed.sandbox) sandboxRuns += 1;
+      if (parsed.passThrough) passThroughRuns += 1;
+      if (parsed.timedOut) timedOutRuns += 1;
+    }
+  }
+  const outcomeText = (PYTHON_RUN_OUTCOMES as readonly string[]).filter(o => outcomes[o]).map(o => o + " " + String(outcomes[o])).join(", ") || "none";
+  const bad = (outcomes["failed"] ?? 0) + (outcomes["refused"] ?? 0) + (outcomes["other"] ?? 0);
+  const out: string[] = [];
+  out.push("Python runs: " + (bad > 0 ? "attention" : "clear"));
+  out.push("Runs: " + String(lines.length));
+  out.push("By outcome: " + outcomeText);
+  out.push("Sandbox runs: " + String(sandboxRuns));
+  out.push("Pass-through runs: " + String(passThroughRuns));
+  out.push("Timed-out runs: " + String(timedOutRuns));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never runs a script or prints a hash, path, sandbox name, pass-through name, or summary; a new failed or refused run is the news");
+  return out.join("\n");
 }
 
 // ---- Sandbox manager -------------------------------------------------
