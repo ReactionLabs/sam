@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -349,6 +349,49 @@ export function processReplySources(root: string, input: { chatId: string; userM
     text = text + "\n\nSources:\n" + sources.map(s => "[" + s.n + "] " + s.descriptor).join("\n");
   }
   return { text, sources, registered, rejectedCount };
+}
+
+// The source-citation rejection scorecard (2026-11-18, the
+// measured-proof series): the citation pass above ledgers
+// every reply that tried to cite a number outside its run's
+// registered sources as a "source-citation-rejected" line,
+// in the one fixed shape processReplySources writes - the
+// rejected count and the registered count that reply was
+// offered. Self-work classifies the kind, but no daily
+// surface ever counted it, so a model that started
+// fabricating citations regularly was invisible until the
+// owner read a reply closely. This text folds the whole
+// ledger's rejection lines to counts only: the replies with
+// rejections, the summed rejected citations, and the summed
+// registered sources. A summary matching the fixed shape's
+// counts in neither place counts as a rejection and
+// contributes no counts, and is never printed. No stamp, no
+// chat id, no actor, no source descriptor, no verbatim
+// summary enters the text, so a day no reply fabricates a
+// citation is byte-identical and P3-silent, and the first
+// new fabricated citation is the news. A pure read: it
+// creates nothing, spends no model call, and retries
+// nothing - the ledger and the citation pass are untouched.
+export function parseSourceCitationRejection(summary: string): { rejected: number; registered: number } | null {
+  const m = /^Source citation rejected in chat [0-9a-f]+: the reply cited (\d+) source number\(s\) outside this run's registered sources \((\d+) registered\);/.exec(summary);
+  if (!m) return null;
+  return { rejected: Number(m[1]), registered: Number(m[2]) };
+}
+export function sourceCitationRejectionScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "source-citation-rejected" });
+  let rejected = 0;
+  let registered = 0;
+  for (const line of lines) {
+    const parsed = parseSourceCitationRejection(line.summary);
+    if (parsed) { rejected += parsed.rejected; registered += parsed.registered; }
+  }
+  const out: string[] = [];
+  out.push("Source citation rejections: " + (lines.length > 0 ? "attention" : "clear"));
+  out.push("Replies with rejections: " + String(lines.length));
+  out.push("Rejected citations: " + String(rejected));
+  out.push("Registered sources: " + String(registered));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a reply or prints a source; a new fabricated citation is the news");
+  return out.join("\n");
 }
 
 // ----------------------------------------------------------------
