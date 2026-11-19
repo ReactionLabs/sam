@@ -498,11 +498,81 @@ function persistCodeWrite(root: string, record: CodeWriteRecord, before: string,
     try { writeFileSync(fd, JSON.stringify({ path: rel, before, after, at: record.at }), "utf8"); }
     finally { closeSync(fd); }
   }
-  recordActivity(root, record.actor, "code-write", (record.created ? "Wrote " : "Edited ") + rel + " in the code root (+" + record.addedLines + "/-" + record.removedLines + " lines)");
+  recordActivity(root, record.actor, "code-write", codeWriteLedgerSummary(record.created, rel, record.addedLines, record.removedLines));
   // Verify-on-stop: the write enters the ledger as an unverified change;
   // only a fresh C2 build/test verdict can settle it.
   recordChange(root, { path: rel, replacementHash: record.afterHash, source: "code-write" });
   return ledgered;
+}
+
+// The ONE writer for a code write's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what persistCodeWrite
+// wrote inline before this writer existed: the verb (created
+// vs edited), the code-root-relative path, and the diff's
+// added/removed line counts. Both C1 writes and recorded
+// external (engine) changes ride persistCodeWrite, so this one
+// writer covers every code-write line.
+export function codeWriteLedgerSummary(created: boolean, rel: string, addedLines: number, removedLines: number): string {
+  return (created ? "Wrote " : "Edited ") + rel + " in the code root (+" + addedLines + "/-" + removedLines + " lines)";
+}
+
+// The code-write scorecard (2026-11-18, the measured-proof
+// series): every C1 write (and every recorded external change)
+// ledgers one "code-write" line carrying the verb, the path,
+// and the diff's line counts - but no daily surface ever
+// counted the writes, so the hands going silent, a shift from
+// edits to new files, or a churn spike (huge line counts on
+// few writes) was invisible in aggregate. This text folds
+// those lines to counts only: the total writes, counts per
+// fixed kind bucket (created / edited / other), the summed
+// added and removed lines, and the distinct-file count as a
+// NUMBER only. A summary matching no fixed shape counts as a
+// write under "other" and contributes no line or file count,
+// and no stamp, actor, path, or verbatim summary is ever
+// printed - paths are the code root's file names and do not
+// belong in a trending surface. The verdict is attention
+// when any line is unparseable, else clear. No stamp and no
+// actor enters the text, so a quiet day is byte-identical
+// and P3-silent, and a malformed line or a mix shift is the
+// news. A pure read: it creates nothing, spends no model
+// call, and writes nothing - the ledger and the write seam
+// are untouched, and writing stays the C1 hands' job.
+const CODE_WRITE_KINDS = ["created", "edited", "other"] as const;
+export function parseCodeWriteSummary(summary: string): { kind: string; path: string; addedLines: number; removedLines: number } | null {
+  const m = /^(Wrote|Edited) (\S+) in the code root \(\+(\d+)\/-(\d+) lines\)$/.exec(summary);
+  if (!m) return null;
+  return { kind: m[1] === "Wrote" ? "created" : "edited", path: m[2], addedLines: Number(m[3]), removedLines: Number(m[4]) };
+}
+export function codeWriteScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "code-write" });
+  const kinds: Record<string, number> = {};
+  const files = new Set<string>();
+  let added = 0;
+  let removed = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseCodeWriteSummary(line.summary);
+    if (!parsed) {
+      unparseable += 1;
+      kinds["other"] = (kinds["other"] ?? 0) + 1;
+      continue;
+    }
+    kinds[parsed.kind] = (kinds[parsed.kind] ?? 0) + 1;
+    files.add(parsed.path);
+    added += parsed.addedLines;
+    removed += parsed.removedLines;
+  }
+  const kindText = (CODE_WRITE_KINDS as readonly string[]).filter(k => kinds[k]).map(k => k + " " + String(kinds[k])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Code writes: " + (unparseable > 0 ? "attention" : "clear"));
+  out.push("Writes: " + String(lines.length));
+  out.push("By kind: " + kindText);
+  out.push("Lines added: " + String(added));
+  out.push("Lines removed: " + String(removed));
+  out.push("Distinct files: " + String(files.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never writes or prints a path or summary; a malformed line, a mix shift, or a churn spike is the news");
+  return out.join("\n");
 }
 
 /** Record a change an EXTERNAL writer already made in the code root
