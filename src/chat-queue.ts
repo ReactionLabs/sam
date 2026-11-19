@@ -468,6 +468,76 @@ export interface ChatResetResult { wasActive: boolean; ranForMs: number | null; 
  *  line lands in the ledger. Nothing is deleted; the transcript
  *  is preserved. A press with nothing running and nothing
  *  queued is a quiet no-op. */
+// The ONE writer for the turn-reset ledger line: the reset
+// seam ledgers exactly this shape for each press that stopped
+// a turn or cancelled queued work, so the writer and the
+// scorecard's parser below can never drift. The chat is named
+// by its 8-char prefix only, exactly as the seam has always
+// written it; the duration segment appears only when a claim
+// existed (a press that only cancelled queued work carries
+// none).
+export function turnResetLedgerSummary(chatPrefix: string, ranForMs: number | null, abortedRequests: number, cancelledQueued: number): string {
+  return "Owner reset chat " + chatPrefix + ": turn stopped" + (ranForMs !== null ? " after " + formatRunDuration(ranForMs) : "") + ", claim released on the press, " + abortedRequests + " in-flight request(s) aborted, " + cancelledQueued + " queued message(s) cancelled; nothing was deleted";
+}
+
+// The turn-reset scorecard (2026-11-19, the measured-proof
+// series): owner Reset presses have ledgered as "turn-reset"
+// lines in the one fixed shape above since the Reset button
+// landed, but the class was never folded, so how often the
+// owner has had to stop a turn by hand, how much in-flight
+// work those presses aborted, and how many queued follow-ups
+// they cancelled was invisible in aggregate. Every reset line
+// is by construction an owner intervention - a turn the owner
+// chose to kill rather than wait out - so the verdict is
+// attention when any line exists or any line is unparseable,
+// else clear. This text folds the whole ledger's turn-reset
+// lines to counts only, on ONE line: the parsed reset count,
+// the summed in-flight requests aborted, the summed queued
+// messages cancelled, the summed stopped seconds (only lines
+// carrying a duration contribute), the distinct-chat count,
+// and the total. The distinct count rides each line's chat
+// prefix internally and surfaces as a number only: no stamp,
+// no actor, no chat id, and no verbatim summary enters the
+// text. A summary matching no fixed shape counts toward the
+// total and the unparseable count only, and is never printed.
+// A pure read: it creates nothing, spends no model call, and
+// resets nothing - the ledger and the reset seam are
+// untouched. (The written line is short and fixed-shape, far
+// under the ledger's 300-char summary cap, so no capped shape
+// exists for this class.)
+export function parseTurnResetSummary(summary: string): { chat: string; stoppedSeconds: number | null; aborted: number; cancelled: number } | null {
+  const m = /^Owner reset chat ([0-9a-f]{8}): turn stopped(?: after (\d+)s| after (\d+)m (\d{2})s)?, claim released on the press, (\d+) in-flight request\(s\) aborted, (\d+) queued message\(s\) cancelled; nothing was deleted$/.exec(summary);
+  if (!m) return null;
+  const stoppedSeconds = m[2] !== undefined ? Number(m[2]) : m[3] !== undefined ? Number(m[3]) * 60 + Number(m[4]) : null;
+  return { chat: m[1], stoppedSeconds, aborted: Number(m[5]), cancelled: Number(m[6]) };
+}
+export function turnResetScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-reset" });
+  const chats = new Set<string>();
+  let aborted = 0;
+  let cancelled = 0;
+  let stoppedSeconds = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseTurnResetSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    chats.add(parsed.chat);
+    aborted += parsed.aborted;
+    cancelled += parsed.cancelled;
+    if (parsed.stoppedSeconds !== null) stoppedSeconds += parsed.stoppedSeconds;
+  }
+  const parts: string[] = [];
+  parts.push("Turn resets: " + (lines.length > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " resets");
+  parts.push(String(aborted) + " in-flight aborted");
+  parts.push(String(cancelled) + " queued cancelled");
+  parts.push(String(stoppedSeconds) + "s total stopped runtime");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 export function resetChatTurn(root: string, chatId: string): ChatResetResult {
   return chatQueueTouch(root, "write", () => resetChatTurnInner(root, chatId));
 }
@@ -491,7 +561,7 @@ function resetChatTurnInner(root: string, chatId: string): ChatResetResult {
     const store = new ChatStore(root);
     try { store.add(chatId, "assistant", TURN_RESET_MESSAGE); }
     finally { store.close(); }
-    ledger(root, actor, "turn-reset", "Owner reset chat " + chatId.slice(0, 8) + ": turn stopped" + (ranForMs !== null ? " after " + formatRunDuration(ranForMs) : "") + ", claim released on the press, " + abortedRequests + " in-flight request(s) aborted, " + cancelledQueued + " queued message(s) cancelled; nothing was deleted");
+    ledger(root, actor, "turn-reset", turnResetLedgerSummary(chatId.slice(0, 8), ranForMs, abortedRequests, cancelledQueued));
   }
   return { wasActive, ranForMs, cancelledQueued, abortedRequests };
 }
