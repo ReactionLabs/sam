@@ -78,8 +78,86 @@ export function guardrailFallbackAnswer(executed: string[], skipped: string[], c
 /** A single turn whose spend is actually large earns one plain
  *  activity line (the owner's cost visibility), at this threshold. */
 export const LARGE_TURN_CALLS = 40;
-export function largeTurnSummary(executed: string[], roundsUsed: number): string {
+// The ONE writer for the turn-cost ledger line: both chat
+// loops' large-turn seams ledger exactly this shape (through
+// largeTurnSummary below) when a ceiling-mode owner turn
+// crosses LARGE_TURN_CALLS, so the writer and the scorecard's
+// parser below can never drift.
+export function largeTurnLedgerSummary(executed: string[], roundsUsed: number): string {
   return "Large owner turn: " + executed.length + " tool calls over " + roundsUsed + " rounds in one answer (" + (executed.join(", ") || "none") + ")";
+}
+export function largeTurnSummary(executed: string[], roundsUsed: number): string {
+  return largeTurnLedgerSummary(executed, roundsUsed);
+}
+// The turn-cost scorecard (2026-11-19, the measured-proof
+// series): large owner turns have ledgered as "turn-cost"
+// lines in the one fixed shape above since the owner-budget
+// ruling landed, but the class was never folded, so how many
+// turns ran large, how many calls and rounds they burned in
+// aggregate, and what the largest single turn cost were
+// invisible in aggregate - the tool-budget scorecard counts
+// turns that END on budget, never turns that simply ran big
+// and finished. Every turn-cost line is by construction one
+// of the owner's most expensive turns, so the verdict is
+// attention when any line exists or any line is unparseable,
+// else clear. This text folds the whole ledger's turn-cost
+// lines to counts only, on ONE line: the parsed large-turn
+// count, the summed tool calls and rounds (both ride the
+// line's header, which always survives), the largest turn's
+// call count, the distinct-tool count, and the total. Tool
+// names ride each line's list internally and surface as a
+// count only: no stamp, no actor, no tool name, and no
+// verbatim summary enters the text. The stored shapes are
+// TWO: the writer's full shape, and the ledger's 300-char
+// capped shape (every live line is capped - a 40+ call list
+// never fits - cut mid-name with no closing paren); a capped
+// line's header still parses exactly, and its list
+// contributes only its complete entries (each name followed
+// by a separator), the loop-check precedent - the trailing
+// fragment may be a partial name and is never counted. A
+// summary matching neither shape counts toward the total
+// and the unparseable count only, and is never printed. A
+// pure read: it creates nothing, spends no model call, and
+// retries nothing - the ledger and the large-turn seams are
+// untouched.
+export function parseLargeTurnSummary(summary: string): { calls: number; rounds: number; tools: string[]; complete: boolean } | null {
+  const full = /^Large owner turn: (\d+) tool calls over (\d+) rounds in one answer \(([^)]*)\)$/.exec(summary);
+  if (full) {
+    const list = full[3];
+    return { calls: Number(full[1]), rounds: Number(full[2]), tools: list === "none" ? [] : list.split(", "), complete: true };
+  }
+  const capped = /^Large owner turn: (\d+) tool calls over (\d+) rounds in one answer \((.+)$/.exec(summary);
+  if (capped) {
+    const segments = capped[3].split(", ");
+    return { calls: Number(capped[1]), rounds: Number(capped[2]), tools: segments.slice(0, -1), complete: false };
+  }
+  return null;
+}
+export function largeTurnScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-cost" });
+  const tools = new Set<string>();
+  let calls = 0;
+  let rounds = 0;
+  let largest = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseLargeTurnSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    calls += parsed.calls;
+    rounds += parsed.rounds;
+    if (parsed.calls > largest) largest = parsed.calls;
+    for (const tool of parsed.tools) tools.add(tool);
+  }
+  const parts: string[] = [];
+  parts.push("Turn costs: " + (lines.length > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " large turns");
+  parts.push(String(calls) + " tool calls");
+  parts.push(String(rounds) + " rounds");
+  parts.push("largest " + String(largest) + " calls");
+  parts.push(String(tools.size) + " distinct tools");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 export function repeatLedgerSummary(repeats: string[]): string {
   return "Duplicate tool calls suppressed in one turn: " + repeats.length + " (" + repeats.join(", ") + ") - identical repeats returned the earlier result instead of re-executing";
