@@ -21,7 +21,7 @@ import { openLoop } from "./loops.js";
 import { archiveManagedChat, branchManagedChat, createManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { organizeChats } from "./chat-organize.js";
 import { searchSkillRegistry } from "./skill-registry.js";
-import { recordSkillUse } from "./skill-use.js";
+import { recordSkillUse, skillUseLedgerSummary } from "./skill-use.js";
 import { CITATION_GUIDANCE, recordSearchHits } from "./chat-citations.js";
 import { annotateToolResult, peekRunSources } from "./source-citations.js";
 import { artifactPath, createArtifact, getArtifact, listArtifactVersions, listArtifacts, updateArtifact } from "./artifacts.js";
@@ -726,7 +726,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
         // (skill-use-failed); the success activity line rides only
         // a record that actually landed, so a dead ledger is never
         // dressed as a success on the rail.
-        if(recordSkillUse(root,{actor,chatId:chatId??null,skill:read.name}))recordActivity(root,actor,"skill-use","Used skill "+read.name+(chatId?" in chat "+chatId.slice(0,8):""));
+        if(recordSkillUse(root,{actor,chatId:chatId??null,skill:read.name}))recordActivity(root,actor,"skill-use",skillUseLedgerSummary(read.name,chatId??null));
         return read;}
       catch(e){return {error:personalToolFailureError("Skill read failed",e)};}
     }

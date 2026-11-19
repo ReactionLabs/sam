@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { recordActivity, readActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Skill-use ledger (Dip, 2026-11-10: "we need to be able to see what
@@ -137,4 +137,68 @@ export function lastSkillByChat(root: string): Map<string, { skill: string; at: 
     if (entry.chatId) map.set(entry.chatId, { skill: entry.skill, at: entry.at });
   }
   return map;
+}
+
+// The ONE writer for a skill use's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what the own-tool
+// dispatch wrote inline before this writer existed: the
+// skill the model read, and the chat prefix when the turn
+// carries one.
+export function skillUseLedgerSummary(skill: string, chatId: string | null): string {
+  return "Used skill " + skill + (chatId ? " in chat " + chatId.slice(0, 8) : "");
+}
+
+// The skill-use scorecard (2026-11-18, the measured-proof
+// series): every sam_read_skill the model makes ledgers one
+// "skill-use" activity line carrying the skill's name and
+// the chat prefix - but no daily surface ever counted the
+// uses, so skill auto-selection going silent, a one-skill
+// habit, or a first use of a newly installed skill was
+// invisible in aggregate. (The curator's usage pass reads
+// the separate skill-use.jsonl ledger for staleness; this
+// folds the activity class.) The text folds counts only:
+// the total uses, the distinct-skill count and the
+// distinct-chat count as NUMBERS only, and the no-chat use
+// count parsed from the fixed summaries. A summary matching
+// no fixed shape counts as a use and contributes no skill
+// or chat count, and no stamp, actor, skill name, chat id,
+// or verbatim summary is ever printed - a skill name is a
+// library identifier and a chat prefix identifies a
+// conversation, and neither belongs in a trending surface.
+// The verdict is attention when any line is unparseable,
+// else clear. No stamp and no actor enters the text, so a
+// quiet day is byte-identical and P3-silent, and a malformed
+// line or a mix shift is the news. A pure read: it creates
+// nothing, spends no model call, and reads no skill - the
+// ledger and the use seam are untouched, and recording a
+// use stays recordSkillUse's job.
+export function parseSkillUseSummary(summary: string): { skill: string; chat: string | null } | null {
+  const m = /^Used skill (\S+)(?: in chat (\S+))?$/.exec(summary);
+  if (!m) return null;
+  return { skill: m[1], chat: m[2] ?? null };
+}
+export function skillUseScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-use" });
+  const skills = new Set<string>();
+  const chats = new Set<string>();
+  let noChat = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseSkillUseSummary(line.summary);
+    if (!parsed) {
+      unparseable += 1;
+      continue;
+    }
+    skills.add(parsed.skill);
+    if (parsed.chat) chats.add(parsed.chat); else noChat += 1;
+  }
+  const out: string[] = [];
+  out.push("Skill uses: " + (unparseable > 0 ? "attention" : "clear"));
+  out.push("Uses: " + String(lines.length));
+  out.push("Distinct skills: " + String(skills.size));
+  out.push("Distinct chats: " + String(chats.size));
+  out.push("Uses with no chat: " + String(noChat));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never reads a skill, never prints a skill name or a chat id; a malformed line, a mix shift, or auto-selection going silent is the news");
+  return out.join("\n");
 }
