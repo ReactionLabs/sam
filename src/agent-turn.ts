@@ -6,7 +6,7 @@ import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { PreferenceStore, extractPreferences, lawPromptBlock } from "./preferences.js";
 import { detectCorrection, tryRouteCorrection, withoutCorrectedRules } from "./corrections.js";
 import { readDashboardConfig } from "./dashboard.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { chatTurnBudget, type ChatSurface, type SteerProvider, type TurnRoute } from "./budgets.js";
 import { readProviderKey } from "./providers.js";
 import { failoverEligible, turnRoutes, type TurnToolGuard } from "./failover.js";
@@ -213,7 +213,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     if(note.length>20000)note=note.slice(0,19900)+"\n[truncated]";
     const db=new ChatStore(root);
     try{db.add(chatId,"user",content,source);db.add(chatId,"assistant",note);}finally{db.close();}
-    recordActivity(root,profileName,"turn","Relay answered in chat "+chatId.slice(0,8));
+    recordActivity(root,profileName,"turn",relayTurnLedgerSummary(chatId));
     return note;
   }
   // Primary route, then the profile's configured fallbacks. With no
@@ -624,6 +624,72 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // automatic acknowledgement.
   if(reactable&&userMessageId){try{const db=new ChatStore(root);try{const msg=db.messages(chatId).find(m=>m.id===userMessageId);if(msg&&msg.reaction==="\uD83D\uDC40")db.setReaction(chatId,userMessageId,"\u2764\uFE0F");}finally{db.close();}}catch{/* reactions never break a turn */}}
   recordSessionTurn(root,{chatId,route,tokens:turnTokens});
-  recordActivity(root,profileName,"turn","Answered in chat "+chatId.slice(0,8)+(resuming?" (resumed from partial)":""));
+  recordActivity(root,profileName,"turn",turnLedgerSummary(chatId,!!resuming));
   return finalText;
+}
+
+// --- The ONE writers for the turn ledger lines
+// (2026-11-19, the measured-proof series): both seams above
+// ledger exactly these shapes, so the scorecard's parser
+// below reads what the seams have always written. A turn
+// line carries only the chat's 8-char prefix - never the
+// person's message, never the reply.
+export function turnLedgerSummary(chatId: string, resumed: boolean): string {
+  return "Answered in chat " + chatId.slice(0, 8) + (resumed ? " (resumed from partial)" : "");
+}
+export function relayTurnLedgerSummary(chatId: string): string {
+  return "Relay answered in chat " + chatId.slice(0, 8);
+}
+
+// The turn scorecard (2026-11-19, the measured-proof
+// series): the success class of the turn ledger - every
+// completed chat turn - was folded nowhere, while its
+// failure sibling (turn-failed) has been measured since
+// 2026-11-10, so how many turns SAM completed, through
+// which route, how many were resumes from a partial, and
+// across how many chats was invisible in aggregate. The
+// verdict is attention only on an unparseable line, else
+// clear: a completed turn is the system working, and a
+// resumed turn is the partial-recovery seam working,
+// never a defect. This text folds the class to counts
+// only, on ONE line: the parsed turn count split answered
+// / relay, the resumed count, the distinct-chat count
+// from the lines' chat prefixes as a number only, and the
+// total. No stamp, no actor, no chat id, and no verbatim
+// summary enters the text. A summary matching no fixed
+// shape counts toward the total and the unparseable count
+// only, and is never printed. A pure read: it creates
+// nothing, spends no model call, and runs no turn - the
+// ledger and the turn seams are untouched.
+export type TurnRouteBucket = "answered" | "relay";
+export function parseTurnSummary(summary: string): { route: TurnRouteBucket; chat: string; resumed: boolean } | null {
+  const relay = /^Relay answered in chat (\S+)$/.exec(summary);
+  if (relay) return { route: "relay", chat: relay[1], resumed: false };
+  const answered = /^Answered in chat (\S+?)( \(resumed from partial\))?$/.exec(summary);
+  if (answered) return { route: "answered", chat: answered[1], resumed: Boolean(answered[2]) };
+  return null;
+}
+export function turnScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn" });
+  const routes: Record<TurnRouteBucket, number> = { answered: 0, relay: 0 };
+  const chats = new Set<string>();
+  let parsed = 0;
+  let resumed = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const p = parseTurnSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1;
+    routes[p.route] += 1;
+    if (p.resumed) resumed += 1;
+    chats.add(p.chat);
+  }
+  const parts: string[] = [];
+  parts.push("Turns: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(parsed) + " turns (answered " + String(routes.answered) + ", relay " + String(routes.relay) + ")");
+  parts.push(String(resumed) + " resumed");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
