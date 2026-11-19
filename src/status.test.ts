@@ -15,6 +15,13 @@ function scratch(): string { return mkdtempSync(join(tmpdir(), "sam-status-")); 
 function withoutAt(payload: Record<string, unknown>): Record<string, unknown> {
   const copy = { ...payload };
   delete copy.at;
+  // missionStatus is the one surface-supplied field: the dashboard
+  // process passes its cached real doctor report (the doctor light
+  // is the actual diagnosis there), the CLI overview passes none
+  // and its doctor light reads amber - not run here. Like `at`,
+  // it legitimately differs between the two doors; every other
+  // field must match exactly.
+  delete copy.missionStatus;
   return copy;
 }
 
@@ -30,6 +37,24 @@ test("pendingActions is the pending slice of the same actions list", async () =>
     assert.equal(payload.pendingActions[0].id, kept.id);
     assert.deepEqual(payload.pendingActions, payload.actions.filter(a => a.status === "pending"));
     assert.ok(Array.isArray(payload.skills));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("status payload carries the Claudia missionStatus derived from its own fields", () => {
+  const root = scratch();
+  try {
+    const payload = buildStatusPayload(root);
+    assert.ok(payload.missionStatus, "missionStatus present");
+    assert.equal(payload.missionStatus.headline, payload.missionStatus.allGreen ? "All systems groovy" : payload.missionStatus.headline);
+    assert.ok(payload.missionStatus.lights.length >= 8, "one light per system, connectors folded when none exist");
+    // A bare install has no model configured and no doctor report
+    // on this surface: neither light may read green (the model is
+    // red, unconfigured; doctor is amber, not run here).
+    assert.equal(payload.missionStatus.lights.find(l => l.id === "model")?.level, "red");
+    assert.equal(payload.missionStatus.lights.find(l => l.id === "doctor")?.level, "amber");
+    assert.equal(payload.missionStatus.allGreen, false);
+    const withDoctor = buildStatusPayload(root, { doctor: { checks: [{ id: "socket-permissions", status: "fail" }] } });
+    assert.equal(withDoctor.missionStatus.lights.find(l => l.id === "doctor")?.level, "red");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

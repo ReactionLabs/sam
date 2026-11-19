@@ -202,6 +202,31 @@ test("dashboard page: Mission Control skin - Command default, groovy themes opt-
   assert.doesNotMatch(dashboardHtml,/Boomer AI/);
 });
 
+test("dashboard page: Claudia Mission Status wall - futuristic greeter, real lights, credit line (Dip ruling 2026-11-19)",()=>{
+  // The wall is the Overview pane's first block: Claudia's own
+  // original futuristic art (a geometric symbol drawn for this
+  // dashboard, no likeness and no Austin Powers anywhere), her
+  // greeting, the headline element, the lights container the
+  // renderer fills from the status payload's missionStatus, and
+  // the required credit line in the footer.
+  assert.match(dashboardHtml,/id="missionWall"/);
+  assert.match(dashboardHtml,/id="i-claudia"/);
+  assert.match(dashboardHtml,/Hi, I am Claudia\. Here is how Sam is doing right now\./);
+  assert.match(dashboardHtml,/id="mwHeadline"/);
+  assert.match(dashboardHtml,/id="mwLights"/);
+  assert.match(dashboardHtml,/function renderMission\(d\)/);
+  assert.match(dashboardHtml,/renderMission\(d\)/);
+  assert.match(dashboardHtml,/Claudia, an open character by anabology/);
+  assert.match(dashboardHtml,/\.missionwall\{/);
+  assert.match(dashboardHtml,/\.mlight\.green \.dot/);
+  assert.match(dashboardHtml,/\.mlight\.amber \.dot/);
+  assert.match(dashboardHtml,/\.mlight\.red \.dot/);
+  assert.doesNotMatch(dashboardHtml,/Austin Powers/);
+  // The wall renders only what the payload carries: the renderer
+  // reads missionStatus and never invents a light client-side.
+  assert.match(dashboardHtml,/d\.missionStatus/);
+});
+
 test("dashboard page: chat trust wiring - queue state decorates the send's bubble, failed bubbles carry Resend",()=>{
   // Item 1: the thread render decorates a message with its queue
   // state instead of rendering the queue item as a second bubble,

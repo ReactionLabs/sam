@@ -58,6 +58,7 @@ import { readEvalBattery } from "./eval-battery.js";
 import { answerJudgeSummary, type AnswerJudgeSummary } from "./answer-judge.js";
 import { vaultStatus } from "./vault.js";
 import { listBackups } from "./backup.js";
+import { missionStatusFromPayload, type MissionDoctorInput } from "./mission-status.js";
 import { readSelfWork, selfWorkFixViews } from "./self-work.js";
 
 // One status payload (fix-list item 3). The dashboard route /api/status
@@ -78,6 +79,11 @@ const EMPTY_DOOR_GUARD: DoorGuardStats = { probes: 0, blockedMessages: 0, rateLi
 export const dashboardBuildId = createHash("sha256").update(dashboardHtml).digest("hex").slice(0, 12);
 
 export interface StatusBuildOptions {
+  /** The live dashboard process passes a recent doctor report so
+   *  the Mission Status wall's doctor light is the real diagnosis;
+   *  a surface with no report (the CLI overview) leaves the light
+   *  amber - not run here - instead of inventing a green. */
+  doctor?: MissionDoctorInput | null;
   activity?: { actor?: string; kind?: string };
   activityLimit?: number;
   /** The live dashboard process passes its abuse-guard counters.
@@ -122,7 +128,7 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
   const jobs = heartbeatJobs(root);
   const people = minis(root);
   const activityLimit = opts.activityLimit ?? 30;
-  return {
+  const payload = {
     ok: true,
     buildId: dashboardBuildId,
     at: new Date().toISOString(),
@@ -238,4 +244,11 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
     loops: { open: openLoopCount(root), due: dueLoops(root).length },
     deliveries: (() => { const recent = readDeliveryLedger(root, 500); return { delivered: recent.filter(e => e.deliver).length, suppressed: recent.filter(e => !e.deliver).length }; })(),
   };
+  // The Claudia Mission Status wall (Dip ruling 2026-11-19):
+  // derived in mission-status.ts from this same payload, so the
+  // wall can never disagree with the panels below it. The doctor
+  // light rides opts.doctor - the dashboard passes its cached
+  // real report, the CLI overview passes none and reads amber.
+  const missionStatus = missionStatusFromPayload(payload as Parameters<typeof missionStatusFromPayload>[0], { doctor: opts.doctor ?? null });
+  return { ...payload, missionStatus };
 }

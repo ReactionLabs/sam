@@ -26,6 +26,7 @@ import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, merg
 import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
 import { grooveEnabled, makeTheme } from "./theme.js";
 import { errorReason } from "./error-reason.js";
+import { runDoctor, type DoctorReport } from "./doctor.js";
 
 export { readDashboardConfig } from "./dashboard-config.js";
 export type { DashboardConfig } from "./dashboard-config.js";
@@ -116,6 +117,17 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
   const token=randomBytes(16).toString("hex");
   const doorLimiter=new RateLimiter(30,3600000,2000);
   const doorGuard=new DoorAbuseGuard();
+  // The Mission Status wall's doctor light is the real diagnosis
+  // (Claudia ruling 2026-11-19), cached for a minute: the page
+  // polls status every 10 seconds and doctor integrity-checks
+  // every store, so an uncached run per poll would be waste; a
+  // failed run leaves the light amber (no report), never green.
+  let doctorCache:{at:number;report:DoctorReport|null}={at:0,report:null};
+  const doctorForStatus=async():Promise<DoctorReport|null>=>{
+    if(Date.now()-doctorCache.at<60000)return doctorCache.report;
+    try{const report=await runDoctor(workspace,{env:process.env});doctorCache={at:Date.now(),report};return report;}
+    catch{doctorCache={at:Date.now(),report:null};return null;}
+  };
   const server:Server=createServer(async(req,res)=>{
     res.setHeader("Cache-Control","no-store");
     res.setHeader("X-Content-Type-Options","nosniff");
@@ -435,8 +447,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       const statusParams=new URLSearchParams(statusParts[1]??"");
       const activityFilter={actor:statusParams.get("actor")||undefined,kind:statusParams.get("kind")||undefined};
       try{
+        const doctor=await doctorForStatus();
         res.setHeader("Content-Type","application/json");
-        res.end(JSON.stringify(buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats()})));
+        res.end(JSON.stringify(buildStatusPayload(workspace,{activity:activityFilter,doorGuard:doorGuard.stats(),doctor:doctor?{checks:doctor.checks.map(c=>({id:c.id,status:c.status}))}:null})));
       }catch{res.writeHead(500);res.end(JSON.stringify({error:"Dashboard data unavailable"}));}
       return;
     }

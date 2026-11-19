@@ -71,6 +71,8 @@ import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { requestDaemon, serveDaemon } from "./daemon.js";
 import { doctorScorecardText, runDoctor } from "./doctor.js";
+import { buildStatusPayload } from "./status.js";
+import { missionStatusText } from "./mission-status.js";
 import { MemoryStore, type MemoryKind } from "./memory.js";
 import { recallMemory } from "./memory-recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
@@ -1123,6 +1125,12 @@ doctorCmd.command("run",{isDefault:true}).description("Diagnose stores, the daem
 doctorCmd.command("scorecard").description("The diagnosis as plain text with no clock reading - verdict, per-status counts, and one id: status line per check (never evidence, a fix text, a version, a host, a mode, or a reason), the trending surface a daily script job P3-diffs, so a held install stays silent and a flipped check is the news (this is the sam-doctor script job's stdout; it runs the diagnosis with NO fix requested and spends no model call - the model check is a TCP connect that sends no request and never uses the key; `sam doctor --fix` stays the operator's act)").action(async()=>{
     const report=await runDoctor(resolve(program.opts().workspace),{env:process.env});
     output(doctorScorecardText(report));
+  });
+mission.command("status").description("The Claudia Mission Status wall as plain text with no clock reading - the headline (All systems groovy only when every light is green), the light counts, and one level, name, and plain sentence per system (model, memory, vault, each connector, backups, Telegram, approvals waiting, doctor, verify), the trending surface a daily script job P3-diffs, so a held install stays silent and a flipped light is the news (this is the sam-mission script job's stdout; a pure read over the status payload plus a real doctor run with NO fix requested and no model call spent - the doctor model check is a TCP connect that sends no request; exits 0 always, the verdict lives in the text)").action(async()=>{
+    const root=resolve(program.opts().workspace);
+    const report=await runDoctor(root,{env:process.env});
+    const payload=buildStatusPayload(root,{doctor:{checks:report.checks.map(c=>({id:c.id,status:c.status}))}});
+    output(missionStatusText(payload.missionStatus));
   });
 program.command("status").action(()=>{
   const db=store(); const mem=new MemoryStore(dbPath()); const reg=new OperativeRegistry(dbPath());
