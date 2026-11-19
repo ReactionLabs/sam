@@ -31,7 +31,7 @@ import { join, resolve, sep } from "node:path";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import {
   ROLE_TOOLS, currentSpawnPool, listSubagents, ownerFold, profileToolNames,
   smallSpawnPool, spawnPoolRemaining, startBackgroundSubagent, updateSubagent,
@@ -404,7 +404,7 @@ export function planJob(root: string, input: PlanInput): { job: OrchestrationJob
     if (parent) lane.parentLaneId = idByName.get(parent) ?? null;
     putLane(root, lane);
   }
-  recordActivity(root, profile, "orchestration-planned", "Job " + job.id.slice(0, 8) + ": " + lanes.length + " lane(s) planned (" + lanes.map(l => l.name).join(", ") + ")");
+  recordActivity(root, profile, "orchestration-planned", orchestrationPlannedLedgerSummary(job.id, lanes.map(l => l.name)));
   return { job, lanes };
 }
 
@@ -435,7 +435,7 @@ export function openWorkerLane(root: string, coordinatorLaneId: string, spec: La
     budget: laneBudget(spec), createdAt: now, updatedAt: now,
   };
   putLane(root, lane);
-  recordActivity(root, job.profile, "orchestration-hired", "Lane " + lane.name + " opened under coordinator " + parent.name + " at depth " + lane.depth);
+  recordActivity(root, job.profile, "orchestration-hired", orchestrationHiredLedgerSummary(lane.name, parent.name, lane.depth));
   return lane;
 }
 
@@ -600,7 +600,7 @@ async function runLane(root: string, job: OrchestrationJob, lane: Lane, lanes: L
       if (verdict.verdict === "verified") {
         const done = updateLane(root, lane.id, { status: "done", result: outcome, verdict: verdict.verdict, verdictReasons: verdict.reasons, blocker: null });
         if (done) Object.assign(lane, done);
-        recordActivity(root, job.profile, "orchestration-lane-done", "Lane " + lane.name + " verified for job " + job.id.slice(0, 8) + " (attempt " + lane.attempts + ")");
+        recordActivity(root, job.profile, "orchestration-lane-done", orchestrationLaneDoneLedgerSummary(lane.name, job.id, lane.attempts));
         return;
       }
       failure = "Coordinator verification " + verdict.verdict + ": " + verdict.reasons;
@@ -619,12 +619,12 @@ async function runLane(root: string, job: OrchestrationJob, lane: Lane, lanes: L
       retireWorker(root, lane);
       updateLane(root, lane.id, { status: "replaced", workerId: null });
       lane.workerId = null;
-      recordActivity(root, job.profile, "orchestration-lane-replaced", "Lane " + lane.name + " worker retired and replaced in job " + job.id.slice(0, 8) + ": " + (failure ?? "failed").slice(0, 160));
+      recordActivity(root, job.profile, "orchestration-lane-replaced", orchestrationLaneReplacedLedgerSummary(lane.name, job.id, failure));
       continue;
     }
     const failed = updateLane(root, lane.id, { status: "failed", blocker: (failure ?? "Worker failed").slice(0, 400) });
     if (failed) Object.assign(lane, failed);
-    recordActivity(root, job.profile, "orchestration-lane-failed", "Lane " + lane.name + " failed in job " + job.id.slice(0, 8) + ": " + (failure ?? "").slice(0, 160));
+    recordActivity(root, job.profile, "orchestration-lane-failed", orchestrationLaneFailedLedgerSummary(lane.name, job.id, failure));
     return;
   }
 }
@@ -685,7 +685,7 @@ export async function runJob(root: string, jobId: string): Promise<{ job: Orches
   job.consolidated = buildConsolidatedResult(job, fresh);
   job.finishedAt = new Date().toISOString();
   putJob(root, job);
-  recordActivity(root, job.profile, "orchestration-job-done", "Job " + job.id.slice(0, 8) + " closed " + job.status + ": " + fresh.filter(l => l.verdict === "verified").length + "/" + fresh.length + " lane(s) verified");
+  recordActivity(root, job.profile, "orchestration-job-done", orchestrationJobDoneLedgerSummary(job.id, job.status, fresh.filter(l => l.verdict === "verified").length, fresh.length));
   if (job.chatId && job.status !== "done") {
     const verified = fresh.filter(l => l.status === "done" && l.verdict === "verified").length;
     const evidence = fresh.filter(l => !(l.status === "done" && l.verdict === "verified"))
@@ -693,6 +693,139 @@ export async function runJob(root: string, jobId: string): Promise<{ job: Orches
     writeChatCallout(root, job.chatId, "Run " + job.status + " · " + verified + " of " + fresh.length + " lanes landed", evidence);
   }
   return { job, lanes: fresh };
+}
+
+// The ONE writers for the orchestration lifecycle lines, so
+// the scorecard's parsers below can never drift from the
+// seams they count. Each shape is byte-identical to what
+// its seam wrote inline before these writers existed: the
+// planned (job prefix, lane count, lane names), the hired
+// (lane name, coordinator name, depth), the lane-done (lane
+// name, job prefix, attempts), the lane-replaced and
+// lane-failed (lane name, job prefix, the failure capped at
+// 160), and the job-done (job prefix, the closed status,
+// verified of total lanes).
+export function orchestrationPlannedLedgerSummary(jobId: string, laneNames: string[]): string {
+  return "Job " + jobId.slice(0, 8) + ": " + laneNames.length + " lane(s) planned (" + laneNames.join(", ") + ")";
+}
+export function orchestrationHiredLedgerSummary(laneName: string, coordinatorName: string, depth: number): string {
+  return "Lane " + laneName + " opened under coordinator " + coordinatorName + " at depth " + depth;
+}
+export function orchestrationLaneDoneLedgerSummary(laneName: string, jobId: string, attempts: number): string {
+  return "Lane " + laneName + " verified for job " + jobId.slice(0, 8) + " (attempt " + attempts + ")";
+}
+export function orchestrationLaneReplacedLedgerSummary(laneName: string, jobId: string, failure: string | null): string {
+  return "Lane " + laneName + " worker retired and replaced in job " + jobId.slice(0, 8) + ": " + (failure ?? "failed").slice(0, 160);
+}
+export function orchestrationLaneFailedLedgerSummary(laneName: string, jobId: string, failure: string | null): string {
+  return "Lane " + laneName + " failed in job " + jobId.slice(0, 8) + ": " + (failure ?? "").slice(0, 160);
+}
+export function orchestrationJobDoneLedgerSummary(jobId: string, status: string, verified: number, total: number): string {
+  return "Job " + jobId.slice(0, 8) + " closed " + status + ": " + verified + "/" + total + " lane(s) verified";
+}
+
+// The orchestration scorecard (2026-11-19, the
+// measured-proof series): every job SAM runs as a team
+// ledgers its lifecycle across six activity kinds - planned,
+// hired, lane-done, lane-replaced, lane-failed, job-done -
+// carrying job prefixes, lane names, and, on the replaced
+// and failed lines, the failure's head. No daily surface
+// ever counted them, so orchestration going silent, lanes
+// dying and being replaced, or jobs closing with nothing
+// verified was invisible in aggregate. The text folds
+// counts only: per-stage counts, the summed planned lanes,
+// the job-done lines' summed verified-of-total lanes, the
+// closed counts per fixed status bucket (done, partial,
+// blocked, other), and the distinct-job count as a NUMBER
+// only, parsed from the fixed summaries. A summary matching
+// no fixed shape for its kind counts under that kind as
+// unparseable and contributes nothing else, and no stamp,
+// actor, job id, lane name, coordinator name, failure text,
+// or verbatim summary is ever printed - a lane's failure is
+// its job's detail, and it does not belong in a trending
+// surface. The verdict is attention when any lane failed or
+// was replaced, any job closed partial or blocked, or any
+// line is unparseable, else clear. No stamp and no actor
+// enters the text, so a quiet day is byte-identical and
+// P3-silent, and a dead lane, a blocked job, a malformed
+// line, or a mix shift is the news. A pure read: it creates
+// nothing, spends no model call, plans nothing, and runs
+// nothing - the ledger and the lifecycle seams are
+// untouched, and running a job stays the door's job.
+export function parseOrchestrationSummary(kind: string, summary: string): { job?: string; lanes?: number; status?: string; verified?: number; total?: number } | null {
+  if (kind === "orchestration-planned") {
+    const m = /^Job (\S+): (\d+) lane\(s\) planned \(.*\)$/.exec(summary);
+    return m ? { job: m[1], lanes: Number(m[2]) } : null;
+  }
+  if (kind === "orchestration-hired") {
+    const m = /^Lane .+ opened under coordinator .+ at depth \d+$/.exec(summary);
+    return m ? {} : null;
+  }
+  if (kind === "orchestration-lane-done") {
+    const m = /^Lane .+ verified for job (\S+) \(attempt \d+\)$/.exec(summary);
+    return m ? { job: m[1] } : null;
+  }
+  if (kind === "orchestration-lane-replaced") {
+    const m = /^Lane .+ worker retired and replaced in job (\S+): /.exec(summary);
+    return m ? { job: m[1] } : null;
+  }
+  if (kind === "orchestration-lane-failed") {
+    const m = /^Lane .+ failed in job (\S+): /.exec(summary);
+    return m ? { job: m[1] } : null;
+  }
+  if (kind === "orchestration-job-done") {
+    const m = /^Job (\S+) closed (\S+): (\d+)\/(\d+) lane\(s\) verified$/.exec(summary);
+    return m ? { job: m[1], status: m[2], verified: Number(m[3]), total: Number(m[4]) } : null;
+  }
+  return null;
+}
+export function orchestrationScorecardText(root: string): string {
+  const stages: [string, string][] = [
+    ["orchestration-planned", "Jobs planned"],
+    ["orchestration-hired", "Lanes hired"],
+    ["orchestration-lane-done", "Lanes verified"],
+    ["orchestration-lane-replaced", "Lanes replaced"],
+    ["orchestration-lane-failed", "Lanes failed"],
+    ["orchestration-job-done", "Jobs closed"],
+  ];
+  const jobs = new Set<string>();
+  let lanesPlanned = 0;
+  let lanesFailed = 0;
+  let lanesReplaced = 0;
+  let verifiedAtClose = 0;
+  let totalAtClose = 0;
+  const outcomes: Record<string, number> = { done: 0, partial: 0, blocked: 0, other: 0 };
+  let unparseable = 0;
+  const counts: string[] = [];
+  for (const [kind, label] of stages) {
+    const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind });
+    for (const line of lines) {
+      const parsed = parseOrchestrationSummary(kind, line.summary);
+      if (!parsed) { unparseable += 1; continue; }
+      if (parsed.job) jobs.add(parsed.job);
+      if (kind === "orchestration-planned") lanesPlanned += parsed.lanes ?? 0;
+      if (kind === "orchestration-job-done") {
+        verifiedAtClose += parsed.verified ?? 0;
+        totalAtClose += parsed.total ?? 0;
+        const bucket = parsed.status === "done" || parsed.status === "partial" || parsed.status === "blocked" ? parsed.status : "other";
+        outcomes[bucket] += 1;
+      }
+    }
+    if (kind === "orchestration-lane-failed") lanesFailed = lines.length;
+    if (kind === "orchestration-lane-replaced") lanesReplaced = lines.length;
+    counts.push(label + ": " + String(lines.length));
+  }
+  const badClose = outcomes.partial + outcomes.blocked + outcomes.other;
+  const out: string[] = [];
+  out.push("Orchestration: " + (lanesFailed > 0 || lanesReplaced > 0 || badClose > 0 || unparseable > 0 ? "attention" : "clear"));
+  out.push(...counts);
+  out.push("Lanes planned: " + String(lanesPlanned));
+  out.push("Verified at close: " + String(verifiedAtClose) + " of " + String(totalAtClose));
+  out.push("Closed outcomes: done " + String(outcomes.done) + ", partial " + String(outcomes.partial) + ", blocked " + String(outcomes.blocked) + ", other " + String(outcomes.other));
+  out.push("Distinct jobs: " + String(jobs.size));
+  if (unparseable > 0) out.push("Unparseable: " + String(unparseable));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never plans or runs a job, never prints a job id, a lane name, or a failure; a dead or replaced lane, a job that closed short of done, a malformed line, or a mix shift is the news");
+  return out.join("\n");
 }
 
 /**
