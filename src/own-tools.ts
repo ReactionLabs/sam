@@ -26,7 +26,7 @@ import { CITATION_GUIDANCE, recordSearchHits } from "./chat-citations.js";
 import { annotateToolResult, peekRunSources } from "./source-citations.js";
 import { artifactPath, createArtifact, getArtifact, listArtifactVersions, listArtifacts, updateArtifact } from "./artifacts.js";
 import { addressBookOrder, contactOfferState, getContact, listContacts, recordContactOffer, removeContact, upsertContact, type Contact } from "./contacts.js";
-import { runReach } from "./reach.js";
+import { reachLedgerSummary, runReach } from "./reach.js";
 import { discoverSkills, readSkillForProfile, skillsForProfile } from "./skills.js";
 import { cloneIntoCodeRoot, codeCommandNames, codeFileExists, codeRoot, codeWrites, createSandbox, destroySandbox, editCodeFile, installSandboxPackage, listCodeFiles, listSandboxes, readCodeFile, runCodeCommand, runPython, writeCodeFile, writeSandboxFile } from "./code.js";
 import { runSense, sensesStatus, type SenseName } from "./senses.js";
@@ -384,7 +384,7 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
     try{
       if(chatId){const cs=new ChatStore(root);try{if(cs.isVisitor(chatId))return {error:"Visitors cannot use reach: a visitor is not the owner"};}finally{cs.close();}}
       const result=await runReach({channel:typeof args.channel==="string"?args.channel:"",action:typeof args.action==="string"?args.action:"",query:typeof args.query==="string"?args.query:undefined,limit:typeof args.limit==="number"?args.limit:undefined});
-      try{recordActivity(root,actor,"reach",("Reach "+String(args.channel??"")+" "+String(args.action??"")+" "+(typeof args.query==="string"?args.query:"")).trim());}catch{/* the ledger never breaks a turn */}
+      try{recordActivity(root,actor,"reach",reachLedgerSummary(String(args.channel??""),String(args.action??""),typeof args.query==="string"?args.query:""));}catch{/* the ledger never breaks a turn */}
       return result;
     }catch(e){return {error:asyncToolFailureError("Reach failed",e)};}
   }

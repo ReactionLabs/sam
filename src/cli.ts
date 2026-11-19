@@ -44,7 +44,7 @@ import { unificationReport } from "./unification.js";
 import { runChatTurn } from "./agent-turn.js";
 import { runTui } from "./tui.js";
 import { renderImageFile } from "./term-image.js";
-import { listReachChannels, reachDoctor, runReach } from "./reach.js";
+import { listReachChannels, reachDoctor, reachScorecardText, runReach } from "./reach.js";
 import { channels, addChannel, removeChannel, setChannelOwners } from "./channels.js";
 import { findChannel, issuePairingCode, pairingStatus, redeemPairingCode } from "./pairing.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog, bridgePollScorecardText } from "./telegram.js";
@@ -281,6 +281,7 @@ const reach=program.command("reach").description("agent-reach from the operator 
 reach.command("channels").description("Channels and the read actions each declares").action(async()=>output(await listReachChannels()));
 reach.command("doctor").description("agent-reach channel status (text)").action(async()=>{process.stdout.write(await reachDoctor());});
 reach.command("call").argument("<channel>").argument("<action>").argument("[query]").option("--limit <n>","Max results for a search").description("Run one declared read action, e.g. reach call web search 'breaking news' or reach call youtube subtitle <url>").action(async(channel:string,action:string,query:string|undefined,o:{limit?:string})=>output(await runReach({channel,action,query,limit:o.limit?Number(o.limit):undefined})));
+reach.command("scorecard").description("Reach calls as plain text with no clock reading - verdict, the total call count, counts per fixed action bucket (search, read, other), distinct channel and action counts as numbers only, and the no-query call count (never a stamp, an actor, a channel name, or any part of a query), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a malformed line or a mix shift is the news (this is the sam-reach script job's stdout; a pure read over the same activity ledger sam_reach ledgers: creates nothing, spends no model call, reaches for nothing; exits 0 always, the verdict lives in the text)").action(()=>output(reachScorecardText(program.opts().workspace)));
 const channelCmd=program.command("channels").description("Messaging channels that talk to SAM (Telegram first)");
 channelCmd.command("add").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"telegram",name,profile,tokenEnv)));
 channelCmd.command("add-discord").argument("<name>").argument("<profile>").argument("<tokenEnv>").action((name:string,profile:string,tokenEnv:string)=>output(addChannel(program.opts().workspace,"discord",name,profile,tokenEnv)));

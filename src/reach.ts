@@ -10,6 +10,7 @@
 // (RATE_LIMITED, PLATFORM_BLOCKED, NEED_LOGIN, BUSY) end the attempt.
 
 import { execFile } from "node:child_process";
+import { readActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 export interface ReachChannel {
@@ -177,6 +178,77 @@ export async function runReach(
       hint: typeof err.hint === "string" ? err.hint : undefined,
     },
   };
+}
+
+// The ONE writer for a reach call's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what the sam_reach
+// tool wrote inline before this writer existed: the channel
+// and action the model asked for, then the raw query.
+export function reachLedgerSummary(channel: string, action: string, query: string): string {
+  return ("Reach " + channel + " " + action + " " + query).trim();
+}
+
+// The reach scorecard (2026-11-18, the measured-proof
+// series): every sam_reach call ledgers one "reach" line
+// carrying the channel, the action, and the raw query text -
+// but no daily surface ever counted the calls, so reach
+// going silent or a channel mix shift was invisible in
+// aggregate. The line carries no outcome (it is written
+// after runReach returns, whatever the channel answered),
+// so this text folds volume and mix only and claims nothing
+// about success: the total calls, counts per fixed action
+// bucket (search / read / other), the distinct channel and
+// action counts as NUMBERS only, and the no-query call
+// count parsed from the fixed summaries. A summary matching
+// no fixed shape counts as a call under "other", and no
+// stamp, actor, channel name, action token beyond the fixed
+// buckets, or any part of a query is ever printed - read
+// queries are URLs and search queries are the owner's own
+// words, and neither belongs in a trending surface. The
+// verdict is attention when any line is unparseable, else
+// clear. No stamp and no actor enters the text, so a quiet
+// day is byte-identical and P3-silent, and a malformed line
+// or a mix shift is the news. A pure read: it creates
+// nothing, spends no model call, and reaches for nothing -
+// the ledger and the reach seam are untouched, and reaching
+// stays runReach's job.
+const REACH_ACTIONS = ["search", "read", "other"] as const;
+export function parseReachSummary(summary: string): { action: string; bucket: string; channel: string; hasQuery: boolean } | null {
+  const m = /^Reach (\S+) (\S+)( (.*))?$/.exec(summary);
+  if (!m) return null;
+  const bucket = m[2] === "search" || m[2] === "read" ? m[2] : "other";
+  return { action: m[2], bucket, channel: m[1], hasQuery: !!(m[4] && m[4].trim()) };
+}
+export function reachScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "reach" });
+  const actions: Record<string, number> = {};
+  const channels = new Set<string>();
+  const actionTokens = new Set<string>();
+  let noQuery = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseReachSummary(line.summary);
+    if (!parsed) {
+      unparseable += 1;
+      actions["other"] = (actions["other"] ?? 0) + 1;
+      continue;
+    }
+    actions[parsed.bucket] = (actions[parsed.bucket] ?? 0) + 1;
+    channels.add(parsed.channel);
+    actionTokens.add(parsed.action);
+    if (!parsed.hasQuery) noQuery += 1;
+  }
+  const actionText = (REACH_ACTIONS as readonly string[]).filter(a => actions[a]).map(a => a + " " + String(actions[a])).join(", ") || "none";
+  const out: string[] = [];
+  out.push("Reach calls: " + (unparseable > 0 ? "attention" : "clear"));
+  out.push("Calls: " + String(lines.length));
+  out.push("By action: " + actionText);
+  out.push("Distinct channels: " + String(channels.size));
+  out.push("Distinct actions: " + String(actionTokens.size));
+  out.push("Calls with no query: " + String(noQuery));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never reaches, never prints a channel name or any part of a query, and claims nothing about call outcomes, which the ledger line does not carry; a malformed line or a mix shift is the news");
+  return out.join("\n");
 }
 
 export async function reachDoctor(env: NodeJS.ProcessEnv = process.env): Promise<string> {
