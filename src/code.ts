@@ -728,13 +728,83 @@ export async function runCodeCommand(root: string, actor: string, name: string, 
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs,
     ...(notInstalled ? { error: spec.file + " is not installed on this machine - the allowlisted command '" + name + "' cannot run until it is installed (installing it is the operator's act)" } : {}),
   };
-  recordActivity(root, actor, "code-run", "Ran " + name + " in the code root: " + (result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
+  recordActivity(root, actor, "code-run", codeRunLedgerSummary(name, result.error ?? (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : ""))));
   // Verify-on-stop: a build/test verdict settles the verification
   // ledger the C1 writes feed - verified only through a fresh run.
   if (name === "build" || name === "test") {
     try { recordVerification(root, { kind: name, passed: result.ok, runId: randomUUID() }); } catch { /* the ledger never breaks a run */ }
   }
   return result;
+}
+
+// The ONE writer for a code run's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runCodeCommand
+// wrote inline before this writer existed: the allowlisted
+// command name and the outcome text (ok, an exit reading with
+// an optional timed-out marker, or the not-installed error
+// prose). git-clone rides cloneIntoCodeRoot and ledgers its
+// own git-clone lines, so it is not a code-run line.
+export function codeRunLedgerSummary(name: string, status: string): string {
+  return "Ran " + name + " in the code root: " + status;
+}
+
+// The code-run scorecard (2026-11-18, the measured-proof
+// series): every C2 verify-hand run ledgers one "code-run"
+// line carrying the allowlisted command name and its outcome
+// - but no daily surface ever counted the runs, so the verify
+// hands going silent, a build or test that started timing
+// out, or a command whose binary vanished was invisible in
+// aggregate. This text folds those lines to counts only: the
+// total runs, counts per fixed outcome bucket (ok / failed /
+// error / other - an exit reading is failed, the
+// not-installed prose is error), the timed-out run count, and
+// the distinct-command count as a NUMBER only. A summary
+// matching no fixed shape counts as a run under "other", and
+// no stamp, actor, command name, or verbatim summary is ever
+// printed - the error prose names install paths and does not
+// belong in a trending surface. The verdict is attention when
+// any run failed, errored, or is unparseable, else clear. No
+// stamp and no actor enters the text, so a quiet day is
+// byte-identical and P3-silent, and the first bad run is the
+// news. A pure read: it creates nothing, spends no model
+// call, and runs nothing - the ledger and the runner seam are
+// untouched, and running commands stays the C2 hands' job.
+const CODE_RUN_OUTCOMES = ["ok", "failed", "error", "other"] as const;
+export function parseCodeRunSummary(summary: string): { outcome: string; command: string; timedOut: boolean } | null {
+  const m = /^Ran (\S+) in the code root: (.+)$/.exec(summary);
+  if (!m) return null;
+  const status = m[2];
+  if (status === "ok") return { outcome: "ok", command: m[1], timedOut: false };
+  const exit = /^exit \S+( \(timed out\))?$/.exec(status);
+  if (exit) return { outcome: "failed", command: m[1], timedOut: !!exit[1] };
+  return { outcome: "error", command: m[1], timedOut: false };
+}
+export function codeRunScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "code-run" });
+  const outcomes: Record<string, number> = {};
+  const commands = new Set<string>();
+  let timedOut = 0;
+  for (const line of lines) {
+    const parsed = parseCodeRunSummary(line.summary);
+    if (!parsed) {
+      outcomes["other"] = (outcomes["other"] ?? 0) + 1;
+      continue;
+    }
+    outcomes[parsed.outcome] = (outcomes[parsed.outcome] ?? 0) + 1;
+    commands.add(parsed.command);
+    if (parsed.timedOut) timedOut += 1;
+  }
+  const outcomeText = (CODE_RUN_OUTCOMES as readonly string[]).filter(o => outcomes[o]).map(o => o + " " + String(outcomes[o])).join(", ") || "none";
+  const bad = (outcomes["failed"] ?? 0) + (outcomes["error"] ?? 0) + (outcomes["other"] ?? 0);
+  const out: string[] = [];
+  out.push("Code runs: " + (bad > 0 ? "attention" : "clear"));
+  out.push("Runs: " + String(lines.length));
+  out.push("By outcome: " + outcomeText);
+  out.push("Timed-out runs: " + String(timedOut));
+  out.push("Distinct commands: " + String(commands.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never runs a command or prints a command name or summary; a new failed, errored, or timed-out run is the news");
+  return out.join("\n");
 }
 
 // ---- Hands v2: git-clone, Python, sandboxes -------------------------
