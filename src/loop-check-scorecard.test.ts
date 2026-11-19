@@ -122,8 +122,18 @@ test("loop-check parse: the seam's own writer lines parse, and only the fixed sh
     { state: "unverified", files: 1 },
     "a live-shaped line parses",
   );
+  assert.deepEqual(
+    parseLoopCheckSummary("Chat turn closed over code in verification state unverified (sam-grep-phrase.py)"),
+    { state: "unverified", files: 1 },
+    "the short stored form (no note tail) parses",
+  );
+  assert.deepEqual(
+    parseLoopCheckSummary("Chat turn closed over code in verification state failed (sam-grep-phrase.py, sam-find-workerpool.py, sam-find-orch.py, sam-find-orch2.py, sam-find-orch3.py, sam-read-own-tools.py, sam-find-pool-msg.py, sam-read-subagents.py, sam-find-registry.py, sam-pool-ctx.py, sam-results.py, sam-act-list.py, sam"),
+    { state: "failed", files: 12 },
+    "a ledger-capped line parses its state and counts only the complete path entries",
+  );
   assert.equal(parseLoopCheckSummary(""), null);
-  assert.equal(parseLoopCheckSummary("Chat turn closed over code in verification state unverified (a.py)"), null, "no note, no parse");
+  assert.equal(parseLoopCheckSummary("Chat turn closed over code in verification state unverified"), null, "no path list, no parse");
   assert.equal(parseLoopCheckSummary("Some wholly novel loop-check shape"), null);
 });
 

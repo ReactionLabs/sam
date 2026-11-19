@@ -185,11 +185,29 @@ export function loopCheckLedgerSummary(status: VerificationStatus): string | nul
 // read: it creates nothing, spends no model call, and closes
 // no turn - the ledger and the store are untouched.
 export function parseLoopCheckSummary(summary: string): { state: "unverified" | "failed" | "other"; files: number } | null {
-  const m = /^Chat turn closed over code in verification state (\S+) \((.*?)\) - Verification note: .+$/.exec(summary);
+  // The ledger caps summaries at 300 chars (activity.ts), so
+  // the stored shapes are three: the full writer shape (state,
+  // paths, then ") - Verification note: ..."), the short form
+  // a one-file close stored before the note rode the line
+  // (state + paths + ")", no tail), and the capped form, where
+  // a long pending list is cut mid-path at 300 and the note
+  // never lands. The state token sits at the front and is
+  // intact in all three; the file count sums the COMPLETE
+  // path entries - a capped line's trailing fragment is a
+  // partial name and is dropped, so the count is the files
+  // the ledger actually names, never a guessed total.
+  const m = /^Chat turn closed over code in verification state (\S+) \((.*)$/.exec(summary);
   if (!m) return null;
   const state = m[1] === "unverified" ? "unverified" : m[1] === "failed" ? "failed" : "other";
-  const files = m[2].trim() === "" ? 0 : m[2].split(", ").length;
-  return { state, files };
+  let rest = m[2];
+  let complete = true;
+  const noteAt = rest.indexOf(") - Verification note: ");
+  if (noteAt >= 0) rest = rest.slice(0, noteAt);
+  else if (rest.endsWith(")")) rest = rest.slice(0, -1);
+  else complete = false;
+  const entries = rest.split(", ").filter(e => e !== "");
+  if (!complete && entries.length > 0) entries.pop();
+  return { state, files: entries.length };
 }
 export function loopCheckScorecardText(root: string): string {
   const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-check" });
