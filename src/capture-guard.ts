@@ -3,7 +3,7 @@ import { openDatabase } from "./sqlite.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Capture guard (Program H, self-knowledge item A - the keystone):
@@ -322,11 +322,103 @@ export function addSuppression(root: string, input: { profile: string; needle: s
   if (result.created) {
     const backlog = typeof input.existingMatches === "number" ? input.existingMatches : countExistingMatches(root, input.profile, result.record.needle);
     recordActivity(root, input.profile, "memory-suppression",
-      "Capture suppression recorded for profile " + input.profile + ": needle sha256 " + needleFingerprint(result.record.needle) +
-      " (suppression " + result.record.id.slice(0, 8) + ", from " + String(input.source).slice(0, 40) + "); " +
-      String(backlog) + " live memory record(s) already match and await the owner's purge decision");
+      suppressionRecordedLedgerSummary(input.profile, needleFingerprint(result.record.needle), result.record.id.slice(0, 8), String(input.source).slice(0, 40), backlog));
   }
   return result;
+}
+
+/** The ONE writer for the memory-suppression ledger line: a
+ *  newly recorded suppression ledgers exactly this shape, so
+ *  the writer and the scorecard's parser below can never
+ *  drift. The line carries the needle's fingerprint and the
+ *  suppression's 8-char prefix only - never the needle. */
+export function suppressionRecordedLedgerSummary(profile: string, fingerprint: string, suppressionPrefix: string, source: string, backlog: number): string {
+  return "Capture suppression recorded for profile " + profile + ": needle sha256 " + fingerprint +
+    " (suppression " + suppressionPrefix + ", from " + source + "); " +
+    String(backlog) + " live memory record(s) already match and await the owner's purge decision";
+}
+
+/** The ONE writer for the memory-suppressed ledger line: a
+ *  blocked automatic write ledgers exactly this shape, so the
+ *  writer and the scorecard's parser below can never drift.
+ *  The line carries the suppression's 8-char prefix and the
+ *  needle's fingerprint only - never the needle, never the
+ *  content. */
+export function suppressionBlockedLedgerSummary(via: string, actor: string, suppressionPrefix: string, fingerprint: string): string {
+  return "Memory write suppressed via " + via + " for " + actor + ": matched capture suppression " + suppressionPrefix +
+    " (needle sha256 " + fingerprint + "); nothing was stored";
+}
+
+// The suppression scorecard (2026-11-19, the measured-proof
+// series): the capture guard's two ledger classes have folded
+// nowhere, so how many suppressions the owner has standing,
+// how much already-stored memory awaited a purge decision
+// when each was recorded, and how often the guard has
+// actually held a write back (and through which seam) was
+// invisible in aggregate. The verdict is attention ONLY on an
+// unparseable line, else clear: a recorded suppression is the
+// owner's own governance act and a blocked write is the guard
+// holding - the system working, deliberately not a defect
+// (the self-work doctrine). This text folds both classes to
+// counts only, on ONE line: the recorded count, the summed
+// already-matching backlog, the blocked count with counts per
+// fixed via bucket (episodes, compaction, other), the
+// distinct-profile count, and the total. The distinct count
+// rides each recorded line's profile internally and surfaces
+// as a number only: no stamp, no actor, no profile name, no
+// needle, no fingerprint, no suppression id, no source, and
+// no verbatim summary enters the text. A summary matching no
+// fixed shape counts toward the total and the unparseable
+// count only, and is never printed. A pure read: it creates
+// nothing, spends no model call, and suppresses nothing -
+// the ledger and the guard seams are untouched. (Both
+// written lines are short and fixed-shape, far under the
+// ledger's 300-char summary cap, so no capped shape exists
+// for this pair.)
+export function parseSuppressionRecordedSummary(summary: string): { profile: string; backlog: number } | null {
+  const m = /^Capture suppression recorded for profile ([^:]+): needle sha256 [0-9a-f]+ \(suppression [0-9a-f]{8}, from .+\); (\d+) live memory record\(s\) already match and await the owner's purge decision$/.exec(summary);
+  if (!m) return null;
+  return { profile: m[1], backlog: Number(m[2]) };
+}
+export function parseSuppressionBlockedSummary(summary: string): { via: string } | null {
+  const m = /^Memory write suppressed via (\S+) for \S+: matched capture suppression [0-9a-f]{8} \(needle sha256 [0-9a-f]+\); nothing was stored$/.exec(summary);
+  if (!m) return null;
+  return { via: m[1] };
+}
+export function suppressionScorecardText(root: string): string {
+  const recorded = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "memory-suppression" });
+  const blocked = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "memory-suppressed" });
+  const profiles = new Set<string>();
+  let backlog = 0;
+  let recordedParsed = 0;
+  let unparseable = 0;
+  for (const line of recorded) {
+    const parsed = parseSuppressionRecordedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    recordedParsed += 1;
+    profiles.add(parsed.profile);
+    backlog += parsed.backlog;
+  }
+  let episodes = 0;
+  let compaction = 0;
+  let other = 0;
+  for (const line of blocked) {
+    const parsed = parseSuppressionBlockedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.via === "episodes") episodes += 1;
+    else if (parsed.via === "compaction") compaction += 1;
+    else other += 1;
+  }
+  const total = recorded.length + blocked.length;
+  const parts: string[] = [];
+  parts.push("Suppressions: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(recordedParsed) + " recorded");
+  parts.push(String(backlog) + " already-matching records awaiting purge");
+  parts.push(String(episodes + compaction + other) + " writes blocked (episodes " + String(episodes) + ", compaction " + String(compaction) + ", other " + String(other) + ")");
+  parts.push(String(profiles.size) + " distinct profiles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function countExistingMatches(root: string, profile: string, needle: string): number {
@@ -353,8 +445,7 @@ function countExistingMatches(root: string, profile: string, needle: string): nu
  *  self-work: the guard holding is the system working. */
 export function recordSuppressionBlock(root: string, actor: string, via: string, hit: CaptureSuppression): void {
   recordActivity(root, actor, "memory-suppressed",
-    "Memory write suppressed via " + via + " for " + actor + ": matched capture suppression " + hit.id.slice(0, 8) +
-    " (needle sha256 " + needleFingerprint(hit.needle) + "); nothing was stored");
+    suppressionBlockedLedgerSummary(via, actor, hit.id.slice(0, 8), needleFingerprint(hit.needle)));
 }
 
 /** Drop suppressed finds from a preference-extraction result
