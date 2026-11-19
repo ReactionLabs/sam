@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { MemoryStore, type MemoryKind, type MemoryRecord } from "./memory.js";
 import { ChatStore } from "./chats.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 // Two-tier note saves (Dip ruling 2026-11-09 14:10 EST, refined 14:11;
 // Plan Phase B item 1). SAM saves HELPFUL notes freely; HARD changes
@@ -117,7 +117,7 @@ export function patchNote(root: string, input: { actor: string; id: string; cont
     title: "Patch note: " + content.slice(0, 80),
     detail: content, chatId: input.chatId ?? null, supersedes: id,
   });
-  recordActivity(root, input.actor, "note-gated", "Note patch routed to owner approval (" + reason + ", was: " + old.content.slice(0, 80) + "): " + content.slice(0, 120));
+  recordActivity(root, input.actor, "note-gated", notePatchGatedLedgerSummary(reason, old.content.slice(0, 80), content.slice(0, 120)));
   return { status: "pending_owner_approval", tier: "hard", reason, proposal, supersedes: id };
 }
 
@@ -142,14 +142,110 @@ export function saveNote(root: string, input: { actor: string; content: string; 
       title: "Note: " + content.slice(0, 80),
       detail: content, chatId: input.chatId ?? null, supersedes: input.supersedes ?? null,
     });
-    recordActivity(root, input.actor, "note-gated", "Hard note routed to owner approval (" + reason + "): " + content.slice(0, 120));
+    recordActivity(root, input.actor, "note-gated", noteGatedLedgerSummary(reason, content.slice(0, 120)));
     return { status: "pending_owner_approval", tier, reason: reason ?? "hard change", proposal };
   }
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
     const scope = input.actor === "sam" ? "core" : "profile:" + input.actor;
     const record = store.add({ kind, content, source: "sam-saved", scope });
-    recordActivity(root, input.actor, "note-saved", "Saved note (" + record.id + ", " + scope + "): " + content.slice(0, 120));
+    recordActivity(root, input.actor, "note-saved", noteSavedLedgerSummary(record.id, scope, content.slice(0, 120)));
     return { status: "saved", tier, record };
   } finally { store.close(); }
+}
+
+// --- The ONE writers for the note ledger lines (2026-11-19, the
+// measured-proof series): each seam above ledgers exactly these
+// shapes, so the scorecard's parsers below read what the seams
+// have always written. The content arguments arrive pre-sliced
+// by the seams, exactly as the inline writers sliced them. A
+// saved line carries the record id and the scope; a gated line
+// carries the classifier's reason and the note's opening - the
+// scorecard surfaces none of it, counts only.
+export function noteSavedLedgerSummary(recordId: string, scope: string, content: string): string {
+  return "Saved note (" + recordId + ", " + scope + "): " + content;
+}
+export function noteGatedLedgerSummary(reason: string | null, content: string): string {
+  return "Hard note routed to owner approval (" + reason + "): " + content;
+}
+export function notePatchGatedLedgerSummary(reason: string, was: string, content: string): string {
+  return "Note patch routed to owner approval (" + reason + ", was: " + was + "): " + content;
+}
+
+// The note scorecard (2026-11-19, the measured-proof series):
+// the two-tier note system's two ledger classes have folded
+// nowhere, so how many notes SAM saved freely, how many it
+// gated, and why they gated was invisible in aggregate. The
+// verdict is attention ONLY on an unparseable line, else
+// clear: a soft save and a hard gate are both the two-tier
+// ruling working, never a defect. This text folds both
+// classes to counts only, on ONE line: the saved count, the
+// gated count split hard / patch, gated counts per fixed
+// reason bucket (supersession, identity, law, other), the
+// distinct-scope count from saved lines, and the total. The
+// distinct count rides each saved line's scope internally
+// and surfaces as a number only: no stamp, no actor, no
+// record id, no scope name, no note content, and no verbatim
+// summary enters the text. A summary matching no fixed shape
+// counts toward the total and the unparseable count only,
+// and is never printed. A pure read: it creates nothing,
+// spends no model call, and saves or gates nothing - the
+// ledger and the note seams are untouched. (The patch line
+// can exceed the ledger's 300-char summary cap - reason with
+// a record id, an 80-char was-slice, and a 120-char content
+// slice - so its parser anchors on the fixed prefix and
+// never requires the tail; the saved and hard shapes sit far
+// under the cap and parse whole.)
+export function parseNoteSavedSummary(summary: string): { scope: string } | null {
+  const m = /^Saved note \([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}, ([^)]+)\): [\s\S]+$/.exec(summary);
+  if (!m) return null;
+  return { scope: m[1] };
+}
+export type NoteGatedKind = "hard" | "patch";
+export type NoteReasonBucket = "supersession" | "identity" | "law" | "other";
+export function noteReasonBucket(reason: string): NoteReasonBucket {
+  if (/supersed|replac|instead of|no longer|anymore|changed .* mind|contradict|overrid|correction/.test(reason)) return "supersession";
+  if (/addressed|goes by|person's name|identity fact/.test(reason)) return "identity";
+  if (/standing rule|standing-rule imperative|rule from now on|every time|calls itself a rule/.test(reason)) return "law";
+  return "other";
+}
+export function parseNoteGatedSummary(summary: string): { gatedKind: NoteGatedKind; bucket: NoteReasonBucket } | null {
+  if (/^Note patch routed to owner approval \(it patches \(supersedes\) record [0-9a-f-]+, was: /.test(summary)) {
+    return { gatedKind: "patch", bucket: "supersession" };
+  }
+  const m = /^Hard note routed to owner approval \(([\s\S]+?)\): [\s\S]+$/.exec(summary);
+  if (!m) return null;
+  return { gatedKind: "hard", bucket: noteReasonBucket(m[1]) };
+}
+export function noteScorecardText(root: string): string {
+  const saved = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "note-saved" });
+  const gated = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "note-gated" });
+  const scopes = new Set<string>();
+  let savedParsed = 0;
+  let unparseable = 0;
+  for (const line of saved) {
+    const parsed = parseNoteSavedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    savedParsed += 1;
+    scopes.add(parsed.scope);
+  }
+  let hard = 0;
+  let patch = 0;
+  const buckets: Record<NoteReasonBucket, number> = { supersession: 0, identity: 0, law: 0, other: 0 };
+  for (const line of gated) {
+    const parsed = parseNoteGatedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.gatedKind === "patch") patch += 1; else hard += 1;
+    buckets[parsed.bucket] += 1;
+  }
+  const total = saved.length + gated.length;
+  const parts: string[] = [];
+  parts.push("Notes: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(savedParsed) + " saved");
+  parts.push(String(hard + patch) + " gated (hard " + String(hard) + ", patch " + String(patch) + ")");
+  parts.push("gated reasons (supersession " + String(buckets.supersession) + ", identity " + String(buckets.identity) + ", law " + String(buckets.law) + ", other " + String(buckets.other) + ")");
+  parts.push(String(scopes.size) + " distinct scopes");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
