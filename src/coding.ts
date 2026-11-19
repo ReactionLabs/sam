@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { codeRoot, codeWrites, type CodeWriteRecord } from "./code.js";
 import { commitTaskPaths, prepareTaskBranch, type CodingGitState } from "./git-work.js";
 import { listChanges, verificationStatus } from "./verification.js";
@@ -175,6 +175,171 @@ export function codingFailedSummary(title: string, error: unknown): string {
   return "Coding task failed: " + title + " - " + codingFailureReason(error).slice(0, 120);
 }
 
+// The ONE writers for the other lifecycle lines, so the
+// scorecard's parsers below can never drift from the seams
+// they count. Each shape is byte-identical to what its seam
+// wrote inline before these writers existed: the queued and
+// started lines (the task's title), the died-mid-run line,
+// the two done shapes (verified, with the file and iteration
+// counts; and closed-with-no-changes), the blocked lines
+// (a fixed parenthetical reason plus the title), and the
+// review line (the verdict token, the title, and the
+// optional blocker text). The failed line already rides
+// codingFailedSummary above.
+export function codingQueuedLedgerSummary(title: string): string {
+  return "Queued coding task: " + title;
+}
+export function codingStartedLedgerSummary(title: string): string {
+  return "Coding task started: " + title;
+}
+export function codingDiedLedgerSummary(title: string): string {
+  return "Coding task died mid-run: " + title;
+}
+export function codingDoneVerifiedLedgerSummary(title: string, files: number, iterations: number): string {
+  return "Coding task done and verified: " + title + " (" + files + " file(s), " + iterations + " iteration(s))";
+}
+export function codingDoneNoChangesLedgerSummary(title: string): string {
+  return "Coding task closed with no changes: " + title;
+}
+export function codingBlockedLedgerSummary(reason: string, title: string): string {
+  return "Coding task blocked (" + reason + "): " + title;
+}
+export function codingReviewLedgerSummary(verdict: string, title: string, blockers: string): string {
+  return "Self-review " + verdict + " for coding task: " + title + (blockers ? " - " + blockers.slice(0, 160) : "");
+}
+
+// The coding-task scorecard (2026-11-19, the measured-proof
+// series): the C3 coding loop ledgers its whole lifecycle
+// across six activity kinds - queued, started, done,
+// blocked, failed, reviewed - carrying the task's title (the
+// head of its spec) on every line and, on the failed and
+// review lines, free text (the failure reason, the
+// reviewer's blocker findings). No daily surface ever
+// counted them, so coding going silent, a rising blocked
+// share, or tasks dying mid-run was invisible in aggregate.
+// The text folds counts only: per-stage counts, the done
+// split (verified vs no-changes) with the summed verified
+// files and iterations, blocked counts per fixed reason
+// bucket, review counts per verdict bucket, and the
+// distinct-task count as a NUMBER only (counted from the
+// queued lines' titles, the one line each task writes
+// exactly once). A summary matching no fixed shape for its
+// kind counts under that kind and contributes nothing else,
+// and no stamp, actor, title, reason, finding, or verbatim
+// summary is ever printed - a task's title is its spec's
+// head, and neither it, a failure's detail, nor a reviewer's
+// findings belong in a trending surface. The verdict is
+// attention when any task failed, any task blocked, or any
+// line is unparseable, else clear. No stamp and no actor
+// enters the text, so a quiet day is byte-identical and
+// P3-silent, and a blocked or failed task, a malformed line,
+// or a mix shift is the news. A pure read: it creates
+// nothing, spends no model call, and queues or drains
+// nothing - the ledger and the loop seams are untouched, and
+// running coding work stays the loop's job.
+export type CodingSummaryParse =
+  | { stage: "queued" | "started"; title: string }
+  | { stage: "done"; title: string; outcome: "verified" | "no-changes"; files: number; iterations: number }
+  | { stage: "blocked"; title: string; bucket: "git" | "review-block" | "review-unavailable" | "uncommitted" | "state" | "other" }
+  | { stage: "failed"; title: string }
+  | { stage: "review"; title: string; verdict: "pass" | "block" | "other" }
+  | null;
+export function parseCodingSummary(kind: string, summary: string): CodingSummaryParse {
+  if (kind === "coding-queued") {
+    const m = /^Queued coding task: (.+)$/.exec(summary);
+    return m ? { stage: "queued", title: m[1] } : null;
+  }
+  if (kind === "coding-started") {
+    const m = /^Coding task started: (.+)$/.exec(summary);
+    return m ? { stage: "started", title: m[1] } : null;
+  }
+  if (kind === "coding-done") {
+    const v = /^Coding task done and verified: (.+) \((\d+) file\(s\), (\d+) iteration\(s\)\)$/.exec(summary);
+    if (v) return { stage: "done", title: v[1], outcome: "verified", files: Number(v[2]), iterations: Number(v[3]) };
+    const n = /^Coding task closed with no changes: (.+)$/.exec(summary);
+    return n ? { stage: "done", title: n[1], outcome: "no-changes", files: 0, iterations: 0 } : null;
+  }
+  if (kind === "coding-blocked") {
+    const m = /^Coding task blocked \(([^)]+)\): (.+)$/.exec(summary);
+    if (!m) return null;
+    const bucket = m[1] === "git discipline" ? "git"
+      : m[1] === "review BLOCK" ? "review-block"
+      : m[1] === "self-review unavailable" ? "review-unavailable"
+      : m[1] === "uncommitted writes" ? "uncommitted"
+      : ["clean", "unverified", "verified", "failed"].includes(m[1]) ? "state"
+      : "other";
+    return { stage: "blocked", title: m[2], bucket };
+  }
+  if (kind === "coding-failed") {
+    const d = /^Coding task died mid-run: (.+)$/.exec(summary);
+    if (d) return { stage: "failed", title: d[1] };
+    const f = /^Coding task failed: (.+) - .+$/.exec(summary);
+    return f ? { stage: "failed", title: f[1] } : null;
+  }
+  if (kind === "coding-review") {
+    const m = /^Self-review (\S+) for coding task: (.+)$/.exec(summary);
+    if (!m) return null;
+    const verdict = m[1] === "PASS" ? "pass" : m[1] === "BLOCK" ? "block" : "other";
+    return { stage: "review", title: m[2], verdict };
+  }
+  return null;
+}
+export function codingScorecardText(root: string): string {
+  const stages: [string, string][] = [
+    ["coding-queued", "Queued"],
+    ["coding-started", "Started"],
+    ["coding-done", "Done"],
+    ["coding-blocked", "Blocked"],
+    ["coding-failed", "Failed"],
+    ["coding-review", "Reviewed"],
+  ];
+  const tasks = new Set<string>();
+  let failed = 0;
+  let blocked = 0;
+  let unparseable = 0;
+  let doneVerified = 0;
+  let doneNoChanges = 0;
+  let verifiedFiles = 0;
+  let verifiedIterations = 0;
+  const blockedBuckets: Record<string, number> = { git: 0, "review-block": 0, "review-unavailable": 0, uncommitted: 0, state: 0, other: 0 };
+  const reviewBuckets: Record<string, number> = { pass: 0, block: 0, other: 0 };
+  const counts: string[] = [];
+  for (const [kind, label] of stages) {
+    const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind });
+    for (const line of lines) {
+      const parsed = parseCodingSummary(kind, line.summary);
+      if (!parsed) { unparseable += 1; continue; }
+      if (parsed.stage === "queued") tasks.add(parsed.title);
+      if (parsed.stage === "done" && parsed.outcome === "verified") { doneVerified += 1; verifiedFiles += parsed.files; verifiedIterations += parsed.iterations; }
+      if (parsed.stage === "done" && parsed.outcome === "no-changes") doneNoChanges += 1;
+      if (parsed.stage === "blocked") blockedBuckets[parsed.bucket] += 1;
+      if (parsed.stage === "review") reviewBuckets[parsed.verdict] += 1;
+    }
+    if (kind === "coding-failed") failed = lines.length;
+    if (kind === "coding-blocked") blocked = lines.length;
+    counts.push(label + ": " + String(lines.length));
+  }
+  const out: string[] = [];
+  out.push("Coding tasks: " + (failed > 0 || blocked > 0 || unparseable > 0 ? "attention" : "clear"));
+  out.push(...counts);
+  out.push("Done verified: " + String(doneVerified));
+  out.push("Done no changes: " + String(doneNoChanges));
+  out.push("Verified files: " + String(verifiedFiles));
+  out.push("Verified iterations: " + String(verifiedIterations));
+  out.push("Blocked git: " + String(blockedBuckets.git));
+  out.push("Blocked review block: " + String(blockedBuckets["review-block"]));
+  out.push("Blocked review unavailable: " + String(blockedBuckets["review-unavailable"]));
+  out.push("Blocked uncommitted: " + String(blockedBuckets.uncommitted));
+  out.push("Blocked state: " + String(blockedBuckets.state));
+  out.push("Blocked other: " + String(blockedBuckets.other));
+  out.push("Reviews pass: " + String(reviewBuckets.pass));
+  out.push("Reviews block: " + String(reviewBuckets.block));
+  out.push("Reviews other: " + String(reviewBuckets.other));
+  out.push("Distinct tasks: " + String(tasks.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never queues or drains a task, never prints a title, a reason, or a finding; a blocked or failed task, a malformed line, or a mix shift is the news");
+  return out.join("\n");
+}
+
 function tagCodingStoreLedgered(error: unknown): void {
   if (error !== null && (typeof error === "object" || typeof error === "function")) {
     (error as { codingStoreLedgered?: boolean }).codingStoreLedgered = true;
@@ -328,7 +493,7 @@ export function queueCodingTask(root: string, input: { actor: string; chatId: st
     result: null, verification: null, changes: [], review: null, git: null,
   };
   insertCodingTask(root, item);
-  recordActivity(root, input.actor, "coding-queued", "Queued coding task: " + item.title);
+  recordActivity(root, input.actor, "coding-queued", codingQueuedLedgerSummary(item.title));
   return item;
 }
 
@@ -407,7 +572,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       if (t.status === "running" && t.startedAt && now - Date.parse(t.startedAt) > STALE_RUNNING_MS) {
         updateCodingTask(root, t.id, { status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-task; marked failed by the next drain." });
         recovered.push(t.id);
-        recordActivity(root, t.actor, "coding-failed", "Coding task died mid-run: " + t.title);
+        recordActivity(root, t.actor, "coding-failed", codingDiedLedgerSummary(t.title));
       }
     }
     const limit = deps.maxPerDrain ?? 2;
@@ -416,7 +581,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       const found = getCodingTask(root, task.id);
       if (!found || found.status !== "queued") continue;
       const current = updateCodingTask(root, task.id, { status: "running", startedAt: new Date().toISOString() }) ?? found;
-      recordActivity(root, current.actor, "coding-started", "Coding task started: " + current.title);
+      recordActivity(root, current.actor, "coding-started", codingStartedLedgerSummary(current.title));
       // C4 git discipline: the task's branch is prepared before the
       // first turn. A refusal (a dirty tree, an unborn HEAD) closes
       // the task blocked without running a turn - SAM never sweeps
@@ -432,7 +597,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
           postToChat(root, current.chatId, codingSummaryText(done, []));
         }
         blocked.push(task.id);
-        recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (git discipline): " + current.title);
+        recordActivity(root, current.actor, "coding-blocked", codingBlockedLedgerSummary("git discipline", current.title));
         continue;
       }
       const writesBefore = codeWrites(root, 100_000).length;
@@ -473,7 +638,7 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
               const record = await deps.review(current);
               reviewOutcome = record.verdict + ": " + record.summary;
               const blockers = record.findings.filter(f => f.severity === "BLOCKER").map(f => (f.patternId ? "[" + f.patternId + "] " : "") + f.detail).join("; ");
-              recordActivity(root, current.actor, "coding-review", "Self-review " + record.verdict + " for coding task: " + current.title + (blockers ? " - " + blockers.slice(0, 160) : ""));
+              recordActivity(root, current.actor, "coding-review", codingReviewLedgerSummary(record.verdict, current.title, blockers));
               if (record.verdict === "PASS") break;
               verdict = { state: "verified", pending: [], note: "A fresh-context reviewer BLOCKED the verified diff: " + record.summary + (blockers ? " Blockers: " + blockers : "") + " Fix what the findings name; the next review covers the new changes." };
               continue; // a block is data: the next iteration gets the findings
@@ -510,27 +675,27 @@ export async function drainCodingTasks(root: string, deps: CodingDrainDeps): Pro
       } else if (done.changes.length > 0 && status.state === "verified" && !reviewUnavailable && reviewGateOk && gitPending.length === 0) {
         done.status = "done"; done.result = lastReply.slice(0, 300);
         ran.push(task.id);
-        recordActivity(root, current.actor, "coding-done", "Coding task done and verified: " + current.title + " (" + done.changes.length + " file(s), " + done.iterations + " iteration(s))");
+        recordActivity(root, current.actor, "coding-done", codingDoneVerifiedLedgerSummary(current.title, done.changes.length, done.iterations));
       } else if (done.changes.length === 0) {
         done.status = "done"; done.result = "No code changes were made; there was nothing to verify. " + lastReply.slice(0, 240);
         ran.push(task.id);
-        recordActivity(root, current.actor, "coding-done", "Coding task closed with no changes: " + current.title);
+        recordActivity(root, current.actor, "coding-done", codingDoneNoChangesLedgerSummary(current.title));
       } else if (reviewUnavailable) {
         done.status = "blocked"; done.result = "The work verified, but the fresh-context self-review could not run (" + reviewUnavailable.slice(0, 200) + ") - unreviewed work is not done. Fix the review door (catalog, reviewer configuration, live source) and re-queue the task.";
         blocked.push(task.id);
-        recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (self-review unavailable): " + current.title);
+        recordActivity(root, current.actor, "coding-blocked", codingBlockedLedgerSummary("self-review unavailable", current.title));
       } else if (deps.review && status.state === "verified" && !reviewGateOk) {
         done.status = "blocked"; done.result = "Iterations exhausted under a fresh-context review BLOCK (" + (reviewOutcome ?? "no verdict").slice(0, 240) + ") - the changes are verified but the reviewer would not pass them, so this is not done. " + lastReply.slice(0, 160);
         blocked.push(task.id);
-        recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (review BLOCK): " + current.title);
+        recordActivity(root, current.actor, "coding-blocked", codingBlockedLedgerSummary("review BLOCK", current.title));
       } else if (gitState?.mode === "branch" && gitPending.length > 0) {
         done.status = "blocked"; done.result = "The work is " + status.state + " but git discipline is incomplete: " + gitPending.length + " file(s) are not committed on " + gitState.branch + " (" + gitPending.join(", ") + ")" + (gitState.error ? " - " + gitState.error.slice(0, 200) : "") + ". Uncommitted work is not done; fix the cause and re-queue the task.";
         blocked.push(task.id);
-        recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (uncommitted writes): " + current.title);
+        recordActivity(root, current.actor, "coding-blocked", codingBlockedLedgerSummary("uncommitted writes", current.title));
       } else {
         done.status = "blocked"; done.result = "Iterations exhausted with the work " + status.state + " - the changes are in the code root but are NOT verified, so this is not done. " + lastReply.slice(0, 200);
         blocked.push(task.id);
-        recordActivity(root, current.actor, "coding-blocked", "Coding task blocked (" + status.state + "): " + current.title);
+        recordActivity(root, current.actor, "coding-blocked", codingBlockedLedgerSummary(status.state, current.title));
       }
       const saved = updateCodingTask(root, task.id, { status: done.status, result: done.result, changes: done.changes, verification: done.verification, review: done.review, git: done.git, finishedAt: done.finishedAt, iterations: done.iterations }) ?? done;
       postToChat(root, current.chatId, codingSummaryText(saved, writes));
