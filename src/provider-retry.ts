@@ -55,6 +55,8 @@
  * boundary the rate-limit classifier reads.
  */
 
+import { readActivity } from "./activity.js";
+
 /** Retries after the first attempt for one transient failure. */
 export const TRANSIENT_RETRY_LIMIT = 3;
 /** Backoff before retry 1, 2, 3. The whole schedule adds at
@@ -103,4 +105,73 @@ export function isTransientProviderError(error: unknown): boolean {
 export function isProviderOverloadError(error: unknown): boolean {
   const status = providerHttpStatus(error);
   return status !== null && status >= 500 && status <= 599;
+}
+
+// The ONE writer for the provider-retry ledger line: the
+// agent-turn onProviderRetry seam ledgers exactly this shape
+// for each transient retry the provider schedules inside a
+// turn, so the writer and the scorecard's parser below can
+// never drift. The chat is named by its 8-char prefix only,
+// exactly as the seam has always written it.
+export function providerRetryLedgerSummary(chatPrefix: string, status: number, retry: number, limit: number, delayMs: number): string {
+  return "Provider retry in chat " + chatPrefix + ": the model request failed (HTTP " + status + "), retry " + retry + " of " + limit + " after " + delayMs + "ms backoff";
+}
+
+// The provider-retry scorecard (2026-11-19, the measured-proof
+// series): transient provider failures have ledgered as
+// "provider-retry" lines in the one fixed shape above since
+// the overload resilience landed, but the class was never
+// folded, so how often the provider hiccups, whether the
+// hiccups are overload (5xx) or rate-limit (429), and how
+// much backoff owners absorbed was invisible in aggregate.
+// Every retry line is by construction a provider failure the
+// owner felt as latency, so the verdict is attention when
+// any line exists or any line is unparseable, else clear.
+// This text folds the whole ledger's provider-retry lines to
+// counts only, on ONE line: the parsed retry count, counts
+// per fixed status bucket (overload 5xx, rate-limit 429,
+// other), the distinct-chat count, the summed backoff ms,
+// and the total. The distinct count rides each line's chat
+// prefix internally and surfaces as a number only: no stamp,
+// no actor, no chat id, and no verbatim summary enters the
+// text. A summary matching no fixed shape counts toward the
+// total and the unparseable count only, and is never
+// printed. A pure read: it creates nothing, spends no model
+// call, and retries nothing - the ledger and the retry seams
+// are untouched. (The written line is short and fixed-shape,
+// far under the ledger's 300-char summary cap, so no capped
+// shape exists for this class.)
+export function parseProviderRetrySummary(summary: string): { chat: string; status: number; retry: number; limit: number; delayMs: number } | null {
+  const m = /^Provider retry in chat ([0-9a-f]{8}): the model request failed \(HTTP (\d{3})\), retry (\d+) of (\d+) after (\d+)ms backoff$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[1], status: Number(m[2]), retry: Number(m[3]), limit: Number(m[4]), delayMs: Number(m[5]) };
+}
+export function providerRetryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "provider-retry" });
+  const chats = new Set<string>();
+  let overload = 0;
+  let rateLimit = 0;
+  let other = 0;
+  let backoffMs = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseProviderRetrySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    chats.add(parsed.chat);
+    backoffMs += parsed.delayMs;
+    if (parsed.status === 429) rateLimit += 1;
+    else if (parsed.status >= 500 && parsed.status <= 599) overload += 1;
+    else other += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Provider retries: " + (lines.length > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " retries");
+  parts.push(String(overload) + " overload (5xx)");
+  parts.push(String(rateLimit) + " rate-limit (429)");
+  parts.push(String(other) + " other status");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(backoffMs) + "ms total backoff");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }

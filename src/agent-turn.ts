@@ -22,7 +22,7 @@ import { buildChatContext } from "./compaction.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { noteCapTrip, recordSessionTurn, sessionCapReply, sessionCapStatus } from "./session-caps.js";
 import { closeRateLimitEpisode, isRateLimitError, openRateLimitEpisode, RATE_LIMIT_GRACE_MESSAGE } from "./rate-limit.js";
-import { isProviderOverloadError, PROVIDER_OVERLOAD_MESSAGE } from "./provider-retry.js";
+import { isProviderOverloadError, PROVIDER_OVERLOAD_MESSAGE, providerRetryLedgerSummary } from "./provider-retry.js";
 import { buildRecallBlock } from "./recall.js";
 import { assembleTurnMessages } from "./prompt-assembly.js";
 import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, turnDeadlineFallbackAnswer, type TurnControl } from "./turn-control.js";
@@ -415,7 +415,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // transient retry the provider schedules inside this turn
       // ledgers one line, so the record shows the hiccup; the
       // recovery is this turn's own success line below.
-      provider.onProviderRetry=(info)=>{try{recordActivity(root,profileName,"provider-retry","Provider retry in chat "+chatId.slice(0,8)+": the model request failed (HTTP "+info.status+"), retry "+info.retry+" of "+info.limit+" after "+info.delayMs+"ms backoff");}catch{/* the ledger never breaks a turn */}};
+      provider.onProviderRetry=(info)=>{try{recordActivity(root,profileName,"provider-retry",providerRetryLedgerSummary(chatId.slice(0,8),info.status,info.retry,info.limit,info.delayMs));}catch{/* the ledger never breaks a turn */}};
       // Malformed completions: each rejected draw ledgers one
       // line with the check that failed and the sizes involved
       // (never the content), so the class stays countable even
