@@ -1,6 +1,6 @@
 import { listActions, proposeAction, type ActionProposal } from "./actions.js";
 import { PreferenceStore, type PreferenceKind } from "./preferences.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Corrections (program P6): when the owner corrects SAM - "don't call it a
@@ -96,8 +96,63 @@ export function proposeCorrection(root: string, input: { actor: string; chatId?:
     title: ("Correction: " + found.statement).slice(0, 200),
     detail: found.statement, chatId: input.chatId ?? null,
   });
-  recordActivity(root, input.actor, "correction", "Correction proposed as law: " + found.statement);
+  recordActivity(root, input.actor, "correction", correctionLedgerSummary(found.statement));
   return { proposal, created: true };
+}
+// The ONE writer for the correction ledger line: the
+// proposeCorrection seam above ledgers exactly this shape
+// when a detected correction is proposed as law through the
+// P1 gate, so the writer and the scorecard's parser below can
+// never drift.
+export function correctionLedgerSummary(statement: string): string {
+  return "Correction proposed as law: " + statement;
+}
+// The correction scorecard (2026-11-19, the measured-proof
+// series): owner corrections have ledgered as "correction"
+// lines in the one fixed shape above since P6 landed, but the
+// class was never folded, so how often the owner has had to
+// correct SAM - and whether the same rule needed proposing
+// twice - was invisible in aggregate. Every correction line
+// is by construction a behaviour the owner had to correct, so
+// the verdict is attention when any line exists or any line
+// is unparseable, else clear. This text folds the whole
+// ledger's correction lines to counts only, on ONE line: the
+// proposed count, the distinct-rule count, and the total. The
+// distinct count rides each line's statement internally
+// (normalized exactly as the gate dedupes) and surfaces as a
+// number only: no stamp, no actor, and never the statement
+// itself enters the text - the statement is the owner's own
+// words as law-to-be. A summary matching no fixed shape
+// counts toward the total and the unparseable count only,
+// and is never printed. A pure read: it creates nothing,
+// spends no model call, and proposes nothing - the ledger
+// and the gate seam are untouched. (Statements are capped at
+// 200 chars by the detector, so a written line never reaches
+// the ledger's 300-char summary cap and no capped shape
+// exists for this class.)
+export function parseCorrectionSummary(summary: string): { statement: string } | null {
+  const m = /^Correction proposed as law: (\S.*)$/.exec(summary);
+  if (!m) return null;
+  const statement = m[1].trim();
+  if (!statement) return null;
+  return { statement };
+}
+export function correctionScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "correction" });
+  const distinct = new Set<string>();
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseCorrectionSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    distinct.add(normStatement(parsed.statement));
+  }
+  const parts: string[] = [];
+  parts.push("Corrections: " + (lines.length > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " proposed");
+  parts.push(String(distinct.size) + " distinct rules");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 // Correction routing failure visibility (hourly run 2026-11-14):
 // the LIVE TURN's correction catch was bare - proposeCorrection
