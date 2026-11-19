@@ -2,7 +2,7 @@ import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { executeOwnToolAsync, OWN_TOOLS, ownToolsChat } from "./own-tools.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, partitionTools, toolNameOf } from "./tool-tiers.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { connectors, connectorCredentialPresent } from "./connectors.js";
@@ -532,7 +532,7 @@ function openSubagent(root: string, input: SpawnInput): Subagent {
   };
   put(root, item);
   live.add(item.id);
-  recordActivity(root, profile, "subagent-spawn", "Sub-agent " + item.id.slice(0, 8) + " depth " + depth + " tools " + tools.length + " budget " + budget.rounds + "x" + budget.maxCalls);
+  recordActivity(root, profile, "subagent-spawn", subagentSpawnLedgerSummary(item.id, depth, tools.length, budget));
   return item;
 }
 
@@ -557,6 +557,96 @@ export function subagentFailureReason(error: unknown): string {
 
 export function subagentFailedSummary(id: string, error: unknown): string {
   return "Sub-agent " + id.slice(0, 8) + " failed: " + subagentFailureReason(error).slice(0, 180);
+}
+
+// The ONE writers for the other three lifecycle lines, so
+// the scorecard's parsers below can never drift from the
+// seams they count. Each shape is byte-identical to what
+// its seam wrote inline before these writers existed: the
+// spawn (id prefix, depth, tool count, carved budget), the
+// done (id prefix, role, the result collapsed and capped),
+// and the folded (id prefix, chat prefix). The failed line
+// already rides subagentFailedSummary above.
+export function subagentSpawnLedgerSummary(id: string, depth: number, toolCount: number, budget: { rounds: number; maxCalls: number }): string {
+  return "Sub-agent " + id.slice(0, 8) + " depth " + depth + " tools " + toolCount + " budget " + budget.rounds + "x" + budget.maxCalls;
+}
+export function subagentDoneLedgerSummary(id: string, role: string, result: string): string {
+  return "Sub-agent " + id.slice(0, 8) + " (" + role + ") returned: " + result.replace(/\s+/g, " ").slice(0, 160);
+}
+export function subagentFoldedLedgerSummary(id: string, chatId: string): string {
+  return "Folded " + id.slice(0, 8) + " into chat " + chatId.slice(0, 8);
+}
+
+// The sub-agent scorecard (2026-11-18, the measured-proof
+// series): every invisible helper SAM spawns ledgers its
+// lifecycle across four activity kinds - spawn, done,
+// failed, folded - carrying the child's id prefix and, on
+// the done and failed lines, free text (the result's head,
+// the failure reason). No daily surface ever counted them,
+// so delegation going silent, a rising child failure share,
+// or spawns that never close was invisible in aggregate.
+// The text folds counts only: per-stage counts and the
+// distinct-child count as a NUMBER only, parsed from the
+// fixed summaries. A summary matching no fixed shape for
+// its kind counts under that kind and contributes no child
+// count, and no stamp, actor, id, role, chat prefix, result
+// text, reason, or verbatim summary is ever printed - a
+// child's result and reason are its work product and its
+// failure's detail, and neither belongs in a trending
+// surface. The verdict is attention when any child failed
+// or any line is unparseable, else clear. No stamp and no
+// actor enters the text, so a quiet day is byte-identical
+// and P3-silent, and a failed child, a malformed line, or
+// a mix shift is the news. A pure read: it creates nothing,
+// spends no model call, and spawns nothing - the ledger and
+// the lifecycle seams are untouched, and spawning a helper
+// stays the turn's job.
+export function parseSubagentSummary(kind: string, summary: string): { child: string } | null {
+  if (kind === "subagent-spawn") {
+    const m = /^Sub-agent (\S+) depth \d+ tools \d+ budget \d+x\d+$/.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
+  if (kind === "subagent-done") {
+    const m = /^Sub-agent (\S+) \(\S+\) returned: /.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
+  if (kind === "subagent-failed") {
+    const m = /^Sub-agent (\S+) failed: /.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
+  if (kind === "subagent-folded") {
+    const m = /^Folded (\S+) into chat \S+$/.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
+  return null;
+}
+export function subagentScorecardText(root: string): string {
+  const stages: [string, string][] = [
+    ["subagent-spawn", "Spawned"],
+    ["subagent-done", "Done"],
+    ["subagent-failed", "Failed"],
+    ["subagent-folded", "Folded"],
+  ];
+  const children = new Set<string>();
+  let failed = 0;
+  let unparseable = 0;
+  const out: string[] = [];
+  const counts: string[] = [];
+  for (const [kind, label] of stages) {
+    const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind });
+    for (const line of lines) {
+      const parsed = parseSubagentSummary(kind, line.summary);
+      if (!parsed) { unparseable += 1; continue; }
+      children.add(parsed.child);
+    }
+    if (kind === "subagent-failed") failed = lines.length;
+    counts.push(label + ": " + String(lines.length));
+  }
+  out.push("Sub-agents: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  out.push(...counts);
+  out.push("Distinct children: " + String(children.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never spawns a helper, never prints a child id, a role, a result, or a reason; a failed child, a malformed line, or a mix shift is the news");
+  return out.join("\n");
 }
 
 // Child tool failures carry their cause (gap found 2026-11-17,
@@ -603,7 +693,7 @@ async function driveSubagent(root: string, item: Subagent, opts?: SpawnOpts): Pr
     item.finishedAt = new Date().toISOString();
     put(root, item);
     finishLoop(root, item.loopId, "completed", result);
-    recordActivity(root, item.profile, "subagent-done", "Sub-agent " + item.id.slice(0, 8) + " (" + item.role + ") returned: " + result.replace(/\s+/g, " ").slice(0, 160));
+    recordActivity(root, item.profile, "subagent-done", subagentDoneLedgerSummary(item.id, item.role, result));
     if (item.chatId && !item.quiet) {
       const db = new ChatStore(root);
       try { db.add(item.chatId, "assistant", ("Sub-agent result:\n" + result).slice(0, 12000)); }
@@ -663,7 +753,7 @@ async function postFoldedAnswer(root: string, item: Subagent, fold: ((item: Suba
   const db = new ChatStore(root);
   try { db.add(item.chatId, "assistant", text.slice(0, 4000)); }
   finally { db.close(); }
-  recordActivity(root, item.profile, "subagent-folded", "Folded " + item.id.slice(0, 8) + " into chat " + item.chatId.slice(0, 8));
+  recordActivity(root, item.profile, "subagent-folded", subagentFoldedLedgerSummary(item.id, item.chatId));
 }
 
 /**

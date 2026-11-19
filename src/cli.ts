@@ -77,7 +77,7 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
-import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, withSpawnPool } from "./subagents.js";
+import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, planJob, remainingPool } from "./orchestration.js";
 import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
@@ -963,6 +963,7 @@ subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task"
 subagentCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listSubagents(program.opts().workspace,o.profile)));
 subagentCmd.command("status").argument("<id>").action((id:string)=>{const found=getSubagent(program.opts().workspace,id);if(!found)throw new Error("Unknown sub-agent: "+id);output(found);});
 subagentCmd.command("cancel").argument("<id>").action((id:string)=>output(cancelSubagent(program.opts().workspace,id)));
+subagentCmd.command("scorecard").description("Sub-agent lifecycle as plain text with no clock reading - verdict, counts per lifecycle stage (spawned, done, failed, folded), and the distinct-child count as a number only (never a stamp, an actor, a child id, a role, a chat id, a result, or a reason), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a failed child or a mix shift is the news (this is the sam-subagents script job's stdout; a pure read over the same activity ledger the lifecycle seams ledger: creates nothing, spends no model call, spawns nothing; exits 0 always, the verdict lives in the text)").action(()=>output(subagentScorecardText(program.opts().workspace)));
 
 const operative=program.command("operative").description("Operative capability registry (declarations, never credentials)");
 operative.command("register").argument("<name>").argument("<adapter>").argument("<capabilities>").option("--max <n>","Max concurrent assignments").action((name:string,adapter:string,capabilities:string,options:{max?:string})=>{
