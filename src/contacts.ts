@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Per-contact permission notes (P12). SAM works for other people through its
@@ -284,7 +284,7 @@ export function upsertContact(root: string, input: ContactUpsertInput): Contact 
       }
       found.display = display; found.updatedAt = now;
       updateContactRow(root, found);
-      recordActivity(root, "owner", "contact", "Updated contact " + slug + (found.noDraft ? " (no drafts)" : ""));
+      recordActivity(root, "owner", "contact", contactUpdatedLedgerSummary(slug, found.noDraft));
       renderAddressBookQuietly(root);
       return found;
     }
@@ -300,7 +300,7 @@ export function upsertContact(root: string, input: ContactUpsertInput): Contact 
       ...(input.sourceChat ? { sourceChats: [input.sourceChat] } : {}),
     };
     insertContactRow(root, contact);
-    recordActivity(root, "owner", "contact", "Added contact " + slug + (contact.noDraft ? " (no drafts)" : ""));
+    recordActivity(root, "owner", "contact", contactAddedLedgerSummary(slug, contact.noDraft));
     renderAddressBookQuietly(root);
     return contact;
   } catch (error) { failContact(root, "write", error); }
@@ -315,10 +315,82 @@ export function removeContact(root: string, name: string): boolean {
     if (result.changes === 0) return false;
   } catch (error) { failContact(root, "write", error); }
   finally { db!.close(); }
-  recordActivity(root, "owner", "contact", "Removed contact " + slug);
+  recordActivity(root, "owner", "contact", contactRemovedLedgerSummary(slug));
   renderAddressBookQuietly(root);
   return true;
 }
+// The ONE writers for the contact ledger lines: an add, an
+// update, and a remove each ledger exactly one of these
+// shapes (the slug, plus the " (no drafts)" suffix on an add
+// or update whose contact carries the noDraft mark; a remove
+// never carries it), so the writers and the scorecard's
+// parser below can never drift.
+export function contactAddedLedgerSummary(slug: string, noDraft: boolean): string {
+  return "Added contact " + slug + (noDraft ? " (no drafts)" : "");
+}
+export function contactUpdatedLedgerSummary(slug: string, noDraft: boolean): string {
+  return "Updated contact " + slug + (noDraft ? " (no drafts)" : "");
+}
+export function contactRemovedLedgerSummary(slug: string): string {
+  return "Removed contact " + slug;
+}
+
+// The contact scorecard (2026-11-19, the measured-proof
+// series): contact changes have ledgered as "contact" lines
+// in the three fixed shapes above since the Address Book
+// landed, but the class was never folded, so how the owner's
+// people file actually moves - adds against updates against
+// removes, and how many of the touched contacts carry the
+// one hard rule (no drafts) - was invisible in aggregate.
+// This text folds the whole ledger's contact lines to counts
+// only, on ONE line: the added, updated, and removed counts,
+// the summed no-drafts count, and the total. The slug is
+// parsed only to validate the fixed shape and is never
+// printed, and no distinct-slug count is taken - a slug is a
+// person's name and does not belong in a trending surface.
+// A summary matching no fixed shape counts toward the total
+// and the unparseable count only, and is never printed. The
+// verdict is attention only when a line is unparseable, else
+// clear - contact changes are the healthy case, not news by
+// themselves. No stamp, no actor, no slug, and no verbatim
+// summary enters the text, so a day no contact changes is
+// byte-identical and P3-silent, and a malformed line or a
+// mix shift is the news. A pure read: it creates nothing,
+// spends no model call, and touches no contact - the ledger
+// and the store are untouched.
+export function parseContactSummary(summary: string): { action: "added" | "updated" | "removed"; noDraft: boolean } | null {
+  const m = /^(Added|Updated|Removed) contact \S+( \(no drafts\))?$/.exec(summary);
+  if (!m) return null;
+  if (m[1] === "Removed" && m[2]) return null;
+  const action = m[1] === "Added" ? "added" : m[1] === "Updated" ? "updated" : "removed";
+  return { action, noDraft: !!m[2] };
+}
+export function contactScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "contact" });
+  let added = 0;
+  let updated = 0;
+  let removed = 0;
+  let noDrafts = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseContactSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.action === "added") added += 1;
+    else if (parsed.action === "updated") updated += 1;
+    else removed += 1;
+    if (parsed.noDraft) noDrafts += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Contacts: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(added) + " added");
+  parts.push(String(updated) + " updated");
+  parts.push(String(removed) + " removed");
+  parts.push(String(noDrafts) + " no-drafts");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // The one hard rule a note can carry: this person never gets a draft.
 export function draftBlockedFor(root: string, name: string): Contact | null {
   const contact = getContact(root, name);
