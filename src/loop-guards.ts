@@ -147,6 +147,76 @@ export function codeVerificationOwnerLine(status: VerificationStatus): string | 
   return null;
 }
 
+// The ONE writer for the loop-check ledger line: both chat
+// loops' finish self-checks ledger exactly this shape when a
+// code-changing turn closes over a verification state that
+// carries a note (unverified or failed), so the writer and
+// the scorecard's parser below can never drift. Null exactly
+// when codeVerificationLedgerNote is null - a verified or
+// clean close ledgers nothing, as it always has.
+export function loopCheckLedgerSummary(status: VerificationStatus): string | null {
+  const ledgerNote = codeVerificationLedgerNote(status);
+  if (!ledgerNote) return null;
+  return "Chat turn closed over code in verification state " + status.state + " (" + status.pendingChanges.map(c => c.path).join(", ") + ") - " + ledgerNote;
+}
+
+// The loop-check scorecard (2026-11-19, the measured-proof
+// series): turns closing over code in an unverified or failed
+// verification state have ledgered as "loop-check" lines in
+// the one fixed shape above since the finish self-check
+// landed, but the class was never folded, so how often SAM's
+// turns end over code SAM itself does not count as done - and
+// how many files those closes leave pending - was invisible
+// in aggregate. This text folds the whole ledger's loop-check
+// lines to counts only, on ONE line: counts per fixed state
+// bucket (unverified, failed, other), the summed pending-file
+// count, and the total. The pending paths are parsed only to
+// count them and are never printed, and the verification
+// note's text never enters the fold. A summary matching no
+// fixed shape counts toward the total and the unparseable
+// count only, and is never printed. The verdict is attention
+// when any line exists or any line is unparseable, else
+// clear - every loop-check line is by construction a turn
+// that closed over code not counted done, so the class's
+// existence is the news, not a mix detail. No stamp, no
+// actor, no path, and no verbatim summary enters the text, so
+// a day no turn closes short is byte-identical and P3-silent,
+// and a new close or a malformed line is the news. A pure
+// read: it creates nothing, spends no model call, and closes
+// no turn - the ledger and the store are untouched.
+export function parseLoopCheckSummary(summary: string): { state: "unverified" | "failed" | "other"; files: number } | null {
+  const m = /^Chat turn closed over code in verification state (\S+) \((.*?)\) - Verification note: .+$/.exec(summary);
+  if (!m) return null;
+  const state = m[1] === "unverified" ? "unverified" : m[1] === "failed" ? "failed" : "other";
+  const files = m[2].trim() === "" ? 0 : m[2].split(", ").length;
+  return { state, files };
+}
+export function loopCheckScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-check" });
+  let unverified = 0;
+  let failed = 0;
+  let other = 0;
+  let files = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseLoopCheckSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.state === "unverified") unverified += 1;
+    else if (parsed.state === "failed") failed += 1;
+    else other += 1;
+    files += parsed.files;
+  }
+  const parts: string[] = [];
+  parts.push("Loop checks: " + (lines.length > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(unverified) + " unverified");
+  parts.push(String(failed) + " failed");
+  parts.push(String(other) + " other");
+  parts.push(String(files) + " pending files");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 /**
  * - TURN ECONOMY (Dip ruling 2026-11-15, after chat afb0f1ef):
  *   a live owner chat turn is a conversation, not an engineering

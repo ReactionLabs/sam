@@ -8,7 +8,7 @@ import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { annotateToolResult } from "./source-citations.js";
-import { codeVerificationLedgerNote, codeVerificationOwnerLine, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState, TurnEconomyGuard } from "./loop-guards.js";
+import { codeVerificationLedgerNote, codeVerificationOwnerLine, loopCheckLedgerSummary, failureSignature, repeatedFailureStubContent, toolResultError, repeatCallResult, callChangesState, TurnEconomyGuard } from "./loop-guards.js";
 import { errorReason } from "./telegram.js";
 import { codeFileExists } from "./code.js";
 import { verificationStatus } from "./verification.js";
@@ -153,7 +153,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
    // The bookkeeping lands in the activity ledger; the reply
    // itself carries at most the one plain owner sentence
    // (Dip, 2026-11-15), same seam as the own-tools loop.
-   recordActivity(root,own?.actor??"sam","loop-check","Chat turn closed over code in verification state "+status.state+" ("+status.pendingChanges.map(c=>c.path).join(", ")+") - "+ledgerNote);
+   recordActivity(root,own?.actor??"sam","loop-check",loopCheckLedgerSummary(status) as string);
    const ownerLine=codeVerificationOwnerLine(status);
    return ownerLine?answer+"\n\n"+ownerLine:answer;
   }catch{return answer;}
