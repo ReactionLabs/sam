@@ -19,7 +19,7 @@ export type Connector = { id:string; name:string; url:string; tokenEnv:string; v
 // Every tool SAM may ever call, across all known MCP servers. All are read-only by
 // construction on their servers; authorization still intersects this set with the
 // connector's own allowedTools and the tools the server actually advertises.
-export const readOnlyTools = new Set(["whoami","list_leads","get_lead","pipeline_summary","analytics_summary","coin_lookup","list_candidates","list_alerts","paper_setups","stack_health"]);
+export const readOnlyTools = new Set(["whoami","list_leads","get_lead","pipeline_summary","analytics_summary","coin_lookup","list_candidates","list_alerts","paper_setups","stack_health","list_edit_requests","get_edit_request","list_hq_clients","get_hq_client","list_hq_recipients","list_hq_notifications","get_hq_insights"]);
 const namePattern = /^[A-Za-z0-9 _.-]{1,64}$/;
 const envPattern = /^SAM_MCP_TOKEN_[A-Z0-9_]{1,64}$/;
 function connectorsFile(root:string){return join(resolve(root),".sam","connectors.json");}
