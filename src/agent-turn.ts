@@ -28,7 +28,7 @@ import { assembleTurnMessages } from "./prompt-assembly.js";
 import { createTurnControl, TurnInvalidatedError, MODEL_REQUEST_TIMEOUT_MS, OWNER_TURN_DEADLINE_MS, turnDeadlineFallbackAnswer, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, isReasoningNarration, narrationChannelLedgerSummary, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import { attachCitation, processReplyCitations } from "./chat-citations.js";
-import { attachReplySources, processReplySources, type RunSource } from "./source-citations.js";
+import { attachReplySources, processReplySources, sourceCitationLedgerSummary, type RunSource } from "./source-citations.js";
 import type { ChatSearchHit } from "./chat-manage.js";
 
 // Dashboard UI guidance rides AFTER the one shared capability
@@ -616,7 +616,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   }
   if(savedId&&registeredSources.length){
     if(attachReplySources(root,{messageId:savedId,chatId,actor:profileName,registered:registeredSources,cited:citedSources})&&citedSources.length)
-      recordActivity(root,profileName,"source-citation","Sources attached in chat "+chatId.slice(0,8)+": "+citedSources.length+" cited of "+registeredSources.length+" registered this run");
+      recordActivity(root,profileName,"source-citation",sourceCitationLedgerSummary(chatId,citedSources.length,registeredSources.length));
   }
   // The heart lands only if the eyes are still showing: a deliberate
   // sam_react during the turn (or the owner's own CLI stamp) is

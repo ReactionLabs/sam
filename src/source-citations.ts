@@ -394,6 +394,67 @@ export function sourceCitationRejectionScorecardText(root: string): string {
   return out.join("\n");
 }
 
+// The ONE writer for the positive citation line: a turn that
+// saved a reply with a Sources list attached ledgers exactly
+// this shape (the chat id's first 8, the cited count, the
+// registered count), so the writer and the scorecard's parser
+// below can never drift.
+export function sourceCitationLedgerSummary(chatId: string, cited: number, registered: number): string {
+  return "Sources attached in chat " + chatId.slice(0, 8) + ": " + String(cited) + " cited of " + String(registered) + " registered this run";
+}
+
+// The source-citation scorecard (2026-11-19, the
+// measured-proof series): the rejection scorecard above has
+// counted fabricated citations since 2026-11-18, but the
+// positive class - replies that actually attached a Sources
+// list, ledgered as "source-citation" lines in the one fixed
+// shape sourceCitationLedgerSummary writes - was never
+// folded, so whether SAM grounds its replies at all, and
+// what share of a run's registered sources its replies
+// actually cite, was invisible in aggregate. This text folds
+// the whole ledger's source-citation lines to counts only:
+// the replies with sources, the summed cited and registered
+// counts, and the distinct-chat count as a NUMBER only
+// (counted from the lines' chat ids, which are never
+// printed). A summary matching the fixed shape counts as a
+// reply and contributes nothing else, and is never printed.
+// The verdict is attention only when a line is unparseable,
+// else clear - attached sources are the healthy case, not
+// news by themselves. No stamp, no actor, no chat id, no
+// source descriptor, no verbatim summary enters the text, so
+// a day no reply attaches sources is byte-identical and
+// P3-silent, and a malformed line or a mix shift is the
+// news. A pure read: it creates nothing, spends no model
+// call, and retries nothing - the ledger and the citation
+// pass are untouched.
+export function parseSourceCitation(summary: string): { chatId: string; cited: number; registered: number } | null {
+  const m = /^Sources attached in chat ([0-9a-f]+): (\d+) cited of (\d+) registered this run$/.exec(summary);
+  if (!m) return null;
+  return { chatId: m[1], cited: Number(m[2]), registered: Number(m[3]) };
+}
+export function sourceCitationScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "source-citation" });
+  let cited = 0;
+  let registered = 0;
+  let unparseable = 0;
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseSourceCitation(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    cited += parsed.cited;
+    registered += parsed.registered;
+    chats.add(parsed.chatId);
+  }
+  const out: string[] = [];
+  out.push("Source citations: " + (unparseable > 0 ? "attention" : "clear"));
+  out.push("Replies with sources: " + String(lines.length));
+  out.push("Cited sources: " + String(cited));
+  out.push("Registered sources: " + String(registered));
+  out.push("Distinct chats: " + String(chats.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never attaches a source or prints one; a malformed line or a mix shift is the news");
+  return out.join("\n");
+}
+
 // ----------------------------------------------------------------
 // The store: one row per answered reply, keyed by the reply's own
 // message id, holding the run's full registry and the subset the
