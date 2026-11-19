@@ -196,8 +196,80 @@ export function trimHistoryForRetry<T>(messages: T[]): T[] {
  * appends errno-style codes, redacts bot-token segments, and
  * collapses whitespace; causeless errors read byte-identically,
  * and the line's prefix and suffix are exactly the old shape. */
-export function turnRetrySummary(error: unknown): string {
+export function turnRetryLedgerSummary(error: unknown): string {
   return "Context reset after '" + errorReason(error) + "' before any tool ran; history trimmed to the last 6 messages";
+}
+export function turnRetrySummary(error: unknown): string {
+  return turnRetryLedgerSummary(error);
+}
+// The turn-retry scorecard (2026-11-19, the measured-proof
+// series): the context-reset retry has ledgered as a
+// "turn-retry" line in the one fixed shape above since the
+// context-reset fix landed (2026-11-10), but the class was
+// never folded, so how often a turn's history had to be
+// reset for the turn to survive, and whether the trigger
+// was unsafe or empty model output, was invisible in
+// aggregate - its turn-lifecycle siblings (turn, turn-failed,
+// turn-cost, turn-reset, tool-budget, provider-retry) are
+// all measured. Every retry line is by construction a first
+// completion that failed before any tool ran, so the verdict
+// is attention when any line exists or any line is
+// unparseable, else clear. This text folds the whole
+// ledger's turn-retry lines to counts only, on ONE line: the
+// parsed retry count, counts per fixed reason bucket
+// (unsafe / empty / other, read from the reason's head - the
+// two failure shapes the reset exists for, everything else
+// other), and the total. No stamp, no actor, and no verbatim
+// reason enters the text. The stored shapes are TWO: the
+// writer's full shape, and the ledger's 300-char capped
+// shape (a long cause chain is cut mid-reason with the
+// suffix gone); a capped line's reason head still buckets
+// exactly - unsafe and empty both name themselves at the
+// head - and it is marked incomplete, the turn-cost
+// precedent. A capped shape is only a capped shape at the
+// cap length: a shorter line missing its suffix matches
+// neither shape, counts toward the total and the
+// unparseable count only, and is never printed. A pure
+// read: it creates nothing, spends no model call, and
+// retries nothing - the ledger and the retry seams are
+// untouched.
+export type TurnRetryReasonBucket = "unsafe" | "empty" | "other";
+function turnRetryBucket(reasonHead: string): TurnRetryReasonBucket {
+  if (reasonHead.startsWith("Unsafe model output")) return "unsafe";
+  if (reasonHead.startsWith("Empty model response")) return "empty";
+  return "other";
+}
+export function parseTurnRetrySummary(summary: string): { bucket: TurnRetryReasonBucket; complete: boolean } | null {
+  const full = /^Context reset after '(.+)' before any tool ran; history trimmed to the last 6 messages$/.exec(summary);
+  if (full) return { bucket: turnRetryBucket(full[1]), complete: true };
+  if (summary.length >= 300) {
+    const capped = /^Context reset after '(.+)$/.exec(summary);
+    if (capped) return { bucket: turnRetryBucket(capped[1]), complete: false };
+  }
+  return null;
+}
+export function turnRetryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-retry" });
+  let unsafe = 0;
+  let empty = 0;
+  let other = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseTurnRetrySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.bucket === "unsafe") unsafe += 1;
+    else if (parsed.bucket === "empty") empty += 1;
+    else other += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Turn retries: " + (lines.length > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " retries");
+  parts.push("unsafe " + String(unsafe));
+  parts.push("empty " + String(empty));
+  parts.push("other " + String(other));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 export function budgetLedgerSummary(executed: string[], skipped: string[], maxCalls: number, reason: TurnEndReason = "calls"): string {
   if (reason === "steps") return "Turn step limit reached: " + executed.length + " calls used (" + (executed.join(", ") || "none") + ") - the call budget (" + maxCalls + ") was NOT reached" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
