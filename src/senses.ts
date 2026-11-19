@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { lstatSync } from "node:fs";
 import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -159,7 +159,7 @@ export async function runSense(root: string, actor: string, name: SenseName, opt
   const args = senseArgv(name, opts);
   const binary = sensesBinary(opts.env ?? process.env);
   if (!binary) {
-    recordActivity(root, actor, "sense-read", "Sense " + name + " read: reader not installed");
+    recordActivity(root, actor, "sense-read", senseReadLedgerSummary(name, "reader not installed"));
     return { sense: name, ok: false, exitCode: null, timedOut: false, output: "", truncated: false, durationMs: 0, error: SENSES_NOT_INSTALLED };
   }
   const runner = opts.runner ?? defaultSenseRunner;
@@ -182,6 +182,83 @@ export async function runSense(root: string, actor: string, name: SenseName, opt
     ...(!notInstalled && raw.exitCode !== 0 && !raw.timedOut ? { error: "The senses reader exited with code " + String(raw.exitCode) + " - it may not be authorized yet (authorizing it with the owner's Google account is the operator's act). Its output is carried below." } : {}),
     ...(raw.timedOut ? { error: "The senses reader timed out after " + String(SENSE_TIMEOUT_MS / 1000) + " seconds." } : {}),
   };
-  recordActivity(root, actor, "sense-read", "Sense " + name + " read: " + (result.error && !raw.output ? result.error.slice(0, 120) : result.ok ? "ok (" + output.length + " chars)" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
+  const tail = result.error && !raw.output ? result.error.slice(0, 120) : result.ok ? "ok (" + output.length + " chars)" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "");
+  recordActivity(root, actor, "sense-read", senseReadLedgerSummary(name, tail));
   return result;
+}
+
+// --- The ONE writer for the sense-read ledger lines
+// (2026-11-19, the measured-proof series): both seams above
+// ledger exactly this shape, so the scorecard's parser below
+// reads what the seams have always written. The outcome
+// argument arrives composed by the seam, exactly as the
+// inline writers composed it (the plain not-installed tail,
+// an ok char count, an exit tail, or the reader error's own
+// opening slice). A sense line never carries the query or
+// the content, by this module's standing rule.
+export function senseReadLedgerSummary(name: SenseName, outcome: string): string {
+  return "Sense " + name + " read: " + outcome;
+}
+
+// The sense scorecard (2026-11-19, the measured-proof
+// series): the P2 senses' one ledger class folded nowhere,
+// so how often SAM tried to see the owner's day, through
+// which sense, and how those reads ended was invisible in
+// aggregate. The verdict is attention when any parsed read
+// is not ok or any line is unparseable, else clear: a sense
+// read is attempted only when the owner or the brief asks,
+// so every read that ends without the owner's day in hand
+// is a day SAM could not see. This text folds the class to
+// counts only, on ONE line: the parsed read count split
+// mail / agenda, counts per fixed outcome bucket (ok, not
+// installed, failed, timed out), the summed chars from ok
+// lines, and the total. No stamp, no actor, no query, no
+// reader output, no error text, and no verbatim summary
+// enters the text. A summary matching no fixed shape counts
+// toward the total and the unparseable count only, and is
+// never printed. A pure read: it creates nothing, spends no
+// model call, and reads no sense - the ledger and the sense
+// seams are untouched. (The error-opening shapes sit under
+// the ledger's 300-char cap whole - the seam slices them to
+// 120 - so their parsers anchor on the fixed prefixes.)
+export type SenseOutcomeBucket = "ok" | "not-installed" | "failed" | "timed-out";
+export function parseSenseReadSummary(summary: string): { sense: SenseName; bucket: SenseOutcomeBucket; chars: number } | null {
+  const m = /^Sense (mail|agenda) read: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const sense = m[1] as SenseName;
+  const tail = m[2];
+  if (tail === "reader not installed") return { sense, bucket: "not-installed", chars: 0 };
+  if (tail.startsWith("The senses reader (gog, the Google Workspace CLI) is not installed")) return { sense, bucket: "not-installed", chars: 0 };
+  if (/^The senses reader timed out after \d+ seconds\.$/.test(tail)) return { sense, bucket: "timed-out", chars: 0 };
+  if (/^The senses reader exited with code -?\d+/.test(tail)) return { sense, bucket: "failed", chars: 0 };
+  const ok = /^ok \((\d+) chars\)$/.exec(tail);
+  if (ok) return { sense, bucket: "ok", chars: Number(ok[1]) };
+  const exit = /^exit (-?\d+|null)( \(timed out\))?$/.exec(tail);
+  if (exit) return { sense, bucket: exit[2] ? "timed-out" : "failed", chars: 0 };
+  return null;
+}
+export function senseScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "sense-read" });
+  const senses: Record<SenseName, number> = { mail: 0, agenda: 0 };
+  const buckets: Record<SenseOutcomeBucket, number> = { ok: 0, "not-installed": 0, failed: 0, "timed-out": 0 };
+  let parsed = 0;
+  let chars = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const p = parseSenseReadSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1;
+    senses[p.sense] += 1;
+    buckets[p.bucket] += 1;
+    chars += p.chars;
+  }
+  const notOk = buckets["not-installed"] + buckets.failed + buckets["timed-out"];
+  const parts: string[] = [];
+  parts.push("Sense reads: " + (unparseable > 0 || notOk > 0 ? "attention" : "clear"));
+  parts.push(String(parsed) + " reads (mail " + String(senses.mail) + ", agenda " + String(senses.agenda) + ")");
+  parts.push("outcomes (ok " + String(buckets.ok) + ", not installed " + String(buckets["not-installed"]) + ", failed " + String(buckets.failed) + ", timed out " + String(buckets["timed-out"]) + ")");
+  parts.push(String(chars) + " chars read");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
