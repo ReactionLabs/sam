@@ -1,5 +1,5 @@
 import { connectors, readConnectorTool, type Connector } from "./connectors.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 /**
  * The deterministic stack watch (the stack-watch deterministic
@@ -193,9 +193,73 @@ export async function buildStackWatchReport(root: string, opts: { call?: StackTo
     frozen,
   };
   recordActivity(root, opts.actor ?? STACK_WATCH_ACTOR, "stack-watch",
-    "Stack watch (deterministic): candidates " + formatCount(report.candidatesTotal) +
-    ", newest " + secondPrecision(report.candidatesNewest) +
-    ", entered " + (entered.exact ? String(entered.count) : entered.count + "+ (page cap)") +
-    ", frozen " + (frozen ? "yes" : "no"));
+    stackWatchLedgerSummary(report.candidatesTotal, report.candidatesNewest, entered, report.frozen));
   return report;
+}
+
+// --- The ONE writer for the stack-watch ledger lines
+// (2026-11-19, the measured-proof series): the report seam
+// above ledgers exactly this shape, so the scorecard's parser
+// below reads what the seam has always written.
+export function stackWatchLedgerSummary(candidatesTotal: number, candidatesNewest: string, entered: EnteredCount, frozen: boolean): string {
+  return "Stack watch (deterministic): candidates " + formatCount(candidatesTotal) +
+    ", newest " + secondPrecision(candidatesNewest) +
+    ", entered " + (entered.exact ? String(entered.count) : entered.count + "+ (page cap)") +
+    ", frozen " + (frozen ? "yes" : "no");
+}
+
+// The stack-watch scorecard (2026-11-19, the measured-proof
+// series): the deterministic watch's one ledger class folded
+// nowhere, so how many watches had run, how many found the
+// stack frozen versus moving, and whether the entered count
+// was ever knowable exactly was invisible in aggregate. The
+// verdict is attention when any parsed watch found the stack
+// frozen or any line is unparseable, else clear. This text
+// folds the class to counts only, on ONE line: the parsed
+// watch count, frozen counts (yes / no), entered counts per
+// fixed shape bucket (floor / exact), the distinct-newest
+// count as a number only, and the total. No stamp, no actor,
+// no connector name, no newest value, and no verbatim summary
+// enters the text. A summary matching no fixed shape counts
+// toward the total and the unparseable count only, and is
+// never printed. A pure read: it creates nothing, spends no
+// model call, and reads no connector - the ledger and the
+// report seam are untouched.
+export function parseStackWatchSummary(summary: string): { candidates: number; newest: string; entered: number; enteredFloor: boolean; frozen: boolean } | null {
+  const m = /^Stack watch \(deterministic\): candidates ([\d,]+), newest (\S+), entered (\d+)(\+ \(page cap\))?, frozen (yes|no)$/.exec(summary);
+  if (!m) return null;
+  return {
+    candidates: Number(m[1].replace(/,/g, "")),
+    newest: m[2],
+    entered: Number(m[3]),
+    enteredFloor: m[4] !== undefined,
+    frozen: m[5] === "yes",
+  };
+}
+export function stackWatchScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "stack-watch" });
+  let parsed = 0;
+  let frozenYes = 0;
+  let frozenNo = 0;
+  let enteredFloor = 0;
+  let enteredExact = 0;
+  let unparseable = 0;
+  const newestValues = new Set<string>();
+  for (const line of lines) {
+    const p = parseStackWatchSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1;
+    if (p.frozen) frozenYes += 1; else frozenNo += 1;
+    if (p.enteredFloor) enteredFloor += 1; else enteredExact += 1;
+    newestValues.add(p.newest);
+  }
+  const parts: string[] = [];
+  parts.push("Stack watches: " + (unparseable > 0 || frozenYes > 0 ? "attention" : "clear"));
+  parts.push(String(parsed) + " watches");
+  parts.push("frozen (yes " + String(frozenYes) + ", no " + String(frozenNo) + ")");
+  parts.push("entered (floor " + String(enteredFloor) + ", exact " + String(enteredExact) + ")");
+  parts.push(String(newestValues.size) + " distinct newest");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
