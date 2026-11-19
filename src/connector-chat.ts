@@ -2,7 +2,7 @@ import { connectors, connectorCredentialPresent, testConnector, readConnectorToo
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt, toolFailureError } from "./own-tools.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import type { SpawnPoolContext } from "./subagents.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
@@ -99,7 +99,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
   try{recordActivity(root,actor,"reasoning-leak-blocked",reasoningBlockedLedgerSummary(reasoningNarrationSignals(text),"connector loop"));}catch{/* the ledger never breaks a turn */}
   return null;
  };
- const trimTurnHistory=()=>{ if(messages.length>REQUEST_MESSAGE_CAP){ const dropped=trimRoundBlocks(messages); if(dropped&&!trimLogged){ trimLogged=true; try{ recordActivity(root,actor,"turn-history-trimmed","Folded "+dropped+" older completed round(s) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger"); }catch{ /* the ledger never breaks a turn */ } } } };
+ const trimTurnHistory=()=>{ if(messages.length>REQUEST_MESSAGE_CAP){ const dropped=trimRoundBlocks(messages); if(dropped&&!trimLogged){ trimLogged=true; try{ recordActivity(root,actor,"turn-history-trimmed",historyTrimLedgerSummary(dropped)); }catch{ /* the ledger never breaks a turn */ } } } };
 
  // Owner-turn ceiling + duplicate suppression, the same shapes
  // the own-tools loop rides (budgets.ts, loop-guards.ts): with a

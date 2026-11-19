@@ -169,6 +169,58 @@ export function trimRoundBlocks(messages: Array<Record<string, unknown>>, cap = 
   return dropped;
 }
 
+// The ONE writer for the turn-history-trimmed ledger line:
+// both chat loops' trimTurnHistory seams ledger exactly this
+// shape when a turn's request history crosses the cap and its
+// oldest completed rounds fold out of the model's working
+// window, so the writer and the scorecard's parser below can
+// never drift.
+export function historyTrimLedgerSummary(dropped: number): string {
+  return "Folded " + dropped + " older completed round(s) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger";
+}
+
+// The history-trim scorecard (2026-11-19, the measured-proof
+// series): turns long enough to cross the request message cap
+// have ledgered as "turn-history-trimmed" lines in the one
+// fixed shape above since the trim landed, but the class was
+// never folded, so how often turns outgrow the model's
+// working window - and how many rounds they shed doing it -
+// was invisible in aggregate. The trim itself is the
+// mechanism working as designed (the work stays in the
+// transcript and the ledger), so the verdict is attention
+// only on an unparseable line, else clear. This text folds
+// the whole ledger's trim lines to counts only, on ONE line:
+// the trimmed-turn count, the summed folded rounds, and the
+// total. A summary matching no fixed shape counts toward the
+// total and the unparseable count only, and is never printed.
+// No stamp, no actor, and no verbatim summary enters the
+// text, so a day no turn trims is byte-identical and
+// P3-silent, and a malformed line is the news. A pure read:
+// it creates nothing, spends no model call, and trims
+// nothing - the ledger and the trim seams are untouched.
+export function parseHistoryTrimSummary(summary: string): { rounds: number } | null {
+  const m = /^Folded (\d+) older completed round\(s\) out of this turn's request history to stay inside the model request limit; the work itself stays in the transcript and the ledger$/.exec(summary);
+  if (!m) return null;
+  return { rounds: Number(m[1]) };
+}
+export function historyTrimScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-history-trimmed" });
+  let rounds = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseHistoryTrimSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    rounds += parsed.rounds;
+  }
+  const parts: string[] = [];
+  parts.push("History trims: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length - unparseable) + " trimmed turns");
+  parts.push(String(rounds) + " rounds folded");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 /** Loader-loop guard (Turn honesty remainder, live evidence
  *  2026-11-10): a history-poisoned chat can spend every round
  *  calling sam_load_tools and never act - the turn then ended
