@@ -1278,7 +1278,7 @@ export async function createSandbox(root: string, actor: string, name: string, o
   const at = new Date().toISOString();
   const marker: SandboxMarker = { version: 1, name, createdBy: "sam", at };
   writeFileSync(join(dir, "sandbox.json"), JSON.stringify(marker), { mode: 0o600 });
-  recordActivity(root, actor, "sandbox-create", "Created sandbox " + name);
+  recordActivity(root, actor, "sandbox-create", sandboxCreateLedgerSummary(name));
   return { name, path: dir, work, python: py, at };
 }
 
@@ -1301,7 +1301,7 @@ export function listSandboxes(root: string): Array<{ name: string; at: string }>
 export function destroySandbox(root: string, actor: string, name: string): { name: string; removed: true } {
   const owned = requireOwnSandbox(root, name);
   rmSync(owned.dir, { recursive: true, force: false });
-  recordActivity(root, actor, "sandbox-destroy", "Deleted sandbox " + name);
+  recordActivity(root, actor, "sandbox-destroy", sandboxDestroyLedgerSummary(name));
   return { name, removed: true };
 }
 
@@ -1316,7 +1316,7 @@ export function writeSandboxFile(root: string, actor: string, name: string, rel:
   writeFileSync(temp, content, { encoding: "utf8", flag: "wx", mode: 0o644 });
   try { renameSync(temp, target); } catch (e) { try { unlinkSync(temp); } catch { /* already gone */ } throw e; }
   const digest = sha(content);
-  recordActivity(root, actor, "sandbox-write", "Wrote " + rel + " in sandbox " + name + " sha256:" + digest);
+  recordActivity(root, actor, "sandbox-write", sandboxWriteLedgerSummary(rel, name, digest));
   return { sandbox: name, path: rel, sha256: digest };
 }
 
@@ -1355,6 +1355,119 @@ export async function installSandboxPackage(root: string, actor: string, name: s
     output, truncated: (raw.output ?? "").length > MAX_OUTPUT_CHARS, durationMs: Date.now() - start,
   };
   // Same honesty rule as git-clone: the verb follows the outcome.
-  recordActivity(root, actor, "sandbox-pip", (result.ok ? "Installed " : "Install failed for ") + argv.spec + " into sandbox " + name + ": " + (result.ok ? "ok" : "exit " + String(result.exitCode) + (result.timedOut ? " (timed out)" : "")));
+  recordActivity(root, actor, "sandbox-pip", sandboxPipLedgerSummary(argv.spec, name, result.ok, result.exitCode, result.timedOut));
   return result;
+}
+
+// The ONE writers for the sandbox manager's activity lines, so
+// the scorecard's parsers below can never drift from the seams
+// they count. Each shape is byte-identical to what the seams
+// wrote inline before these writers existed.
+export function sandboxCreateLedgerSummary(name: string): string {
+  return "Created sandbox " + name;
+}
+export function sandboxDestroyLedgerSummary(name: string): string {
+  return "Deleted sandbox " + name;
+}
+export function sandboxWriteLedgerSummary(rel: string, name: string, digest: string): string {
+  return "Wrote " + rel + " in sandbox " + name + " sha256:" + digest;
+}
+export function sandboxPipLedgerSummary(spec: string, name: string, ok: boolean, exitCode: number | null, timedOut: boolean): string {
+  return (ok ? "Installed " : "Install failed for ") + spec + " into sandbox " + name + ": " + (ok ? "ok" : "exit " + String(exitCode) + (timedOut ? " (timed out)" : ""));
+}
+
+// The sandbox scorecard (2026-11-19, the measured-proof
+// series): the sandbox manager's lifecycle classes
+// (sandbox-create / sandbox-destroy / sandbox-write /
+// sandbox-pip) have ledgered in fixed shapes since the
+// manager landed, but the classes were never folded, so how
+// many sandboxes SAM has created, written into, destroyed,
+// or installed into - and whether any install ever failed -
+// was invisible in aggregate (the python-run scorecard counts
+// sandbox RUNS only, never the lifecycle). Every create,
+// write, and destroy is an operator or working act, so the
+// verdict is attention only when a pip install failed or a
+// line is unparseable, else clear - a failed install is the
+// news. This text folds the four classes to counts only, on
+// ONE line: created / destroyed / writes / installs split
+// ok / failed, the distinct-sandbox count as a number only,
+// and the total. No stamp, no actor, no sandbox name, no
+// file path, no content hash, and no package spec enters the
+// text. A pure read: it creates nothing, writes nothing,
+// installs nothing, and destroys nothing - the manager seams
+// are untouched.
+export function parseSandboxCreateSummary(summary: string): { name: string } | null {
+  const m = /^Created sandbox ([a-z][a-z0-9-]{0,31})$/.exec(summary);
+  if (!m) return null;
+  return { name: m[1] };
+}
+
+export function parseSandboxDestroySummary(summary: string): { name: string } | null {
+  const m = /^Deleted sandbox ([a-z][a-z0-9-]{0,31})$/.exec(summary);
+  if (!m) return null;
+  return { name: m[1] };
+}
+
+export function parseSandboxWriteSummary(summary: string): { name: string } | null {
+  const m = /^Wrote .+ in sandbox ([a-z][a-z0-9-]{0,31}) sha256:[0-9a-f]{64}$/.exec(summary);
+  if (!m) return null;
+  return { name: m[1] };
+}
+
+export function parseSandboxPipSummary(summary: string): { name: string; ok: boolean } | null {
+  const ok = /^Installed \S+ into sandbox ([a-z][a-z0-9-]{0,31}): ok$/.exec(summary);
+  if (ok) return { name: ok[1], ok: true };
+  const bad = /^Install failed for \S+ into sandbox ([a-z][a-z0-9-]{0,31}): exit .+$/.exec(summary);
+  if (bad) return { name: bad[1], ok: false };
+  return null;
+}
+
+export function sandboxScorecardText(root: string): string {
+  const createLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "sandbox-create" });
+  const destroyLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "sandbox-destroy" });
+  const writeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "sandbox-write" });
+  const pipLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "sandbox-pip" });
+  let created = 0;
+  let destroyed = 0;
+  let writes = 0;
+  let installsOk = 0;
+  let installsFailed = 0;
+  let unparseable = 0;
+  const names = new Set<string>();
+  for (const line of createLines) {
+    const parsed = parseSandboxCreateSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    created += 1;
+  }
+  for (const line of destroyLines) {
+    const parsed = parseSandboxDestroySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    destroyed += 1;
+  }
+  for (const line of writeLines) {
+    const parsed = parseSandboxWriteSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    writes += 1;
+  }
+  for (const line of pipLines) {
+    const parsed = parseSandboxPipSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    if (parsed.ok) installsOk += 1; else installsFailed += 1;
+  }
+  const installs = installsOk + installsFailed;
+  const total = createLines.length + destroyLines.length + writeLines.length + pipLines.length;
+  const parts: string[] = [];
+  parts.push("Sandboxes: " + (installsFailed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(created) + " created");
+  parts.push(String(destroyed) + " destroyed");
+  parts.push(String(writes) + " writes");
+  parts.push(String(installs) + " installs (ok " + String(installsOk) + ", failed " + String(installsFailed) + ")");
+  parts.push(String(names.size) + " distinct sandboxes");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
