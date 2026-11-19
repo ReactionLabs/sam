@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
-import { getVaultCredentialValue, listVaultCredentials, VAULT_NAME_RE } from "./vault.js";
+import { getVaultCredentialValue, listVaultCredentials, VAULT_NAME_RE, vaultConnectorUseLedgerSummary } from "./vault.js";
 import { errorReason } from "./telegram.js";
 
 // A connector's credential comes from exactly one of two places:
@@ -301,7 +301,7 @@ export function connectorCredentialPresent(root:string,c:Connector):boolean{
 // outcome only - never the credential value.
 function ledgerConnectorVaultUse(root:string,c:Connector,purpose:string,outcome:string):void{
  if(!c.vaultKey)return;
- try{recordActivity(root,"sam","vault-use","Vault credential "+c.vaultKey+" used for connector \""+c.name+"\" ("+purpose+") - "+outcome);}catch{/* the ledger never breaks a connector call */}
+ try{recordActivity(root,"sam","vault-use",vaultConnectorUseLedgerSummary(c.vaultKey,c.name,purpose,outcome));}catch{/* the ledger never breaks a connector call */}
 }
 export function removeConnector(root:string,id:string):boolean{
  if(!storeExists(root))return false;

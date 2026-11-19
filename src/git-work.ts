@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { recordActivity } from "./activity.js";
 import { codeRoot } from "./code.js";
-import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
+import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl, vaultPushUseLedgerSummary } from "./vault.js";
 
 /**
  * Git discipline (Phase D item 5, Dip's coder program C4, ordered
@@ -296,7 +296,7 @@ export async function pushBranch(root: string, branch: string, runner?: GitPushR
     let host = "";
     try { host = new URL(originUrl).hostname; } catch { /* the origin was read from git config */ }
     recordActivity(root, "owner", "vault-use",
-      "Vault credential " + injected.credentialName + " injected for git-push of " + branch + " to " + (host || "origin") + ": " + status);
+      vaultPushUseLedgerSummary(injected.credentialName, branch, host || "origin", status));
   }
   if (result.exitCode !== 0) throw new Error("git push failed (exit " + String(result.exitCode) + "): " + result.output.trim().slice(0, 240));
   recordActivity(root, "owner", "git-push", "Pushed " + branch + " to origin (" + sha.slice(0, 12) + ")" + (injected.credentialName ? " with vault credential " + injected.credentialName : ""));

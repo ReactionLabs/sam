@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 /**
  * The SAM VAULT (Dip ruling 2026-11-12 09:13 EST): an owner-only
@@ -171,6 +171,41 @@ export function validateVaultHosts(hosts: readonly string[]): string[] {
   return out;
 }
 
+/** The ONE writer for the vault-set ledger line. Every deposit
+ *  or replacement composes its audit line here, so the shape
+ *  the vault scorecard parses is the shape this function
+ *  writes - name, stored/replaced, hosts, purpose; never the
+ *  value. */
+export function vaultSetLedgerSummary(name: string, replaced: boolean, hosts: readonly string[], purpose: string): string {
+  return "Vault credential " + name + " " + (replaced ? "replaced" : "stored") +
+    (hosts.length ? " for hosts " + hosts.join(", ") : " (no hosts - named consumers only)") +
+    (purpose ? " - " + purpose : "");
+}
+
+/** The ONE writer for the vault-remove ledger line. */
+export function vaultRemoveLedgerSummary(name: string): string {
+  return "Vault credential " + name + " removed";
+}
+
+/** The ONE writer for a connector call's vault-use ledger line
+ *  (connectors.ts rides it): the credential name, the connector,
+ *  the call's purpose, and the outcome - never the value. */
+export function vaultConnectorUseLedgerSummary(name: string, connector: string, purpose: string, outcome: string): string {
+  return "Vault credential " + name + " used for connector \"" + connector + "\" (" + purpose + ") - " + outcome;
+}
+
+/** The ONE writer for a git-clone injection's vault-use ledger
+ *  line (code.ts rides it, through its boundedLedger cap). */
+export function vaultCloneUseLedgerSummary(name: string, host: string, status: string): string {
+  return "Vault credential " + name + " injected for git-clone of " + host + ": " + status;
+}
+
+/** The ONE writer for a git-push injection's vault-use ledger
+ *  line (git-work.ts rides it). */
+export function vaultPushUseLedgerSummary(name: string, branch: string, host: string, status: string): string {
+  return "Vault credential " + name + " injected for git-push of " + branch + " to " + host + ": " + status;
+}
+
 /** Deposit or replace a credential. Operator act only - the CLI
  *  is the sole caller; the value arrives out of band and is
  *  never printed, returned, or ledgered. */
@@ -202,9 +237,7 @@ export function setVaultCredential(
       .run(name, JSON.stringify(record));
     tightenVaultFiles(root);
     recordActivity(root, actor, "vault-set",
-      "Vault credential " + name + " " + (existing ? "replaced" : "stored") +
-      (hosts.length ? " for hosts " + hosts.join(", ") : " (no hosts - named consumers only)") +
-      (purpose ? " - " + purpose : ""));
+      vaultSetLedgerSummary(name, !!existing, hosts, purpose));
     return viewOf(record);
   } finally { db.close(); }
 }
@@ -219,7 +252,7 @@ export function removeVaultCredential(root: string, actor: string, name: string)
     const info = db.prepare("DELETE FROM vault_credentials WHERE name = ?").run(name);
     if (Number(info.changes) === 0) return false;
     tightenVaultFiles(root);
-    recordActivity(root, actor, "vault-remove", "Vault credential " + name + " removed");
+    recordActivity(root, actor, "vault-remove", vaultRemoveLedgerSummary(name));
     return true;
   } finally { db.close(); }
 }
@@ -262,6 +295,104 @@ export function vaultCredentialForUrl(root: string, url: string): { name: string
     const match = readAll(db).find(c => c.hosts.includes(host));
     return match ? { name: match.name, value: match.value, purpose: match.purpose } : null;
   } finally { db.close(); }
+}
+
+// The vault scorecard (2026-11-19, the measured-proof
+// series): the vault's audit classes (vault-set / vault-remove
+// / vault-use) have ledgered in the ONE writers' fixed shapes
+// since the vault landed, but the classes were never folded,
+// so how many deposits SAM holds, how often a credential is
+// actually spent, on which surface, and whether any spend
+// ever failed was invisible in aggregate - until 2026-11-19
+// the classes held no real credential at all, and the day the
+// first one landed (the Second Shift operator key) it was
+// spent within the hour. Every line is by construction an
+// audit record of custody, so the verdict is attention only
+// when a use failed or a line is unparseable, else clear - a
+// deposit or removal is an operator act, a failed spend is
+// the news. This text folds the three classes to counts only,
+// on ONE line: stored / replaced / removed, uses split ok /
+// failed and per surface (connector / git-clone / git-push),
+// the distinct-credential count as a number only, and the
+// total. No stamp, no actor, no credential name, no host, and
+// no purpose enters the text - a vault fold that printed
+// names would leak the custody map it exists to watch, and
+// the value never enters the ledger at all. A pure read: it
+// creates nothing, opens no credential, and spends nothing -
+// the vault store and the use seams are untouched.
+export function parseVaultSetSummary(summary: string): { name: string; replaced: boolean } | null {
+  const m = /^Vault credential ([a-z0-9][a-z0-9-]{0,63}) (stored|replaced) (?:for hosts .+|\(no hosts - named consumers only\))/.exec(summary);
+  if (!m) return null;
+  return { name: m[1], replaced: m[2] === "replaced" };
+}
+
+export function parseVaultRemoveSummary(summary: string): { name: string } | null {
+  const m = /^Vault credential ([a-z0-9][a-z0-9-]{0,63}) removed$/.exec(summary);
+  if (!m) return null;
+  return { name: m[1] };
+}
+
+export type VaultUseSurface = "connector" | "git-clone" | "git-push";
+export function parseVaultUseSummary(summary: string): { name: string; surface: VaultUseSurface; ok: boolean } | null {
+  const conn = /^Vault credential ([a-z0-9][a-z0-9-]{0,63}) used for connector "[^"]*" \(.*\) - (ok|failed: .*)$/.exec(summary);
+  if (conn) return { name: conn[1], surface: "connector", ok: conn[2] === "ok" };
+  const clone = /^Vault credential ([a-z0-9][a-z0-9-]{0,63}) injected for git-clone of \S+: (ok|exit .+)$/.exec(summary);
+  if (clone) return { name: clone[1], surface: "git-clone", ok: clone[2] === "ok" };
+  const push = /^Vault credential ([a-z0-9][a-z0-9-]{0,63}) injected for git-push of \S+ to \S+: (ok|exit .+)$/.exec(summary);
+  if (push) return { name: push[1], surface: "git-push", ok: push[2] === "ok" };
+  return null;
+}
+
+export function vaultScorecardText(root: string): string {
+  const setLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "vault-set" });
+  const removeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "vault-remove" });
+  const useLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "vault-use" });
+  let stored = 0;
+  let replaced = 0;
+  let removed = 0;
+  let usesOk = 0;
+  let usesFailed = 0;
+  let connector = 0;
+  let gitClone = 0;
+  let gitPush = 0;
+  let unparseable = 0;
+  const names = new Set<string>();
+  for (const line of setLines) {
+    const parsed = parseVaultSetSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    if (parsed.replaced) replaced += 1; else stored += 1;
+  }
+  for (const line of removeLines) {
+    const parsed = parseVaultRemoveSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    removed += 1;
+  }
+  for (const line of useLines) {
+    const parsed = parseVaultUseSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    names.add(parsed.name);
+    if (parsed.ok) usesOk += 1; else usesFailed += 1;
+    if (parsed.surface === "connector") connector += 1;
+    else if (parsed.surface === "git-clone") gitClone += 1;
+    else gitPush += 1;
+  }
+  const uses = usesOk + usesFailed;
+  const total = setLines.length + removeLines.length + useLines.length;
+  const parts: string[] = [];
+  parts.push("Vault: " + (usesFailed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(stored) + " stored");
+  parts.push(String(replaced) + " replaced");
+  parts.push(String(removed) + " removed");
+  parts.push(String(uses) + " uses (ok " + String(usesOk) + ", failed " + String(usesFailed) + ")");
+  parts.push("connector " + String(connector));
+  parts.push("git-clone " + String(gitClone));
+  parts.push("git-push " + String(gitPush));
+  parts.push(String(names.size) + " distinct credentials");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The askpass script git invokes for HTTPS prompts. Static

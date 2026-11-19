@@ -10,7 +10,7 @@ import { connectors } from "./connectors.js";
 import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { readFileProviders } from "./providers.js";
 import { recordChange, recordVerification } from "./verification.js";
-import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCredentialForUrl } from "./vault.js";
+import { VAULT_CREDENTIAL_ENV, vaultAskpassPath, vaultCloneUseLedgerSummary, vaultCredentialForUrl } from "./vault.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -965,7 +965,7 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
     let host = "";
     try { host = new URL(canonical).hostname; } catch { /* the URL was canonicalized above */ }
     recordActivity(root, actor, "vault-use", boundedLedger(
-      "Vault credential " + injected.credentialName + " injected for git-clone of " + host + ": " + status, destination));
+      vaultCloneUseLedgerSummary(injected.credentialName, host, status), destination));
   }
   return result;
 }
