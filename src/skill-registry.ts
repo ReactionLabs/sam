@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { discoverSkills, parseSkillMetadata } from "./skills.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // skills.sh, the open agent skills directory, wired into SAM natively.
@@ -357,7 +357,7 @@ export async function installSkill(root: string, ref: string, opts: { actor: str
     const record: InstalledSkill = { name: cand.name, source, ref, files: written, installedAt: new Date().toISOString(), actor: opts.actor };
     insertInstalledRow(root, record); installed.push(record); existing.add(cand.name);
     skipped.push(...notes.map(n => cand.name + ": " + n));
-    recordActivity(root, opts.actor, "skill", "Installed skill " + cand.name + " from " + source + " (" + written + " files)");
+    recordActivity(root, opts.actor, "skill", skillInstalledLedgerSummary(cand.name, source, written));
   }
   return { installed, skipped };
 }
@@ -374,6 +374,70 @@ export function removeInstalledSkill(root: string, name: string): boolean {
   } catch (error) { failSkillInstallsStore(root, "write", error); }
   finally { db.close(); }
   if (!removed) return false;
-  recordActivity(root, "operator", "skill", "Removed skill " + name + " (was from " + rec.source + ")");
+  recordActivity(root, "operator", "skill", skillRemovedLedgerSummary(name, rec.source));
   return true;
+}
+// The ONE writer for the skill-installed activity line, so
+// the scorecard's parser below can never drift from the seam
+// it counts. Its shape is byte-identical to what installSkill
+// wrote inline before this writer existed (the count is
+// always rendered "files", even for one file).
+export function skillInstalledLedgerSummary(name: string, source: string, files: number): string {
+  return "Installed skill " + name + " from " + source + " (" + files + " files)";
+}
+// The ONE writer for the skill-removed activity line, on
+// the same terms: byte-identical to what removeInstalledSkill
+// wrote inline.
+export function skillRemovedLedgerSummary(name: string, source: string): string {
+  return "Removed skill " + name + " (was from " + source + ")";
+}
+// The skill install scorecard (2026-11-20, the
+// measured-proof series): every registry install and removal
+// has ledgered as a "skill" line since the registry landed,
+// but the class was never folded - skill use is measured and
+// failed installs fold into the action-failure class, yet
+// the installs themselves, the acts that change what SAM
+// knows (in chat they ride the ONE gate), were invisible in
+// aggregate, so how the library actually grew and whether
+// anything was ever removed could not be said as a standing
+// fact. Installing and removing skills is the gated
+// workflow, not an alarm, so the verdict is attention only
+// when a line is unparseable, else clear. This text folds
+// the class to counts only, on ONE line: the installed and
+// removed counts, the summed files written by installs, and
+// the total. No stamp, no actor, no skill name, no source,
+// and no verbatim summary enters the text - the summary
+// carries the skill's name and its source repo, which a
+// fold must never print. A pure read: it creates nothing,
+// spends no model call, installs nothing, and removes
+// nothing - the install and removal seams themselves are
+// untouched.
+export function parseSkillInstallSummary(summary: string): { action: "installed"; files: number } | { action: "removed" } | null {
+  const installed = /^Installed skill (\S+) from (\S+) \((\d+) files\)$/.exec(summary);
+  if (installed) return { action: "installed", files: Number(installed[3]) };
+  if (/^Removed skill (\S+) \(was from (\S+)\)$/.test(summary)) return { action: "removed" };
+  return null;
+}
+export function skillInstallScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill" });
+  let installed = 0;
+  let removed = 0;
+  let files = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseSkillInstallSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.action === "installed") {
+      installed += 1;
+      files += parsed.files;
+    } else removed += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Skill installs: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(installed) + " installed");
+  parts.push(String(removed) + " removed");
+  parts.push(String(files) + " files written");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
