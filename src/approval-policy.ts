@@ -235,6 +235,15 @@ export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; a
   return next;
 }
 
+// The ONE writer for the approval-mode activity line (the
+// actions set-mode seam ledgers it), so the connection-events
+// scorecard's parser (connector-pairing.ts) can never drift
+// from the seam it counts. The shape is byte-identical to what
+// the seam wrote inline before this writer existed.
+export function approvalModeLedgerSummary(mode: ApprovalMode, autoKinds: string[]): string {
+  return "Approval mode set to " + mode + (autoKinds.length ? " (auto: " + autoKinds.join(", ") + ")" : "");
+}
+
 // --- The hardline never-list -------------------------------------
 export interface NeverHit { id: string; label: string }
 const NEVER_PATTERNS: Array<{ id: string; label: string; pattern: RegExp }> = [

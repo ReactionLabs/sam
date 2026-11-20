@@ -1,5 +1,5 @@
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import {
   addConnectorVault, allowlistPairHost, connectors, isLoopbackHost,
   removeConnector, testConnector, type Connector,
@@ -131,6 +131,17 @@ export function pairFailedSummary(name: string, host: string, vaultKey: string, 
     " failed and was rolled back: " + pairFailureReason(error);
 }
 
+// The ONE writer for the pair flow's success activity line, so
+// the connection-events scorecard's parser below can never
+// drift from the seam it counts. The shape is byte-identical
+// to what pairConnector wrote inline before this writer
+// existed.
+export function pairedLedgerSummary(name: string, host: string, vaultKey: string, profile: string, pinned: boolean, approved: string[]): string {
+  return "Paired connector \"" + name + "\" at " + host + " using vault credential " + vaultKey +
+    " for profile " + profile + (pinned ? " (pinned)" : " (core profile - no pin row)") +
+    " - " + approved.length + " approved read-only tool(s): " + (approved.join(", ") || "none");
+}
+
 /** The pair flow itself. The tester is injectable for tests; the
  *  real one is testConnector - initialize + tools/list, the
  *  harmless list call, which also ledgers the vault use. */
@@ -159,9 +170,7 @@ export async function pairConnector(
       } finally { db.close(); }
     }
     recordActivity(root, actor, "connector-paired",
-      "Paired connector \"" + clean.name + "\" at " + host + " using vault credential " + clean.vaultKey +
-      " for profile " + clean.profile + (pinned ? " (pinned)" : " (core profile - no pin row)") +
-      " - " + tested.approved.length + " approved read-only tool(s): " + (tested.approved.join(", ") || "none"));
+      pairedLedgerSummary(clean.name, host, clean.vaultKey, clean.profile, pinned, tested.approved));
     return { connector, profile: clean.profile, pinned, tools: tested.tools, approvedTools: tested.approved };
   } catch (e) {
     removeConnector(root, connector.id);
@@ -169,4 +178,91 @@ export async function pairConnector(
       pairFailedSummary(clean.name, host, clean.vaultKey, e));
     throw e;
   }
+}
+
+// The connection-events scorecard (2026-11-20, the
+// measured-proof series, census-finish sprint): four ledger
+// classes record how SAM's connections and identity-level
+// configuration came to be - connector-paired (a self-pairing
+// proved itself against a live endpoint), engine-provider (the
+// owner picked the coding-engine provider), engine-connected
+// (the engine route was verified and marked), and approval-mode
+// (the owner set the gate's mode) - one line per act, in fixed
+// shapes, since each seam landed, but the classes were never
+// folded, so how SAM came to be connected the way he is was
+// invisible in aggregate. Every act here is an operator or
+// owner act, so the verdict is attention only when a line is
+// unparseable, else clear - a shape nobody can count is the
+// news. This text folds the four classes to counts only, on
+// ONE line: the paired count, the summed approved read-only
+// tools across pairings, the provider-selection, engine-
+// connection, and approval-mode counts, and the total. No
+// stamp, no actor, no connector name, no host, no credential
+// name, no profile, no tool name, and no verbatim summary
+// enters the text - a credential NAME is still a pointer at a
+// secret and never surfaces. A pure read: it creates nothing,
+// pairs nothing, connects nothing, and sets no mode - the
+// seams themselves are untouched.
+export function parsePairedSummary(summary: string): { approved: number } | null {
+  const m = /^Paired connector ".+" at \S+ using vault credential [a-z0-9][a-z0-9-]* for profile .+ \((?:pinned|core profile - no pin row)\) - (\d+) approved read-only tool\(s\): .+$/.exec(summary);
+  if (!m) return null;
+  return { approved: Number(m[1]) };
+}
+
+export function parseEngineProviderSummary(summary: string): Record<string, never> | null {
+  if (!/^.+ selected as the coding-engine provider \(config choice; no connection was recorded or removed by this act\)$/.test(summary)) return null;
+  return {};
+}
+
+export function parseEngineConnectedSummary(summary: string): Record<string, never> | null {
+  if (!/^.+ connected as the coding-engine route via CLI reuse \(auth verified by `.+`; SAM stored only a route marker in the engine connection store, no credentials\)$/.test(summary)) return null;
+  return {};
+}
+
+export function parseApprovalModeSummary(summary: string): { mode: string } | null {
+  const m = /^Approval mode set to (manual|smart|off)(?: \(auto: .+\))?$/.exec(summary);
+  if (!m) return null;
+  return { mode: m[1] };
+}
+
+export function connectionScorecardText(root: string): string {
+  const pairedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "connector-paired" });
+  const providerLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-provider" });
+  const connectedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-connected" });
+  const modeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "approval-mode" });
+  let paired = 0;
+  let approvedTools = 0;
+  let providerSelected = 0;
+  let engineConnected = 0;
+  let approvalModeSet = 0;
+  let unparseable = 0;
+  for (const line of pairedLines) {
+    const parsed = parsePairedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    paired += 1;
+    approvedTools += parsed.approved;
+  }
+  for (const line of providerLines) {
+    if (!parseEngineProviderSummary(line.summary)) { unparseable += 1; continue; }
+    providerSelected += 1;
+  }
+  for (const line of connectedLines) {
+    if (!parseEngineConnectedSummary(line.summary)) { unparseable += 1; continue; }
+    engineConnected += 1;
+  }
+  for (const line of modeLines) {
+    if (!parseApprovalModeSummary(line.summary)) { unparseable += 1; continue; }
+    approvalModeSet += 1;
+  }
+  const total = pairedLines.length + providerLines.length + connectedLines.length + modeLines.length;
+  const parts: string[] = [];
+  parts.push("Connection events: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(paired) + " paired");
+  parts.push(String(approvedTools) + " approved tools");
+  parts.push(String(providerSelected) + " provider selected");
+  parts.push(String(engineConnected) + " engine connected");
+  parts.push(String(approvalModeSet) + " approval mode set");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }

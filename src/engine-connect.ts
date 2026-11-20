@@ -375,6 +375,19 @@ export function engineProvider(root: string): EngineProvider {
   return readEngineProviderRecord(root)?.provider ?? "claude-code";
 }
 
+// The ONE writers for the engine route's activity lines, so
+// the connection-events scorecard's parsers (connector-
+// pairing.ts) can never drift from the seams they count. Each
+// shape is byte-identical to what the seams wrote inline
+// before these writers existed.
+export function engineProviderLedgerSummary(label: string): string {
+  return label + " selected as the coding-engine provider (config choice; no connection was recorded or removed by this act)";
+}
+
+export function engineConnectedLedgerSummary(label: string, command: string, authArgv: readonly string[]): string {
+  return label + " connected as the coding-engine route via CLI reuse (auth verified by `" + command + " " + authArgv.join(" ") + "`; SAM stored only a route marker in the engine connection store, no credentials)";
+}
+
 /** Set the provider choice (an operator config act, ledgered). This
  *  records the CHOICE only - no connection is made or removed by it;
  *  a marker recorded for the other provider simply reads stale until
@@ -388,7 +401,7 @@ export function setEngineProvider(root: string, provider: EngineProvider): Engin
     db!.prepare("INSERT INTO engine_provider (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
   } catch (error) { failEngineConnectionStore(root, "write", error); }
   finally { db!.close(); }
-  recordActivity(root, "owner", "engine-provider", engineProviderDef(provider).label + " selected as the coding-engine provider (config choice; no connection was recorded or removed by this act)");
+  recordActivity(root, "owner", "engine-provider", engineProviderLedgerSummary(engineProviderDef(provider).label));
   return record;
 }
 
@@ -421,7 +434,7 @@ export async function connectEngine(root: string, env: NodeJS.ProcessEnv = proce
   const def = engineProviderDef(selected);
   const saved: EngineConnection = { route: "cli-reuse", provider: selected, binary: probe.binary, connectedAt: new Date().toISOString(), authState: "signed-in", authMethod: probe.method };
   saveEngineConnection(root, saved);
-  recordActivity(root, "owner", "engine-connected", def.label + " connected as the coding-engine route via CLI reuse (auth verified by `" + def.command + " " + def.authArgv.join(" ") + "`; SAM stored only a route marker in the engine connection store, no credentials)");
+  recordActivity(root, "owner", "engine-connected", engineConnectedLedgerSummary(def.label, def.command, def.authArgv));
   return { connected: true, probe, saved };
 }
 
