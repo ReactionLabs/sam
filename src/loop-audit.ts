@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { auditStoreTouch } from "./audit-store-failure.js";
 import { budgetFallbackAnswer, toolBudget, trimHistoryForRetry } from "./budgets.js";
 import { loaderLoopFallbackAnswer } from "./tool-tiers.js";
@@ -244,8 +244,100 @@ function saveLoopAudit(root: string, audit: LoopAudit): void {
 export function runLoopAudit(root: string): LoopAudit {
   const audit = buildLoopAudit(root);
   saveLoopAudit(root, audit);
-  recordActivity(root, "sam", "loop-audit", "Loop audit recorded: " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks, " + String(audit.findings.length) + " finding(s), verification " + audit.live.verification + ", open loops " + String(audit.live.openLoops) + " (" + String(audit.live.dueLoops) + " due)");
+  recordActivity(root, "sam", "loop-audit", loopAuditLedgerSummary(audit.overall.passed, audit.overall.total, audit.findings.length, audit.live.verification, audit.live.openLoops, audit.live.dueLoops));
   return audit;
+}
+
+// The ONE writer for the loop audit's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runLoopAudit
+// wrote inline before this writer existed.
+export function loopAuditLedgerSummary(passed: number, total: number, findings: number, verification: LoopLiveState["verification"], openLoops: number, dueLoops: number): string {
+  return "Loop audit recorded: " + String(passed) + "/" + String(total) + " checks, " + String(findings) + " finding(s), verification " + verification + ", open loops " + String(openLoops) + " (" + String(dueLoops) + " due)";
+}
+
+// The loop audit history scorecard (2026-11-20, the
+// measured-proof series): the audit's ledger class
+// (loop-audit) has ledgered one line per recorded run since
+// the audit landed, but the class was never folded - the
+// audit's own surfaces execute a run (loop-audit run) or
+// read the last one (loop-audit show, over a singleton
+// store holding ONE row), so how many runs ever recorded,
+// whether any run ever carried a finding, and how the live
+// loop state the audit measures (the verification ledger's
+// state, the open and due loop counts) has moved across
+// runs were invisible as a trend; a run that dropped a
+// check and later recovered would leave no daily surface
+// remembering it happened. Runs are the audit's own acts,
+// so the verdict is attention only when any finding was
+// ever recorded, any run measured a failed verification,
+// or a line is unparseable, else clear - a finding or a
+// failed verification is the news, and the verification
+// mix and loop counts ride the counts so the measured
+// install's state is visible without alarming on an
+// unverified reading (pending changes are ordinary work).
+// This text folds the class to counts only, on ONE line:
+// runs, the summed findings, the latest run's passed/total
+// checks, counts per fixed verification bucket, the latest
+// open and due loop counts, the peak open-loop count, and
+// the total. No stamp, no actor, no finding text, and no
+// verbatim summary enters the text - a finding names the
+// loop machinery that is missing and never surfaces here.
+// A pure read: it creates nothing, runs no audit, and
+// spends no model call - the audit seam itself is
+// untouched.
+export function parseLoopAuditSummary(summary: string): { passed: number; total: number; findings: number; verification: LoopLiveState["verification"]; openLoops: number; dueLoops: number } | null {
+  const m = /^Loop audit recorded: (\d+)\/(\d+) checks, (\d+) finding\(s\), verification (clean|verified|failed|unverified), open loops (\d+) \((\d+) due\)$/.exec(summary);
+  if (!m) return null;
+  const passed = Number(m[1]);
+  const total = Number(m[2]);
+  const openLoops = Number(m[5]);
+  const dueLoops = Number(m[6]);
+  if (total < 1 || passed > total || dueLoops > openLoops) return null;
+  return { passed, total, findings: Number(m[3]), verification: m[4] as LoopLiveState["verification"], openLoops, dueLoops };
+}
+
+export function loopAuditHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-audit" });
+  let runs = 0;
+  let findings = 0;
+  let latestPassed = 0;
+  let latestTotal = 0;
+  let clean = 0;
+  let verified = 0;
+  let failed = 0;
+  let unverified = 0;
+  let latestOpen = 0;
+  let latestDue = 0;
+  let peakOpen = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseLoopAuditSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    findings += parsed.findings;
+    latestPassed = parsed.passed;
+    latestTotal = parsed.total;
+    if (parsed.verification === "clean") clean += 1;
+    else if (parsed.verification === "verified") verified += 1;
+    else if (parsed.verification === "failed") failed += 1;
+    else unverified += 1;
+    latestOpen = parsed.openLoops;
+    latestDue = parsed.dueLoops;
+    if (parsed.openLoops > peakOpen) peakOpen = parsed.openLoops;
+  }
+  const parts: string[] = [];
+  parts.push("Loop audit history: " + (findings > 0 || failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(findings) + " findings");
+  parts.push("latest " + String(latestPassed) + "/" + String(latestTotal) + " checks");
+  parts.push("verification clean " + String(clean) + " / verified " + String(verified) + " / failed " + String(failed) + " / unverified " + String(unverified));
+  parts.push("latest open loops " + String(latestOpen));
+  parts.push("latest due loops " + String(latestDue));
+  parts.push("peak open loops " + String(peakOpen));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The audit as plain text (the sam-loop-audit script job's
