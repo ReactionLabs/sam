@@ -2,7 +2,7 @@ import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import {
   addConnectorVault, allowlistPairHost, connectors, isLoopbackHost,
-  removeConnector, testConnector, type Connector,
+  removeConnector, testConnector, updateConnector, type Connector,
 } from "./connectors.js";
 import { listVaultCredentials, VAULT_NAME_RE } from "./vault.js";
 import { errorReason } from "./telegram.js";
@@ -160,6 +160,17 @@ export async function pairConnector(
       const t = await testConnector(c, r);
       return { tools: t.tools, approved: t.approved };
     }))(connector, root);
+    // The registration seeded the record with the whole
+    // read-only ceiling; the test just proved which of those
+    // tools this endpoint actually advertises and approves,
+    // so the stored record narrows to the connector's own
+    // approved set. Anything reading the record back (the
+    // Mission Status wall above all) then reports this
+    // connector's count, not the ceiling's size. Call-time
+    // authorization already intersects the ceiling, this set,
+    // and the server's advertised tools, so narrowing to the
+    // pair-time approved set cannot widen or break a call.
+    const narrowed = updateConnector(root, connector.id, { allowedTools: [...tested.approved] }) ?? connector;
     let pinned = false;
     if (clean.profile !== "sam") {
       const db = new ChatStore(root);
@@ -171,7 +182,7 @@ export async function pairConnector(
     }
     recordActivity(root, actor, "connector-paired",
       pairedLedgerSummary(clean.name, host, clean.vaultKey, clean.profile, pinned, tested.approved));
-    return { connector, profile: clean.profile, pinned, tools: tested.tools, approvedTools: tested.approved };
+    return { connector: narrowed, profile: clean.profile, pinned, tools: tested.tools, approvedTools: tested.approved };
   } catch (e) {
     removeConnector(root, connector.id);
     recordActivity(root, actor, "connector-pair-failed",

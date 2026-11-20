@@ -34,6 +34,19 @@ test("mission status: every check green reads All systems groovy, one light per 
   assert.ok(s.lights.some(l => l.name === "Connector: Second Shift" && l.level === "green"));
 });
 
+test("mission status: each connector light reports that connector's own approved count", () => {
+  const s = missionStatusFromPayload(greenInput(), { doctor: DOCTOR_OK });
+  const nines = s.lights.find(l => l.id === "connector:Nines")!;
+  const secondShift = s.lights.find(l => l.id === "connector:second-shift")!;
+  // The counts ride each connector's own allowedTools (1 and 2
+  // in this fixture), never a shared registry-wide number: the
+  // wall once read the global read-only ceiling's size for the
+  // Second Shift line because the stored record carried the
+  // ceiling instead of the pair-time approved set.
+  assert.match(nines.sentence, /1 read-only tool\(s\) are approved/);
+  assert.match(secondShift.sentence, /2 read-only tool\(s\) are approved/);
+});
+
 test("mission status: a configured model with no probe is amber, never green", () => {
   const input = greenInput();
   input.auth!.routes![0].lastProbe = null;
