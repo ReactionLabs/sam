@@ -379,6 +379,21 @@ export function engineProvider(root: string): EngineProvider {
  *  records the CHOICE only - no connection is made or removed by it;
  *  a marker recorded for the other provider simply reads stale until
  *  the new provider is connected. */
+// The ONE writers for the engine route activity lines, so
+// the config-acts scorecard's parser can never drift from
+// the seams it counts. Their shapes are byte-identical to
+// what setEngineProvider / connectEngine / disconnectEngine
+// wrote inline before these writers existed.
+export function engineProviderLedgerSummary(label: string): string {
+  return label + " selected as the coding-engine provider (config choice; no connection was recorded or removed by this act)";
+}
+export function engineConnectedLedgerSummary(def: EngineProviderDef): string {
+  return def.label + " connected as the coding-engine route via CLI reuse (auth verified by `" + def.command + " " + def.authArgv.join(" ") + "`; SAM stored only a route marker in the engine connection store, no credentials)";
+}
+export function engineDisconnectedLedgerSummary(label: string): string {
+  return label + " engine connection marker removed (CLI reuse route disconnected; the CLI's own login was not touched)";
+}
+
 export function setEngineProvider(root: string, provider: EngineProvider): EngineProviderRecord {
   if (!isEngineProvider(provider)) throw new Error("Invalid engine provider: " + String(provider) + " (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + ")");
   const record: EngineProviderRecord = { provider, updatedAt: new Date().toISOString() };
@@ -388,7 +403,7 @@ export function setEngineProvider(root: string, provider: EngineProvider): Engin
     db!.prepare("INSERT INTO engine_provider (id, data) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data").run(JSON.stringify(record));
   } catch (error) { failEngineConnectionStore(root, "write", error); }
   finally { db!.close(); }
-  recordActivity(root, "owner", "engine-provider", engineProviderDef(provider).label + " selected as the coding-engine provider (config choice; no connection was recorded or removed by this act)");
+  recordActivity(root, "owner", "engine-provider", engineProviderLedgerSummary(engineProviderDef(provider).label));
   return record;
 }
 
@@ -421,7 +436,7 @@ export async function connectEngine(root: string, env: NodeJS.ProcessEnv = proce
   const def = engineProviderDef(selected);
   const saved: EngineConnection = { route: "cli-reuse", provider: selected, binary: probe.binary, connectedAt: new Date().toISOString(), authState: "signed-in", authMethod: probe.method };
   saveEngineConnection(root, saved);
-  recordActivity(root, "owner", "engine-connected", def.label + " connected as the coding-engine route via CLI reuse (auth verified by `" + def.command + " " + def.authArgv.join(" ") + "`; SAM stored only a route marker in the engine connection store, no credentials)");
+  recordActivity(root, "owner", "engine-connected", engineConnectedLedgerSummary(def));
   return { connected: true, probe, saved };
 }
 
@@ -431,7 +446,7 @@ export function disconnectEngine(root: string): { disconnected: boolean; note: s
   const existing = readEngineConnection(root);
   if (!deleteEngineConnection(root)) return { disconnected: false, note: "No engine connection is recorded on this install; nothing was removed." };
   const label = existing ? engineProviderDef(existing.provider).label : "Engine";
-  recordActivity(root, "owner", "engine-disconnected", label + " engine connection marker removed (CLI reuse route disconnected; the CLI's own login was not touched)");
+  recordActivity(root, "owner", "engine-disconnected", engineDisconnectedLedgerSummary(label));
   return { disconnected: true, note: "SAM's route marker is removed. The provider CLI's own login on this machine is untouched - SAM never held it." };
 }
 

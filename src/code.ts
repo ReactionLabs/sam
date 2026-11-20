@@ -251,6 +251,19 @@ export function codeFileExists(root: string, rel: string): boolean {
   try { return existsSync(targetPath(base, rel, false)); } catch { return false; }
 }
 
+// The ONE writers for the code-root activity lines, so the
+// config-acts scorecard's parser can never drift from the
+// seams it counts. Their shapes are byte-identical to what
+// setCodeRoot / clearCodeRoot wrote inline before these
+// writers existed. The designated shape carries the root's
+// PATH; a fold counts it and never prints it.
+export function codeRootDesignatedLedgerSummary(path: string): string {
+  return "Designated code root: " + path;
+}
+export function codeRootClearedLedgerSummary(): string {
+  return "Cleared the designated code root";
+}
+
 export function setCodeRoot(root: string, candidate: string): string {
   if (!candidate || typeof candidate !== "string") throw new Error("A code root path is required");
   let real: string;
@@ -261,13 +274,13 @@ export function setCodeRoot(root: string, candidate: string): string {
   if (real.startsWith(sam + sep)) throw new Error("The code root cannot be inside the SAM home");
   if (sam.startsWith(real + sep)) throw new Error("The code root cannot contain the SAM home");
   writeConfig(root, { version: 1, root: real });
-  recordActivity(root, "operator", "code-root", "Designated code root: " + real);
+  recordActivity(root, "operator", "code-root", codeRootDesignatedLedgerSummary(real));
   return real;
 }
 
 export function clearCodeRoot(root: string): void {
   writeConfig(root, { version: 1, root: null });
-  recordActivity(root, "operator", "code-root", "Cleared the designated code root");
+  recordActivity(root, "operator", "code-root", codeRootClearedLedgerSummary());
 }
 
 function requireCodeRoot(root: string): string {

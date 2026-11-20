@@ -126,6 +126,19 @@ export function pairFailureReason(error: unknown): string {
   return error instanceof Error ? errorReason(error) : "unknown error";
 }
 
+// The ONE writer for the connector-paired activity line,
+// so the config-acts scorecard's parser can never drift
+// from the seam it counts. Its shape is byte-identical to
+// what pairConnector wrote inline before this writer
+// existed. The shape carries the connector's name, host,
+// vault credential NAME, profile, and approved tool names;
+// a fold counts them and never prints them.
+export function connectorPairedLedgerSummary(name: string, host: string, vaultKey: string, profile: string, pinned: boolean, approved: string[]): string {
+  return "Paired connector \"" + name + "\" at " + host + " using vault credential " + vaultKey +
+    " for profile " + profile + (pinned ? " (pinned)" : " (core profile - no pin row)") +
+    " - " + approved.length + " approved read-only tool(s): " + (approved.join(", ") || "none");
+}
+
 export function pairFailedSummary(name: string, host: string, vaultKey: string, error: unknown): string {
   return "Pairing connector \"" + name + "\" at " + host + " using vault credential " + vaultKey +
     " failed and was rolled back: " + pairFailureReason(error);
@@ -159,9 +172,7 @@ export async function pairConnector(
       } finally { db.close(); }
     }
     recordActivity(root, actor, "connector-paired",
-      "Paired connector \"" + clean.name + "\" at " + host + " using vault credential " + clean.vaultKey +
-      " for profile " + clean.profile + (pinned ? " (pinned)" : " (core profile - no pin row)") +
-      " - " + tested.approved.length + " approved read-only tool(s): " + (tested.approved.join(", ") || "none"));
+      connectorPairedLedgerSummary(clean.name, host, clean.vaultKey, clean.profile, pinned, tested.approved));
     return { connector, profile: clean.profile, pinned, tools: tested.tools, approvedTools: tested.approved };
   } catch (e) {
     removeConnector(root, connector.id);

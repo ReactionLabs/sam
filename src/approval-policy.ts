@@ -210,6 +210,15 @@ export function loadApprovalPolicy(root: string): ApprovalPolicy {
   finally { db!.close(); }
 }
 
+// The ONE writer for the approval-mode activity line, so
+// the config-acts scorecard's parser can never drift from
+// the seam it counts (the CLI set-mode command). Its shape
+// is byte-identical to what that seam wrote inline before
+// this writer existed.
+export function approvalModeLedgerSummary(mode: string, autoKinds: string[]): string {
+  return "Approval mode set to " + mode + (autoKinds.length ? (" (auto: " + autoKinds.join(", ") + ")") : "");
+}
+
 export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; autoKinds?: string[] }): ApprovalPolicy {
   if (patch.mode !== undefined && !APPROVAL_MODES.includes(patch.mode)) throw new Error("Invalid approval mode \"" + patch.mode + "\". Modes: " + APPROVAL_MODES.join(", "));
   const current = loadApprovalPolicy(root);
