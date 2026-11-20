@@ -129,6 +129,53 @@ export function turnFailureNoteSummary(chatId:string,error:unknown):string{
   // reaches the owner; this line is the internal record.
   return "Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+errorReason(error).slice(0,120);
 }
+// The turn-failure-note scorecard (2026-11-20, the measured-proof
+// series): the note seam above has ledgered a turn-failure-note
+// line through the ONE writer (turnFailureNoteSummary) whenever a
+// failed owner chat turn leaves its one plain sentence in the chat
+// - but the class was never folded, so how often SAM has to tell
+// the owner a turn did not finish was invisible in aggregate,
+// separate from the turn-failed count (a turn can fail without a
+// note: visitor, machine route, overload, partial-salvage). The
+// note is the failure-visibility fix working as designed, so the
+// verdict is attention only when a line is unparseable (a writer's
+// shape broken or the ledger tampered), else clear. The scorecard
+// text is a script job's stdout and is P3-diffed on its facts, so
+// it is ONE line carrying counts only: no stamp, no actor, and
+// never a chat id or a reason - the summaries carry both, which a
+// fold consumes into a distinct count and never prints. The
+// scorecard path is a pure read - it creates nothing, spends no
+// model call, and notes nothing; every state is built through the
+// ledger's own public door (recordActivity) with the writer above,
+// never around either.
+export function parseTurnFailureNoteSummary(
+  summary: string,
+): { chatId: string } | null {
+  const m = /^Turn failure noted in chat ([0-9a-f]{8}): the owner reads one plain sentence in the chat \(the raw error never reaches the owner\); error: (.+)$/.exec(summary);
+  if (!m) return null;
+  if (m[2].trim().length === 0) return null;
+  return { chatId: m[1] };
+}
+
+export function turnFailureNoteScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-failure-note" });
+  let unparseable = 0;
+  let notes = 0;
+  const distinct = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseTurnFailureNoteSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    notes += 1;
+    distinct.add(parsed.chatId);
+  }
+  const parts: string[] = [];
+  parts.push("Turn failure notes: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(notes) + " notes");
+  parts.push(String(distinct.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function failoverSummary(chatId:string,from:string,to:string,error:unknown):string{
   // The hop line's reason rides the same seam (gap found
   // 2026-11-16, hourly run 19:04 EST): it took error.message
