@@ -168,6 +168,43 @@ export function largeTurnScorecardText(root: string): string {
 export function repeatLedgerSummary(repeats: string[]): string {
   return "Duplicate tool calls suppressed in one turn: " + repeats.length + " (" + repeats.join(", ") + ") - identical repeats returned the earlier result instead of re-executing";
 }
+export function parseBudgetContinuedSummary(summary: string): { tranche: number; calls: number; rounds: number } | null {
+  const m = /^Owner turn continued past its standard budget \(tranche (\d+)\): (\d+) calls over (\d+) rounds so far - the turn keeps going instead of ending on a budget message$/.exec(summary);
+  return m ? { tranche: Number(m[1]), calls: Number(m[2]), rounds: Number(m[3]) } : null;
+}
+export function parseToolRepeatSummary(summary: string): { suppressed: number } | null {
+  const m = /^Duplicate tool calls suppressed in one turn: (\d+) \(.+\) - identical repeats returned the earlier result instead of re-executing$/.exec(summary);
+  return m ? { suppressed: Number(m[1]) } : null;
+}
+export function turnEconomyExtrasScorecardText(root: string): string {
+  let continuations = 0;
+  let calls = 0;
+  let rounds = 0;
+  let repeatEvents = 0;
+  let suppressed = 0;
+  let unparseable = 0;
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "budget-continued" })) {
+    const parsed = parseBudgetContinuedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    continuations += 1;
+    calls += parsed.calls;
+    rounds += parsed.rounds;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "tool-repeat" })) {
+    const parsed = parseToolRepeatSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    repeatEvents += 1;
+    suppressed += parsed.suppressed;
+  }
+  const total = continuations + repeatEvents;
+  const parts: string[] = [];
+  parts.push("Turn economy extras: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(continuations) + " continuations (" + String(calls) + " calls, " + String(rounds) + " rounds)");
+  parts.push(String(repeatEvents) + " repeat suppressions (" + String(suppressed) + " suppressed calls)");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 
 // Graceful exhaustion (post-program fix, Dip hit the death live 2026-11-09):
 // a turn that overspends its budget must ANSWER from what it already gathered,
