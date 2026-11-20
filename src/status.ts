@@ -249,6 +249,8 @@ export function buildStatusPayload(root: string, opts: StatusBuildOptions = {}) 
   // wall can never disagree with the panels below it. The doctor
   // light rides opts.doctor - the dashboard passes its cached
   // real report, the CLI overview passes none and reads amber.
-  const missionStatus = missionStatusFromPayload(payload as Parameters<typeof missionStatusFromPayload>[0], { doctor: opts.doctor ?? null });
+  const chatModel = (payload.auth?.routes ?? []).find(r => r.route === "chat")?.model ?? null;
+  const modelUsage = chatModel ? (() => { const u = usageSummary(root, { model: chatModel }); return { calls: u.calls, lastAt: u.lastAt }; })() : null;
+  const missionStatus = missionStatusFromPayload({ ...(payload as Parameters<typeof missionStatusFromPayload>[0]), modelUsage }, { doctor: opts.doctor ?? null });
   return { ...payload, missionStatus };
 }

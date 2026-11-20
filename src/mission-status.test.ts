@@ -66,6 +66,43 @@ test("mission status: a failed probe is red and a missing key is red", () => {
   assert.equal(missionStatusFromPayload(input2, { doctor: DOCTOR_OK }).lights.find(l => l.id === "model")!.level, "red");
 });
 
+test("mission status: a fresh completed answer on the usage ledger greens the model light without any probe", () => {
+  const input = greenInput();
+  input.auth!.routes![0].lastProbe = null;
+  input.modelUsage = { calls: 12, lastAt: "2026-11-19T10:00:00.000Z" };
+  const s = missionStatusFromPayload(input, { doctor: DOCTOR_OK });
+  const model = s.lights.find(l => l.id === "model")!;
+  assert.equal(model.level, "green");
+  assert.match(model.sentence, /answering real turns/);
+});
+
+test("mission status: a stale usage record reads its own amber, distinct from never-answered", () => {
+  const input = greenInput();
+  input.auth!.routes![0].lastProbe = null;
+  input.modelUsage = { calls: 193, lastAt: "2026-11-16T10:00:00.000Z" };
+  const s = missionStatusFromPayload(input, { doctor: DOCTOR_OK });
+  const model = s.lights.find(l => l.id === "model")!;
+  assert.equal(model.level, "amber");
+  assert.match(model.sentence, /answered real turns before, but none recently/);
+  const never = greenInput();
+  never.auth!.routes![0].lastProbe = null;
+  never.modelUsage = { calls: 0, lastAt: null };
+  const model2 = missionStatusFromPayload(never, { doctor: DOCTOR_OK }).lights.find(l => l.id === "model")!;
+  assert.equal(model2.level, "amber");
+  assert.match(model2.sentence, /no successful probe is on record yet/);
+});
+
+test("mission status: a fresh completion after a failed probe supersedes it, an older one does not", () => {
+  const input = greenInput();
+  input.auth!.routes![0].lastProbe = { bucket: "auth", at: "2026-11-19T09:00:00.000Z" };
+  input.modelUsage = { calls: 3, lastAt: "2026-11-19T21:00:00.000Z" };
+  assert.equal(missionStatusFromPayload(input, { doctor: DOCTOR_OK }).lights.find(l => l.id === "model")!.level, "green");
+  const older = greenInput();
+  older.auth!.routes![0].lastProbe = { bucket: "auth", at: "2026-11-19T09:00:00.000Z" };
+  older.modelUsage = { calls: 3, lastAt: "2026-11-19T08:00:00.000Z" };
+  assert.equal(missionStatusFromPayload(older, { doctor: DOCTOR_OK }).lights.find(l => l.id === "model")!.level, "red");
+});
+
 test("mission status: pending approvals show amber and are never hidden", () => {
   const input = greenInput();
   input.pendingActions = [{}, {}, {}];

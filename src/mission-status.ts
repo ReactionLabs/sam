@@ -5,7 +5,8 @@
  * stays the agent underneath. The wall is ONE plain-language
  * line per system, and every light is derived here, in code,
  * from a real check Sam already runs - the auth status and its
- * recorded probes, the context audit, the vault and backup
+ * recorded probes (with the usage ledger's completed answers as
+ * the model light's second evidence source), the context audit, the vault and backup
  * shelves, the connector registry, the channel registry, the
  * approval queue, the doctor report, and the verification
  * ledger. A light is green ONLY when its check is actually
@@ -44,7 +45,7 @@ export interface MissionDoctorInput {
 interface AuthLike {
   key?: string;
   endpoint?: string | null;
-  routes?: Array<{ route: string | null; model: string | null; key: string; lastProbe: { bucket: string } | null }>;
+  routes?: Array<{ route: string | null; model: string | null; key: string; lastProbe: { bucket: string; at?: string } | null }>;
 }
 
 export interface MissionStatusInput {
@@ -57,6 +58,10 @@ export interface MissionStatusInput {
   channels?: Array<{ kind: string; enabled: boolean; credentialPresent?: boolean; ownerIds: number[] }>;
   pendingActions?: unknown[];
   verification?: { state: string; pendingChanges: unknown[] };
+  /** The chat model's own usage-ledger record (completed answers
+   *  only, filtered to that model by the status builder): the
+   *  model light's second evidence source beside the auth probe. */
+  modelUsage?: { calls: number; lastAt: string | null } | null;
 }
 
 const GREETING = "Hi, I am Claudia. Here is how Sam is doing right now.";
@@ -66,7 +71,10 @@ function light(id: string, name: string, level: MissionLightLevel, sentence: str
   return { id, name, level, sentence };
 }
 
-function modelLight(auth: AuthLike | undefined): MissionLight {
+const MODEL_FRESH_MS = 48 * 3600 * 1000;
+
+function modelLight(input: MissionStatusInput): MissionLight {
+  const auth = input.auth;
   const chat = (auth?.routes ?? []).find(r => r.route === "chat") ?? (auth?.routes ?? [])[0];
   if (!auth || auth.key !== "present" || !chat?.model || !auth.endpoint) {
     return light("model", "Model answering", "red", "The model is not fully configured, so Sam cannot answer yet.");
@@ -75,8 +83,28 @@ function modelLight(auth: AuthLike | undefined): MissionLight {
   if (bucket === "ok") {
     return light("model", "Model answering", "green", "The model answered its last recorded probe, so chats are live.");
   }
+  // The second evidence source: the usage ledger records a line
+  // only when the provider returns a completed answer, so a fresh
+  // completion from the chat model itself is a real answer check
+  // that already happened - the light must not imply the model
+  // has never answered just because nobody spent a probe call.
+  const usage = input.modelUsage ?? null;
+  const atMs = input.at ? Date.parse(input.at) : NaN;
+  const lastMs = usage?.lastAt ? Date.parse(usage.lastAt) : NaN;
+  const hasRecord = !!usage && usage.calls > 0 && Number.isFinite(lastMs);
+  const fresh = hasRecord && Number.isFinite(atMs) && atMs - lastMs >= 0 && atMs - lastMs <= MODEL_FRESH_MS;
   if (bucket !== null) {
+    const probeMs = chat.lastProbe?.at ? Date.parse(chat.lastProbe.at) : NaN;
+    if (fresh && (!Number.isFinite(probeMs) || lastMs > probeMs)) {
+      return light("model", "Model answering", "green", "The model is answering real turns: a completed answer from this model is on the usage ledger and fresh, so chats are live.");
+    }
     return light("model", "Model answering", "red", "The model's last recorded probe did not pass (" + bucket + "), so answers are not proven right now.");
+  }
+  if (fresh) {
+    return light("model", "Model answering", "green", "The model is answering real turns: a completed answer from this model is on the usage ledger and fresh, so chats are live.");
+  }
+  if (hasRecord && Number.isFinite(atMs)) {
+    return light("model", "Model answering", "amber", "The model has answered real turns before, but none recently and no successful probe is on record, so this light waits for a fresh answer check.");
   }
   return light("model", "Model answering", "amber", "The model is configured, but no successful probe is on record yet, so this light waits for a real answer check.");
 }
@@ -180,7 +208,7 @@ function verifyLight(input: MissionStatusInput): MissionLight {
 
 export function missionStatusFromPayload(input: MissionStatusInput, opts: { doctor?: MissionDoctorInput | null } = {}): MissionStatus {
   const lights: MissionLight[] = [
-    modelLight(input.auth),
+    modelLight(input),
     memoryLight(input),
     vaultLight(input),
     ...connectorLights(input),
