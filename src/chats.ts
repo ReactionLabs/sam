@@ -245,6 +245,23 @@ export class ChatStore {
       return this.agents().find(a=>a.name===name)??null;
     });
   }
+  // Instructions rewrite (found live 2026-11-20): the pins above got
+  // re-pin verbs in 2026-11-09, but a profile's instructions stayed
+  // create-only, so when a profile's facts changed (the second-shift
+  // profile still told every turn its connector "arrives separately"
+  // a day after the connector was paired and approved) the only fix
+  // was a direct UPDATE on chats.db. Validation is exactly
+  // createAgent's: the text is trimmed, must be non-empty and at most
+  // 4000 chars; a bad value throws "Invalid agent profile"; an
+  // unknown name returns null and changes nothing. Instructions can
+  // be rewritten but never cleared - a profile always has some.
+  setAgentInstructions(name:string,instructions:string):AgentProfile|null{
+    return this.touch("write", () => {
+      if(!instructions.trim()||instructions.length>4000)throw new Error("Invalid agent profile");
+      if(this.db.prepare("UPDATE agent_profiles SET instructions=? WHERE name=?").run(instructions.trim(),name).changes!==1)return null;
+      return this.agents().find(a=>a.name===name)??null;
+    });
+  }
   rename(id:string,title:string):boolean{
     return this.touch("write", () => {
       if(!title.trim()||title.length>120)throw new Error("Chat title must be 1 to 120 characters");

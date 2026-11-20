@@ -535,7 +535,7 @@ providersCmd.command("remove").argument("<id>").description("Remove a file-confi
 const codexCmd=program.command("codex").description("ChatGPT-backend OAuth for Codex (not an OpenAI API key). Login prints the authorization URL and stops; the account sign-in happens with the owner present");
 codexCmd.command("login").description("Start the browser OAuth flow and print the authorization URL. Does not contact the network and does not complete the login").action(()=>{const started=startCodexLogin(program.opts().workspace);if(program.opts().json)output({url:started.url,state:started.state,redirectUri:started.redirectUri,pending:true,note:"Open the URL while the owner is present. This command does not finish the login."});else console.log(started.url);});
 codexCmd.command("status").description("Whether a Codex login is pending or a token is stored. Tokens are never printed").action(()=>output(codexAuthState(program.opts().workspace)));
-const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
+const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector, or rewrite its instructions, after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
 agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
 agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
   const root=program.opts().workspace as string;
@@ -588,6 +588,17 @@ agentCmd.command("set-connector").argument("<name>").argument("<connector>").des
     const updated=db.setAgentConnector(name,connectorId);
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
     recordActivity(root,name,"agent-repin","Connector pin "+(updated.connector_id?("set to "+updated.connector_id):"cleared"));
+    output(updated);
+  }finally{db.close();}
+});
+agentCmd.command("set-instructions").argument("<name>").argument("<text...>").description("Rewrite a profile's instructions after creation (a profile's facts change: a connector arrives, a role changes); takes effect on the profile's next turn").action((name:string,text:string[])=>{
+  const root=program.opts().workspace as string;
+  if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no instruction row; its instructions are the built-in capability statement");
+  const db=new ChatStore(root);
+  try{
+    const updated=db.setAgentInstructions(name,text.join(" "));
+    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    recordActivity(root,name,"agent-repin","Instructions rewritten ("+String(updated.instructions.length)+" chars)");
     output(updated);
   }finally{db.close();}
 });

@@ -122,6 +122,32 @@ test("agent profile pins can be re-pinned and cleared after creation",()=>{
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 
+test("agent profile instructions can be rewritten after creation, with create-time validation",()=>{
+  const root=mkdtempSync(join(tmpdir(),"sam-rewrite-"));
+  try{
+    const db=new ChatStore(root);
+    const cid="123e4567-e89b-42d3-a456-426614174000";
+    db.createAgent("second-shift","Your connector arrives separately; until then say live data is not connected yet.",{model:"MiniMax-M2.5",connectorId:cid});
+    // The 2026-11-20 live fix, as a supported operation: the connector
+    // has arrived, so the stale line goes away through the store door.
+    const rewritten=db.setAgentInstructions("second-shift","  Your Second Shift connector is live: answer from its read-only HQ tools.  ");
+    assert.equal(rewritten?.instructions,"Your Second Shift connector is live: answer from its read-only HQ tools.");
+    // The rewrite touches instructions only; the pins ride along.
+    assert.equal(rewritten?.model,"MiniMax-M2.5");
+    assert.equal(rewritten?.connector_id,cid);
+    // Same validation as creation: blank and oversized text throw and
+    // change nothing; an unknown name returns null and changes nothing.
+    assert.throws(()=>db.setAgentInstructions("second-shift","   "),/Invalid agent/);
+    assert.throws(()=>db.setAgentInstructions("second-shift","x".repeat(4001)),/Invalid agent/);
+    assert.equal(db.setAgentInstructions("missing","Perfectly good text"),null);
+    assert.equal(db.agents()[0].instructions,"Your Second Shift connector is live: answer from its read-only HQ tools.");
+    db.close();
+    const reopened=new ChatStore(root);
+    assert.equal(reopened.agents()[0].instructions,"Your Second Shift connector is live: answer from its read-only HQ tools.");
+    reopened.close();
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
 test("message reactions: set, read back, clear; text is refused; a foreign chat cannot stamp", () => {
  const root = mkdtempSync(join(tmpdir(), "sam-reactions-"));
  try {
