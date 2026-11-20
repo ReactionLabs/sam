@@ -937,7 +937,7 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
   } catch (e) {
     const msg = errorReason(e);
     const shown = canonical ? canonical + " into " + oneLine(destination) : "an invalid URL into " + oneLine(destination);
-    recordActivity(root, actor, "git-clone", boundedLedger("Refused clone of " + shown + ": " + oneLine(msg), oneLine(destination)));
+    recordActivity(root, actor, "git-clone", boundedLedger(gitCloneRefusedLedgerSummary(shown, oneLine(msg)), oneLine(destination)));
     throw e;
   }
   const timeoutMs = Math.min(120_000, Math.max(1_000, opts.timeoutMs ?? 60_000));
@@ -960,7 +960,7 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
   // The ledger verb follows the outcome: a failed clone is never
   // ledgered as "Cloned" - the ledger is the surface the owner and
   // the self-audit read, so its wording must not claim success.
-  recordActivity(root, actor, "git-clone", boundedLedger((result.ok ? "Cloned " : "Clone failed for ") + canonical + " into " + destination + ": " + status, destination));
+  recordActivity(root, actor, "git-clone", boundedLedger(gitCloneResultLedgerSummary(result.ok, canonical, destination, status), destination));
   if (injected.credentialName) {
     let host = "";
     try { host = new URL(canonical).hostname; } catch { /* the URL was canonicalized above */ }
@@ -968,6 +968,73 @@ export async function cloneIntoCodeRoot(root: string, actor: string, url: string
       vaultCloneUseLedgerSummary(injected.credentialName, host, status), destination));
   }
   return result;
+}
+
+// The ONE writer for the git-clone refusal activity line,
+// so the scorecard's parser below can never drift from the
+// seam it counts. Its shape is byte-identical to what
+// cloneIntoCodeRoot wrote inline before this writer existed.
+export function gitCloneRefusedLedgerSummary(shown: string, reason: string): string {
+  return "Refused clone of " + shown + ": " + reason;
+}
+// The ONE writer for the git-clone result activity line, on
+// the same terms: byte-identical to what cloneIntoCodeRoot
+// wrote inline (the verb follows the outcome, the seam's own
+// honesty rule).
+export function gitCloneResultLedgerSummary(ok: boolean, url: string, destination: string, status: string): string {
+  return (ok ? "Cloned " : "Clone failed for ") + url + " into " + destination + ": " + status;
+}
+// The git clone scorecard (2026-11-20, the measured-proof
+// series): every clone attempt has ledgered as a "git-clone"
+// line since the Hands v2 clone landed - a refusal before
+// git runs, and the run's own result line - but the class
+// was never folded: code runs and code writes are measured
+// and vault uses for clones fold into the vault scorecard,
+// yet the clones themselves, the acts that pull outside
+// code into the designated code root every coding task then
+// works in, were invisible in aggregate, so whether a clone
+// has ever succeeded live could not be said as a standing
+// fact. A failed or refused clone is a broken fetch, never
+// background noise, so the verdict is attention when any
+// clone failed, any clone was refused, or any line is
+// unparseable, else clear. The parser classifies by the
+// line's STATUS, never its verb: the one live line predates
+// the verb-honesty fix and reads "Cloned ... : exit 128".
+// This text folds the class to counts only, on ONE line:
+// the cloned, failed, and refused counts, and the total.
+// No stamp, no actor, no URL, no destination, no refusal
+// reason, and no verbatim summary enters the text - the
+// summary carries the repo URL and the destination path,
+// which a fold must never print. A pure read: it creates
+// nothing, spends no model call, and clones nothing - the
+// clone seams themselves are untouched.
+export function parseGitCloneSummary(summary: string): { action: "cloned" | "failed" | "refused" } | null {
+  if (/^Refused clone of \S.*: \S.*$/.test(summary)) return { action: "refused" };
+  const result = /^(?:Cloned|Clone failed for) (\S+) into (.+): (ok|exit -?\d+(?: \(timed out\))?|git is not installed on this machine.*)$/.exec(summary);
+  if (!result) return null;
+  return { action: result[3] === "ok" ? "cloned" : "failed" };
+}
+export function gitCloneScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "git-clone" });
+  let cloned = 0;
+  let failed = 0;
+  let refused = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseGitCloneSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.action === "cloned") cloned += 1;
+    else if (parsed.action === "failed") failed += 1;
+    else refused += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Git clones: " + (failed > 0 || refused > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(cloned) + " cloned");
+  parts.push(String(failed) + " failed");
+  parts.push(String(refused) + " refused");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 // ---- Python runner ---------------------------------------------------
