@@ -332,6 +332,87 @@ export function proposalScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writers for the gate decision activity lines, so
+// the scorecard's parser below can never drift from the
+// seams it counts. Their shapes are byte-identical to what
+// applyDecision wrote inline before these writers existed:
+// a rejection is "<kind>: <title>", an approval is
+// "<kind>: <title> - <result>", and an auto approval (by is
+// the auto via stamp, never "owner") appends " [<by>]".
+export function approvedLedgerSummary(kind: string, title: string, result: string, by: string): string {
+  return kind + ": " + title + " - " + result + (by === "owner" ? "" : " [" + by + "]");
+}
+export function rejectedLedgerSummary(kind: string, title: string): string {
+  return kind + ": " + title;
+}
+// The gate decision scorecard (2026-11-20, the
+// measured-proof series): every decision through the ONE
+// gate has ledgered as an "approved", "auto-approved", or
+// "rejected" line since the gate landed, but the classes
+// were never folded: the proposal scorecard folds the
+// gate's inflow, the gate scorecard reads the action STORE
+// (the queue's current state), and the failure scorecard
+// folds the ledger's "failed" lines, yet the decision
+// lines themselves - the outflow record of everything the
+// owner and the approvals engine have ever decided - had
+// no trending surface, so the decision mix over time (how
+// much the owner decides by hand versus how much the
+// engine settles, and which kinds get rejected) was
+// invisible in aggregate. Deciding is the gate working as
+// designed, so the verdict is attention only when a line
+// is unparseable (a writer's shape broken or the ledger
+// tampered), else clear; the gate scorecard already
+// carries the pending backlog's attention. The parser
+// validates the kind against the fixed ACTION_KINDS enum -
+// an unknown kind folds to "other", never printed as free
+// text (the action-failure precedent) - and folds an auto
+// approval's trailing via stamp to the fixed smart / off /
+// other buckets. This text folds the classes to counts
+// only, on ONE line: the total, the counts per decision,
+// the counts per kind, and the counts per auto via. No
+// stamp, no actor, no title, no result, and no verbatim
+// summary enters the text - the summary carries the
+// proposal's title and its execution result, which a fold
+// must never print. A pure read: it creates nothing, spends
+// no model call, and decides, approves, rejects, and
+// executes nothing - the decision seams themselves are
+// untouched.
+export function parseDecisionSummary(summary: string, ledgerKind: string): { kind: string; via: string | null } | null {
+  const m = /^([a-z][a-z0-9-]*): (.+)$/.exec(summary);
+  if (!m) return null;
+  const kind = (KINDS as string[]).includes(m[1]) ? m[1] : "other";
+  if (ledgerKind !== "auto-approved") return { kind, via: null };
+  const viaMatch = /\[(auto:[a-z]+)\]$/.exec(m[2]);
+  const via = viaMatch && (viaMatch[1] === "auto:smart" || viaMatch[1] === "auto:off") ? viaMatch[1].slice(5) : "other";
+  return { kind, via };
+}
+export function decisionScorecardText(root: string): string {
+  const approved = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "approved" });
+  const autoApproved = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "auto-approved" });
+  const rejected = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "rejected" });
+  const byKind = new Map<string, number>();
+  const byVia = new Map<string, number>();
+  let unparseable = 0;
+  for (const [lines, ledgerKind] of [[approved, "approved"], [autoApproved, "auto-approved"], [rejected, "rejected"]] as const) {
+    for (const line of lines) {
+      const parsed = parseDecisionSummary(line.summary, ledgerKind);
+      if (!parsed) { unparseable += 1; continue; }
+      byKind.set(parsed.kind, (byKind.get(parsed.kind) ?? 0) + 1);
+      if (parsed.via) byVia.set(parsed.via, (byVia.get(parsed.via) ?? 0) + 1);
+    }
+  }
+  const total = approved.length + autoApproved.length + rejected.length;
+  const kinds = [...KINDS, "other"].filter(k => (byKind.get(k) ?? 0) > 0).map(k => k + " " + String(byKind.get(k)));
+  const vias = ["smart", "off", "other"].filter(v => (byVia.get(v) ?? 0) > 0).map(v => v + " " + String(byVia.get(v)));
+  const parts: string[] = [];
+  parts.push("Gate decisions: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(total) + " total");
+  parts.push("owner-approved " + String(approved.length) + " / auto-approved " + String(autoApproved.length) + " / rejected " + String(rejected.length));
+  parts.push("kinds " + (kinds.length ? kinds.join(" / ") : "none"));
+  parts.push("auto via " + (vias.length ? vias.join(" / ") : "none"));
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
@@ -675,7 +756,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
   if (!approve) {
     a.status = "rejected"; a.result = by === "owner" ? "Rejected by owner" : "Rejected by " + by;
     updateAction(root, a);
-    recordActivity(root, decider, "rejected", a.kind + ": " + a.title);
+    recordActivity(root, decider, "rejected", rejectedLedgerSummary(a.kind, a.title));
     return a;
   }
   // The never-list binds again at DECISION time: a record written
@@ -739,7 +820,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
     return a;
   }
   updateAction(root, a);
-  recordActivity(root, decider, by === "owner" ? "approved" : "auto-approved", a.kind + ": " + a.title + " - " + (a.result ?? "") + (by === "owner" ? "" : " [" + by + "]"));
+  recordActivity(root, decider, by === "owner" ? "approved" : "auto-approved", approvedLedgerSummary(a.kind, a.title, a.result ?? "", by));
   return a;
 }
 
