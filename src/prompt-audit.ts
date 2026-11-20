@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { auditStoreTouch } from "./audit-store-failure.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
@@ -205,8 +205,80 @@ function savePromptAudit(root: string, audit: PromptAudit): void {
 export function runPromptAudit(root: string): PromptAudit {
   const audit = buildPromptAudit();
   savePromptAudit(root, audit);
-  recordActivity(root, "sam", "prompt-audit", "Prompt audit recorded: " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks, " + String(audit.findings.length) + " finding(s), " + String(audit.surfaces.tools) + " tool descriptions");
+  recordActivity(root, "sam", "prompt-audit", promptAuditLedgerSummary(audit.overall.passed, audit.overall.total, audit.findings.length, audit.surfaces.tools));
   return audit;
+}
+
+// The ONE writer for the prompt audit's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runPromptAudit
+// wrote inline before this writer existed.
+export function promptAuditLedgerSummary(passed: number, total: number, findings: number, tools: number): string {
+  return "Prompt audit recorded: " + String(passed) + "/" + String(total) + " checks, " + String(findings) + " finding(s), " + String(tools) + " tool descriptions";
+}
+
+// The prompt audit history scorecard (2026-11-20, the
+// measured-proof series): the audit's ledger class
+// (prompt-audit) has ledgered one line per recorded run since
+// the audit landed, but the class was never folded - the
+// audit's own surfaces execute a run (prompt-audit run) or
+// read the last one (prompt-audit show, over a singleton
+// store holding ONE row), so how many runs ever recorded,
+// whether any run ever carried a finding, and how the audited
+// tool-description count has moved as the shipped prompts
+// changed were invisible as a trend; a run that dropped a
+// check and later recovered would leave no daily surface
+// remembering it happened. Runs are the audit's own acts, so
+// the verdict is attention only when any finding was ever
+// recorded or a line is unparseable, else clear - a finding
+// is the news, and the tool-count trend rides the counts so
+// surface growth is visible without alarming on it. This
+// text folds the class to counts only, on ONE line: runs,
+// the summed findings, the latest run's passed/total checks,
+// the latest and peak tool-description counts, and the
+// total. No stamp, no actor, no finding text, and no
+// verbatim summary enters the text - a finding names the
+// shipped line that is missing and never surfaces here. A
+// pure read: it creates nothing, runs no audit, and spends
+// no model call - the audit seam itself is untouched.
+export function parsePromptAuditSummary(summary: string): { passed: number; total: number; findings: number; tools: number } | null {
+  const m = /^Prompt audit recorded: (\d+)\/(\d+) checks, (\d+) finding\(s\), (\d+) tool descriptions$/.exec(summary);
+  if (!m) return null;
+  const passed = Number(m[1]);
+  const total = Number(m[2]);
+  if (total < 1 || passed > total) return null;
+  return { passed, total, findings: Number(m[3]), tools: Number(m[4]) };
+}
+
+export function promptAuditHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "prompt-audit" });
+  let runs = 0;
+  let findings = 0;
+  let latestPassed = 0;
+  let latestTotal = 0;
+  let latestTools = 0;
+  let peakTools = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parsePromptAuditSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    findings += parsed.findings;
+    latestPassed = parsed.passed;
+    latestTotal = parsed.total;
+    latestTools = parsed.tools;
+    if (parsed.tools > peakTools) peakTools = parsed.tools;
+  }
+  const parts: string[] = [];
+  parts.push("Prompt audit history: " + (findings > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(findings) + " findings");
+  parts.push("latest " + String(latestPassed) + "/" + String(latestTotal) + " checks");
+  parts.push("latest " + String(latestTools) + " tool descriptions");
+  parts.push("peak " + String(peakTools) + " tool descriptions");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The audit as plain text (the sam-prompt-audit script job's
