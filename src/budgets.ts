@@ -62,6 +62,23 @@ export function guardrailStubContent(executed: string[], ceiling: ToolBudget): s
 export function budgetContinuedSummary(tranche: number, executed: string[], roundsUsed: number): string {
   return "Owner turn continued past its standard budget (tranche " + tranche + "): " + executed.length + " calls over " + roundsUsed + " rounds so far - the turn keeps going instead of ending on a budget message";
 }
+// The ONE writers for the two owner-intervention lines the
+// chat loops ledger at their steer seam (both loops carried
+// the identical inline strings), so the intervention
+// scorecard's parsers in chat-queue.ts can never drift from
+// the seams they count. Their shapes are byte-identical to
+// what the loops wrote inline before these writers existed.
+export function steerLedgerSummary(count: number): string {
+  return "Owner sent " + count + " message(s) mid-turn; folded into the running turn, the latest governs";
+}
+export function stopMidTurnLedgerSummary(calls: number): string {
+  return "Owner said stop mid-turn after " + calls + " calls; the turn closes with an accounting";
+}
+export function parseBudgetContinuedSummary(summary: string): { tranche: number; calls: number; rounds: number } | null {
+  const m = /^Owner turn continued past its standard budget \(tranche (\d+)\): (\d+) calls over (\d+) rounds so far - the turn keeps going instead of ending on a budget message$/.exec(summary);
+  if (!m) return null;
+  return { tranche: Number(m[1]), calls: Number(m[2]), rounds: Number(m[3]) };
+}
 export function guardrailLedgerSummary(executed: string[], skipped: string[], ceiling: ToolBudget, reason: TurnEndReason = "calls"): string {
   if (reason === "steps") return "Owner turn hit the internal budget guardrail (rounds): " + ceiling.rounds + " rounds used with " + executed.length + " calls (" + (executed.join(", ") || "none") + ") - closed with a synthesis from gathered material" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
   return "Owner turn hit the internal budget guardrail (calls): " + executed.length + "/" + ceiling.maxCalls + " calls used (" + (executed.join(", ") || "none") + ") - closed with a synthesis from gathered material" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");

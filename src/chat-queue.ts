@@ -10,6 +10,7 @@ import { readDashboardConfig } from "./dashboard-config.js";
 import { abortChatTurnRequests, bumpTurnGeneration, createTurnControl, OWNER_TURN_DEADLINE_MS } from "./turn-control.js";
 import { chatQueueTouch, chatQueueTouchAsync } from "./chat-queue-failure.js";
 import { errorReason } from "./telegram.js";
+import { parseBudgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary } from "./budgets.js";
 import type { SteerProvider } from "./budgets.js";
 
 // Message bursts (Defect 2, Dip 2026-11-14: "i want to be able to fire
@@ -305,9 +306,7 @@ function enqueueChatMessageInner(root: string, input: { chatId: string; content:
       const target = db.prepare("SELECT id FROM queue_items WHERE chat_id = ? AND status = 'queued' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(input.chatId) as { id: string } | undefined;
       db.prepare("INSERT INTO queue_items (id, chat_id, content, source, status, created_at, settled_at) VALUES (?, ?, ?, ?, 'consumed', ?, ?)").run(id, input.chatId, input.content, source, now, now);
       if (target) db.prepare("UPDATE queue_items SET status = 'dropped', settled_at = ? WHERE id = ?").run(now, target.id);
-      ledger(root, actor, "message-nevermind", target
-        ? "Owner neverminded a queued message in chat " + input.chatId.slice(0, 8) + "; the queued message was dropped before doing any work"
-        : "Owner sent a nevermind in chat " + input.chatId.slice(0, 8) + " with nothing queued to drop");
+      ledger(root, actor, "message-nevermind", nevermindLedgerSummary(input.chatId.slice(0, 8), !!target));
       return { id, status: "consumed", effect: "nevermind" };
     }
     if (STOP_RE.test(input.content)) {
@@ -315,10 +314,10 @@ function enqueueChatMessageInner(root: string, input: { chatId: string; content:
       const claim = db.prepare("SELECT chat_id FROM turn_claims WHERE chat_id = ?").get(input.chatId);
       if (claim) {
         db.prepare("UPDATE turn_claims SET cancel_requested = 1 WHERE chat_id = ?").run(input.chatId);
-        ledger(root, actor, "message-stop", "Owner said stop in chat " + input.chatId.slice(0, 8) + "; the running turn was asked to close at its next step");
+        ledger(root, actor, "message-stop", stopChatLedgerSummary(input.chatId.slice(0, 8), true, 0));
       } else {
         const dropped = db.prepare("UPDATE queue_items SET status = 'dropped', settled_at = ? WHERE chat_id = ? AND status = 'queued'").run(now, input.chatId);
-        ledger(root, actor, "message-stop", "Owner said stop in chat " + input.chatId.slice(0, 8) + " with no turn running; " + dropped.changes + " queued message(s) dropped");
+        ledger(root, actor, "message-stop", stopChatLedgerSummary(input.chatId.slice(0, 8), false, dropped.changes));
       }
       return { id, status: "consumed", effect: "stop" };
     }
@@ -332,7 +331,7 @@ function enqueueChatMessageInner(root: string, input: { chatId: string; content:
       const store = new ChatStore(root);
       try { store.add(input.chatId, "user", input.content, source); store.add(input.chatId, "assistant", reply); }
       finally { store.close(); }
-      ledger(root, actor, "message-status", "Owner status check in chat " + input.chatId.slice(0, 8) + " answered by the runtime while a turn runs; the turn was not disturbed and the model was not called");
+      ledger(root, actor, "message-status", messageStatusLedgerSummary(input.chatId.slice(0, 8)));
       return { id, status: "consumed", effect: "status", reply };
     }
     db.prepare("INSERT INTO queue_items (id, chat_id, content, source, status, created_at, settled_at) VALUES (?, ?, ?, ?, 'queued', ?, NULL)").run(id, input.chatId, input.content, source, now);
@@ -397,7 +396,7 @@ async function drainChatQueueInner(root: string, chatId: string, opts?: { deadli
       const items = takeQueued(root, chatId, "folded");
       if (!items.length) break;
       const actor = actorForChat(root, chatId);
-      if (items.length > 1) ledger(root, actor, "message-fold", items.length + " owner messages folded into one turn in chat " + chatId.slice(0, 8) + ", in arrival order; the latest governs");
+      if (items.length > 1) ledger(root, actor, "message-fold", messageFoldLedgerSummary(items.length, chatId.slice(0, 8)));
       try {
         // Every queue turn rides a turn control scoped to this
         // drain's claim: the interactive deadline, and reset
@@ -468,6 +467,194 @@ export interface ChatResetResult { wasActive: boolean; ranForMs: number | null; 
  *  line lands in the ledger. Nothing is deleted; the transcript
  *  is preserved. A press with nothing running and nothing
  *  queued is a quiet no-op. */
+// The ONE writers for the owner-intervention ledger lines
+// this module's seams write (the steer and mid-turn stop
+// writers live in budgets.ts beside budgetContinuedSummary,
+// which both chat loops already import), so the intervention
+// scorecard's parsers below can never drift from the seams
+// they count. Their shapes are byte-identical to what the
+// seams wrote inline before these writers existed. Chats are
+// named by their 8-char prefix only, exactly as the seams
+// have always written them.
+export function messageFoldLedgerSummary(count: number, chatPrefix: string): string {
+  return count + " owner messages folded into one turn in chat " + chatPrefix + ", in arrival order; the latest governs";
+}
+export function nevermindLedgerSummary(chatPrefix: string, dropped: boolean): string {
+  return dropped
+    ? "Owner neverminded a queued message in chat " + chatPrefix + "; the queued message was dropped before doing any work"
+    : "Owner sent a nevermind in chat " + chatPrefix + " with nothing queued to drop";
+}
+export function stopChatLedgerSummary(chatPrefix: string, running: boolean, dropped: number): string {
+  return running
+    ? "Owner said stop in chat " + chatPrefix + "; the running turn was asked to close at its next step"
+    : "Owner said stop in chat " + chatPrefix + " with no turn running; " + dropped + " queued message(s) dropped";
+}
+export function messageStatusLedgerSummary(chatPrefix: string): string {
+  return "Owner status check in chat " + chatPrefix + " answered by the runtime while a turn runs; the turn was not disturbed and the model was not called";
+}
+export function messageResentLedgerSummary(chatPrefix: string): string {
+  return "Owner resent a failed message in chat " + chatPrefix + "; the saved message is queued again over its original row - no second copy is saved";
+}
+
+// The owner-intervention scorecard (2026-11-20, the
+// measured-proof series): the owner's interventions in a
+// running or queued turn - steering it mid-flight, stopping
+// it, neverminding a queued follow-up, folding a burst into
+// one turn, checking its status on the fast lane, resending
+// a failed message, and the turn itself continuing past its
+// standard budget - have ledgered across seven kinds since
+// the burst-and-steer design landed, but the family was
+// never folded, so how often the owner reaches in, and how
+// often the reach is a STOP, was invisible in aggregate. A
+// stop is the owner halting work, so the verdict is
+// attention when any stop line exists or any line is
+// unparseable, else clear (the turn-reset precedent);
+// steering, folding, status checks, resends, neverminds, and
+// budget continuations are the queue working as designed.
+// This text folds the whole family's lines to counts only,
+// on ONE line: the parsed intervention count, the steer
+// count with summed steered messages, the stop count per
+// fixed form (mid-turn / running / idle) with summed queued
+// dropped, the nevermind count split dropped / empty, the
+// fold count with summed folded messages, the status-check
+// and resend counts, the budget-continuation count with its
+// peak tranche and summed calls and rounds, the
+// distinct-chat count, and the total. The distinct count
+// rides the chat-carrying lines' prefixes internally and
+// surfaces as a number only: no stamp, no actor, no chat id,
+// and no verbatim summary enters the text. A summary
+// matching no fixed shape counts toward its kind's total
+// and the unparseable count only, and is never printed. A
+// pure read: it creates nothing, spends no model call, and
+// intervenes in nothing - the ledger and the seams are
+// untouched beyond riding the writers above.
+export function parseSteerSummary(summary: string): { messages: number } | null {
+  const m = /^Owner sent (\d+) message\(s\) mid-turn; folded into the running turn, the latest governs$/.exec(summary);
+  if (!m) return null;
+  return { messages: Number(m[1]) };
+}
+export function parseStopSummary(summary: string): { form: "mid-turn" | "running" | "idle"; chat: string | null; calls: number | null; dropped: number } | null {
+  const mid = /^Owner said stop mid-turn after (\d+) calls; the turn closes with an accounting$/.exec(summary);
+  if (mid) return { form: "mid-turn", chat: null, calls: Number(mid[1]), dropped: 0 };
+  const running = /^Owner said stop in chat ([0-9a-f]{8}); the running turn was asked to close at its next step$/.exec(summary);
+  if (running) return { form: "running", chat: running[1] ?? "", calls: null, dropped: 0 };
+  const idle = /^Owner said stop in chat ([0-9a-f]{8}) with no turn running; (\d+) queued message\(s\) dropped$/.exec(summary);
+  if (idle) return { form: "idle", chat: idle[1] ?? "", calls: null, dropped: Number(idle[2]) };
+  return null;
+}
+export function parseNevermindSummary(summary: string): { chat: string; dropped: boolean } | null {
+  const dropped = /^Owner neverminded a queued message in chat ([0-9a-f]{8}); the queued message was dropped before doing any work$/.exec(summary);
+  if (dropped) return { chat: dropped[1] ?? "", dropped: true };
+  const empty = /^Owner sent a nevermind in chat ([0-9a-f]{8}) with nothing queued to drop$/.exec(summary);
+  if (empty) return { chat: empty[1] ?? "", dropped: false };
+  return null;
+}
+export function parseFoldSummary(summary: string): { chat: string; messages: number } | null {
+  const m = /^(\d+) owner messages folded into one turn in chat ([0-9a-f]{8}), in arrival order; the latest governs$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[2] ?? "", messages: Number(m[1]) };
+}
+export function parseStatusSummary(summary: string): { chat: string } | null {
+  const m = /^Owner status check in chat ([0-9a-f]{8}) answered by the runtime while a turn runs; the turn was not disturbed and the model was not called$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[1] ?? "" };
+}
+export function parseResentSummary(summary: string): { chat: string } | null {
+  const m = /^Owner resent a failed message in chat ([0-9a-f]{8}); the saved message is queued again over its original row - no second copy is saved$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[1] ?? "" };
+}
+export function interventionScorecardText(root: string): string {
+  const chats = new Set<string>();
+  let parsed = 0;
+  let unparseable = 0;
+  let total = 0;
+  let steers = 0;
+  let steeredMessages = 0;
+  let stops = 0;
+  let stopMidTurn = 0;
+  let stopRunning = 0;
+  let stopIdle = 0;
+  let stopDropped = 0;
+  let neverminds = 0;
+  let nevermindDropped = 0;
+  let folds = 0;
+  let foldedMessages = 0;
+  let statusChecks = 0;
+  let resends = 0;
+  let continuations = 0;
+  let peakTranche = 0;
+  let continuedCalls = 0;
+  let continuedRounds = 0;
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-steer" })) {
+    total += 1;
+    const p = parseSteerSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; steers += 1; steeredMessages += p.messages;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-stop" })) {
+    total += 1;
+    const p = parseStopSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; stops += 1; stopDropped += p.dropped;
+    if (p.form === "mid-turn") stopMidTurn += 1;
+    else if (p.form === "running") stopRunning += 1;
+    else stopIdle += 1;
+    if (p.chat) chats.add(p.chat);
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-nevermind" })) {
+    total += 1;
+    const p = parseNevermindSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; neverminds += 1;
+    if (p.dropped) nevermindDropped += 1;
+    chats.add(p.chat);
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-fold" })) {
+    total += 1;
+    const p = parseFoldSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; folds += 1; foldedMessages += p.messages;
+    chats.add(p.chat);
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-status" })) {
+    total += 1;
+    const p = parseStatusSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; statusChecks += 1;
+    chats.add(p.chat);
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-resent" })) {
+    total += 1;
+    const p = parseResentSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; resends += 1;
+    chats.add(p.chat);
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "budget-continued" })) {
+    total += 1;
+    const p = parseBudgetContinuedSummary(line.summary);
+    if (!p) { unparseable += 1; continue; }
+    parsed += 1; continuations += 1;
+    if (p.tranche > peakTranche) peakTranche = p.tranche;
+    continuedCalls += p.calls;
+    continuedRounds += p.rounds;
+  }
+  const parts: string[] = [];
+  parts.push("Owner interventions: " + (stops > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(parsed) + " interventions");
+  parts.push("steers " + String(steers) + " (" + String(steeredMessages) + " messages)");
+  parts.push("stops " + String(stops) + " (mid-turn " + String(stopMidTurn) + " / running " + String(stopRunning) + " / idle " + String(stopIdle) + ", " + String(stopDropped) + " queued dropped)");
+  parts.push("neverminds " + String(neverminds) + " (dropped " + String(nevermindDropped) + " / empty " + String(neverminds - nevermindDropped) + ")");
+  parts.push("folds " + String(folds) + " (" + String(foldedMessages) + " messages)");
+  parts.push("status checks " + String(statusChecks));
+  parts.push("resends " + String(resends));
+  parts.push("budget continuations " + String(continuations) + " (peak tranche " + String(peakTranche) + ", " + String(continuedCalls) + " calls over " + String(continuedRounds) + " rounds)");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 // The ONE writer for the turn-reset ledger line: the reset
 // seam ledgers exactly this shape for each press that stopped
 // a turn or cancelled queued work, so the writer and the
@@ -587,7 +774,7 @@ export function resendFailedMessage(root: string, chatId: string, itemId: string
       return { ...found, status: "queued" as QueueItemStatus, settledAt: null, createdAt: now };
     } finally { db.close(); }
   });
-  ledger(root, actorForChat(root, chatId), "message-resent", "Owner resent a failed message in chat " + chatId.slice(0, 8) + "; the saved message is queued again over its original row - no second copy is saved");
+  ledger(root, actorForChat(root, chatId), "message-resent", messageResentLedgerSummary(chatId.slice(0, 8)));
   kickChatDrain(root, chatId);
   return item;
 }

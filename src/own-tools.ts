@@ -6,7 +6,7 @@ import { linkExchange } from "./collab.js";
 import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions.js";
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
-import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
@@ -982,7 +982,7 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
     for(const extra of batch.contents)messages.push({role:"user",content:extra});
     if(batch.cancel){messages.push({role:"system",content:stopSystemNote()});steerStopped=true;}
     else messages.push({role:"system",content:steerSystemNote(batch.contents.length)});
-    try{recordActivity(root,actor,batch.cancel?"message-stop":"message-steer",batch.cancel?("Owner said stop mid-turn after "+executed.length+" calls; the turn closes with an accounting"):("Owner sent "+batch.contents.length+" message(s) mid-turn; folded into the running turn, the latest governs"));}catch{/* the ledger never breaks a turn */}
+    try{recordActivity(root,actor,batch.cancel?"message-stop":"message-steer",batch.cancel?stopMidTurnLedgerSummary(executed.length):steerLedgerSummary(batch.contents.length));}catch{/* the ledger never breaks a turn */}
     if(batch.cancel)break;
    }
   }
