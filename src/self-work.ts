@@ -1337,15 +1337,119 @@ function saveRun(root: string, run: SelfWorkRun): void {
   } finally { db.close(); }
 }
 
+// The ONE writers for the self-work activity lines, so the
+// scorecard's parsers below can never drift from the seams
+// they count. Their shapes are byte-identical to what the
+// seams wrote inline before these writers existed.
+export function selfWorkSpecLedgerSummary(spec: { id: string; defectKey: string; count: number; ownerOnly: boolean; blockedBy: string | null }, rankedCount: number): string {
+  return "Self-work spec " + spec.id + " written: " + spec.defectKey + " x" + String(spec.count) + (spec.ownerOnly ? " (owner-only)" : "") + (spec.blockedBy ? " (blocked)" : "") + " - " + String(rankedCount) + " defect class(es) ranked";
+}
+export function selfWorkNoSpecLedgerSummary(): string {
+  return "Self-work run: no ledgered defect classes found - no spec written";
+}
+export function selfWorkFixQueuedLedgerSummary(spec: { id: string; defectKey: string; count: number }, taskId: string): string {
+  return "Self-work fix queued: spec " + spec.id + " (" + spec.defectKey + " x" + String(spec.count) + ") -> coding task " + taskId + " in the designated code root; it lands only through the git-push approval gate";
+}
+export function selfWorkFixMissingTaskDigest(fix: { specId: string; defectKey: string; count: number }): string {
+  return "Self-fix " + fix.specId + " (" + fix.defectKey + " x" + String(fix.count) + "): coding task record no longer exists - nothing landed; re-spec from the ledger if the class still recurs";
+}
+// The self-work scorecard (2026-11-20, the measured-proof
+// series): the picker and the work bridge have ledgered as
+// "self-work" and "self-work-fix" lines since the loop
+// landed, but the classes were never folded: the coding
+// scorecard reads the coding tasks the fixes become and
+// the gate scorecards read the proposals finished fixes
+// land as, yet the loop's own record - how many specs the
+// picker wrote, how many were owner-only or blocked, how
+// many fixes queued, and how those fixes closed - had no
+// trending surface, so whether SAM's self-repair loop is
+// landing or stalling was invisible in aggregate. A fix
+// that closes blocked or failed is the loop stalling, so
+// the verdict is attention when any digest closed blocked,
+// failed, or other, or any line is unparseable (a writer's
+// shape broken or the ledger tampered), else clear (the
+// coding scorecard's precedent). The digest parser folds
+// the terminal status to the fixed done / blocked / failed
+// / other buckets - the missing-task digest and any novel
+// status fold to other, never printed as free text. This
+// text folds the classes to counts only, on ONE line: the
+// total, the run counts (specs / no-spec), the distinct
+// spec count as a number only, the owner-only and
+// blocked-spec counts, the peak ranked-class count, and
+// the fix counts (queued, and digests per terminal
+// status). No stamp, no actor, no spec id, no defect key,
+// no task id, no branch, no proposal id, and no verbatim
+// summary enters the text - the summaries carry all of
+// those, which a fold must never print. A pure read: it
+// creates nothing, spends no model call, and runs, queues,
+// and reconciles nothing - the seams themselves are
+// untouched beyond riding the writers above.
+export function parseSelfWorkSummary(summary: string): { specId: string; ownerOnly: boolean; blocked: boolean; ranked: number } | { specId: null } | null {
+  if (summary === selfWorkNoSpecLedgerSummary()) return { specId: null };
+  const m = /^Self-work spec (\S+) written: [\s\S]+ x\d+( \(owner-only\))?( \(blocked\))? - (\d+) defect class\(es\) ranked$/.exec(summary);
+  if (!m) return null;
+  return { specId: m[1], ownerOnly: m[2] !== undefined, blocked: m[3] !== undefined, ranked: Number(m[4]) };
+}
+export function parseSelfWorkFixSummary(summary: string): { type: "queued"; specId: string } | { type: "digest"; specId: string; status: string } | null {
+  const q = /^Self-work fix queued: spec (\S+) \([\s\S]+ x\d+\) -> coding task \S+ in the designated code root; it lands only through the git-push approval gate$/.exec(summary);
+  if (q) return { type: "queued", specId: q[1] };
+  const d = /^Self-fix (\S+) \([\s\S]+ x\d+\): ([\s\S]+)$/.exec(summary);
+  if (!d) return null;
+  const statusMatch = /^(done|blocked|failed) - /.exec(d[2]);
+  return { type: "digest", specId: d[1], status: statusMatch ? statusMatch[1] : "other" };
+}
+export function selfWorkScorecardText(root: string): string {
+  const runLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "self-work" });
+  const fixLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "self-work-fix" });
+  const specs = new Set<string>();
+  let specRuns = 0;
+  let noSpecRuns = 0;
+  let ownerOnly = 0;
+  let blockedSpecs = 0;
+  let peakRanked = 0;
+  let queued = 0;
+  const digests = new Map<string, number>();
+  let unparseable = 0;
+  for (const line of runLines) {
+    const parsed = parseSelfWorkSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.specId === null) { noSpecRuns += 1; continue; }
+    specRuns += 1;
+    specs.add(parsed.specId);
+    if (parsed.ownerOnly) ownerOnly += 1;
+    if (parsed.blocked) blockedSpecs += 1;
+    if (parsed.ranked > peakRanked) peakRanked = parsed.ranked;
+  }
+  for (const line of fixLines) {
+    const parsed = parseSelfWorkFixSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    specs.add(parsed.specId);
+    if (parsed.type === "queued") { queued += 1; continue; }
+    digests.set(parsed.status, (digests.get(parsed.status) ?? 0) + 1);
+  }
+  const digestTotal = [...digests.values()].reduce((a, b) => a + b, 0);
+  const bad = (digests.get("blocked") ?? 0) + (digests.get("failed") ?? 0) + (digests.get("other") ?? 0);
+  const parts: string[] = [];
+  parts.push("Self-work: " + (bad > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runLines.length + fixLines.length) + " total");
+  parts.push("runs " + String(runLines.length) + " (specs " + String(specRuns) + " / no-spec " + String(noSpecRuns) + ")");
+  parts.push("distinct specs " + String(specs.size));
+  parts.push("owner-only " + String(ownerOnly) + " / blocked specs " + String(blockedSpecs));
+  parts.push("peak ranked " + String(peakRanked));
+  parts.push("fixes " + String(fixLines.length) + " (queued " + String(queued) + " / digests " + String(digestTotal) + ": done " + String(digests.get("done") ?? 0) + " / blocked " + String(digests.get("blocked") ?? 0) + " / failed " + String(digests.get("failed") ?? 0) + " / other " + String(digests.get("other") ?? 0) + ")");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 /** Run the picker: rank the ledger, write the top spec, record
  *  the run, and ledger one counts-only line. Returns the run. */
 export function runSelfWork(root: string, now: Date = new Date()): SelfWorkRun {
   const run = buildSelfWorkSpec(root, readSelfAudit(root), now);
   saveRun(root, run);
   if (run.spec) {
-    recordActivity(root, "sam", "self-work", "Self-work spec " + run.spec.id + " written: " + run.spec.defectKey + " x" + String(run.spec.count) + (run.spec.ownerOnly ? " (owner-only)" : "") + (run.spec.blockedBy ? " (blocked)" : "") + " - " + String(run.ranked.length) + " defect class(es) ranked");
+    recordActivity(root, "sam", "self-work", selfWorkSpecLedgerSummary(run.spec, run.ranked.length));
   } else {
-    recordActivity(root, "sam", "self-work", "Self-work run: no ledgered defect classes found - no spec written");
+    recordActivity(root, "sam", "self-work", selfWorkNoSpecLedgerSummary());
   }
   return run;
 }
@@ -1464,11 +1568,11 @@ export function queueSelfWorkFix(root: string, now: Date = new Date()): SelfWork
     taskId: task.id, chatId, queuedAt: now.toISOString(), proposalId: null, digest: null, digestedAt: null,
   };
   saveFix(root, fix);
-  recordActivity(root, "sam", "self-work-fix", "Self-work fix queued: spec " + spec.id + " (" + spec.defectKey + " x" + String(spec.count) + ") -> coding task " + task.id + " in the designated code root; it lands only through the git-push approval gate");
+  recordActivity(root, "sam", "self-work-fix", selfWorkFixQueuedLedgerSummary(spec, task.id));
   return fix;
 }
 
-function fixDigestLine(fix: SelfWorkFix, task: CodingTask, proposalId: string | null): string {
+export function fixDigestLine(fix: SelfWorkFix, task: CodingTask, proposalId: string | null): string {
   const head = "Self-fix " + fix.specId + " (" + fix.defectKey + " x" + String(fix.count) + "): " + task.status;
   if (task.status === "done") {
     const files = task.changes.length ? String(task.changes.length) + " file(s) changed" : "no files changed";
@@ -1498,7 +1602,7 @@ export function reconcileSelfWorkFixes(root: string, now: Date = new Date()): Se
     if (fix.digest) { out.push(fix); continue; }
     const task = getCodingTask(root, fix.taskId);
     if (!task) {
-      fix.digest = "Self-fix " + fix.specId + " (" + fix.defectKey + " x" + String(fix.count) + "): coding task record no longer exists - nothing landed; re-spec from the ledger if the class still recurs";
+      fix.digest = selfWorkFixMissingTaskDigest(fix);
       fix.digestedAt = now.toISOString();
       saveFix(root, fix);
       recordActivity(root, "sam", "self-work-fix", fix.digest);
