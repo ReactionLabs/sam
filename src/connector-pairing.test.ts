@@ -54,6 +54,14 @@ test("the pair flow registers, allowlists, tests, pins, and ledgers - value nowh
     assert.equal(registered.length, 1);
     assert.equal(registered[0].vaultKey, "bridge-key");
     assert.equal(registered[0].tokenEnv, "");
+    // The stored record narrows at pair time to the connector's
+    // own approved set (the endpoint advertised update_lead_stage
+    // too, but it is not read-only approved) - never the whole
+    // read-only ceiling the registration seeded, so a reader of
+    // the record (the Mission Status wall) reports this
+    // connector's count, not the ceiling's size.
+    assert.deepEqual(registered[0].allowedTools, ["whoami", "list_leads"]);
+    assert.deepEqual(result.connector.allowedTools, ["whoami", "list_leads"]);
     assert.deepEqual(pairAllowlistedHosts(root), ["127.0.0.1"]);
     const db = new ChatStore(root);
     try { assert.equal(db.agents().find(a => a.name === "bridge-user")?.connector_id, result.connector.id); } finally { db.close(); }
