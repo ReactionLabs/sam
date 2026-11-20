@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { auditStoreTouch } from "./audit-store-failure.js";
 import { listActions } from "./actions.js";
 import { loadApprovalPolicy, neverListSummary } from "./approval-policy.js";
@@ -202,8 +202,90 @@ export function buildSelfAudit(root: string, env: NodeJS.ProcessEnv = process.en
 export function runSelfAudit(root: string, env: NodeJS.ProcessEnv = process.env): SelfAudit {
   const audit = buildSelfAudit(root, env);
   saveSelfAudit(root, audit);
-  recordActivity(root, "sam", "self-audit", "Capability self-audit recorded: " + String(audit.can.length) + " can, " + String(audit.cannot.length) + " cannot, " + String(audit.tools.ownCount) + " own tools, code root " + (audit.code.root ?? "none"));
+  recordActivity(root, "sam", "self-audit", selfAuditLedgerSummary(audit.can.length, audit.cannot.length, audit.tools.ownCount, audit.code.root));
   return audit;
+}
+
+// The ONE writer for the self audit's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runSelfAudit
+// wrote inline before this writer existed.
+export function selfAuditLedgerSummary(can: number, cannot: number, ownCount: number, codeRoot: string | null): string {
+  return "Capability self-audit recorded: " + String(can) + " can, " + String(cannot) + " cannot, " + String(ownCount) + " own tools, code root " + (codeRoot ?? "none");
+}
+
+// The self audit history scorecard (2026-11-20, the
+// measured-proof series): the audit's ledger class
+// (self-audit) has ledgered one line per recorded run since
+// the audit landed, but the class was never folded - the
+// audit's own surfaces execute a run (self-audit run) or
+// read the last one (self-audit show, over a singleton
+// store holding ONE row), so how many runs ever recorded
+// and how the capability map it records (the can and
+// cannot counts, the own-tool count, and whether a code
+// root was designated) has moved across runs were
+// invisible as a trend; a capability gained and later lost
+// would leave no daily surface remembering it happened.
+// The verdict is attention only when a line is
+// unparseable, else clear: the can and cannot counts are
+// inventory, not alarms - the cannot list carries
+// standing fences by design (no external sends, no gate
+// edits, no arbitrary shell), so a nonzero cannot count
+// is permanent and can never be the news; what the fold
+// exists to keep is the map's movement. This text folds
+// the class to counts only, on ONE line: runs, the latest
+// can and cannot counts, the peak can count, the latest
+// and peak own-tool counts, counts of runs with and
+// without a designated code root, and the total. No
+// stamp, no actor, no capability text, and no verbatim
+// summary enters the text - and the code-root PATH the
+// summary carries is counted as present or absent and
+// never printed. A pure read: it creates nothing, runs
+// no audit, and spends no model call - the audit seam
+// itself is untouched.
+export function parseSelfAuditSummary(summary: string): { can: number; cannot: number; ownCount: number; hasCodeRoot: boolean } | null {
+  const m = /^Capability self-audit recorded: (\d+) can, (\d+) cannot, (\d+) own tools, code root (.+)$/.exec(summary);
+  if (!m) return null;
+  const root = m[4].trim();
+  if (!root) return null;
+  return { can: Number(m[1]), cannot: Number(m[2]), ownCount: Number(m[3]), hasCodeRoot: root !== "none" };
+}
+
+export function selfAuditHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "self-audit" });
+  let runs = 0;
+  let latestCan = 0;
+  let latestCannot = 0;
+  let peakCan = 0;
+  let latestOwn = 0;
+  let peakOwn = 0;
+  let rootPresent = 0;
+  let rootAbsent = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseSelfAuditSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    latestCan = parsed.can;
+    latestCannot = parsed.cannot;
+    if (parsed.can > peakCan) peakCan = parsed.can;
+    latestOwn = parsed.ownCount;
+    if (parsed.ownCount > peakOwn) peakOwn = parsed.ownCount;
+    if (parsed.hasCodeRoot) rootPresent += 1;
+    else rootAbsent += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Self audit history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push("latest " + String(latestCan) + " can");
+  parts.push("latest " + String(latestCannot) + " cannot");
+  parts.push("peak " + String(peakCan) + " can");
+  parts.push("latest " + String(latestOwn) + " own tools");
+  parts.push("peak " + String(peakOwn) + " own tools");
+  parts.push("code root present " + String(rootPresent) + " / absent " + String(rootAbsent));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The audit as plain text (the sam-self-audit script job's
