@@ -180,6 +180,59 @@ export function repeatLedgerSummary(repeats: string[]): string {
   return "Duplicate tool calls suppressed in one turn: " + repeats.length + " (" + repeats.join(", ") + ") - identical repeats returned the earlier result instead of re-executing";
 }
 
+// The tool-repeat scorecard (2026-11-20, the measured-proof
+// series): both chat loops ledger a "tool-repeat" line when
+// the repeat guard suppresses duplicate tool calls inside one
+// turn (the earlier result is returned instead of
+// re-executing), through the ONE writer above - but the class
+// was never folded: how often the model repeats itself, how
+// many calls the guard saves, and which tools repeat was
+// invisible in aggregate. Suppression is the guard working as
+// designed, so the verdict is attention only when a line is
+// unparseable (a writer's shape broken or the ledger
+// tampered), else clear. The scorecard text is a script job's
+// stdout and is P3-diffed on its facts, so it is ONE line
+// carrying counts only: no stamp, no actor, and never a tool
+// name - the summaries carry the repeated tool names, which a
+// fold consumes into a distinct count and never prints. The
+// scorecard path is a pure read - it creates nothing, spends
+// no model call, and suppresses nothing; every state is built
+// through the ledger's own public door (recordActivity) with
+// the writer above, never around either.
+export function parseToolRepeatSummary(
+  summary: string,
+): { suppressed: number; tools: string[] } | null {
+  const m = /^Duplicate tool calls suppressed in one turn: (\d+) \((.+)\) - identical repeats returned the earlier result instead of re-executing$/.exec(summary);
+  if (!m) return null;
+  const tools = m[2].split(", ").map((t) => t.trim()).filter((t) => t.length > 0);
+  if (tools.length === 0) return null;
+  if (Number(m[1]) !== tools.length) return null;
+  return { suppressed: Number(m[1]), tools };
+}
+
+export function toolRepeatScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "tool-repeat" });
+  let unparseable = 0;
+  let turns = 0;
+  let suppressed = 0;
+  const distinct = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseToolRepeatSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    turns += 1;
+    suppressed += parsed.suppressed;
+    for (const t of parsed.tools) distinct.add(t);
+  }
+  const parts: string[] = [];
+  parts.push("Tool repeats: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(turns) + " turns");
+  parts.push(String(suppressed) + " suppressed");
+  parts.push(String(distinct.size) + " distinct tools");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // Graceful exhaustion (post-program fix, Dip hit the death live 2026-11-09):
 // a turn that overspends its budget must ANSWER from what it already gathered,
 // never die and discard the transcript. Both tool loops share these shapes:
