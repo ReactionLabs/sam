@@ -178,6 +178,10 @@ export interface BriefDeps { now?: Date; env?: NodeJS.ProcessEnv; runner?: Sense
  *  are the only subprocess work, and each read ledgers itself in
  *  runSense. One brief activity line records the section states -
  *  never any content, which is the owner's private data. */
+export function briefLedgerSummary(sections: BriefSection[]): string {
+  return "Morning brief assembled: " + sections.map(s => s.name.toLowerCase() + "=" + s.state).join(", ");
+}
+
 export async function buildBrief(root: string, deps: BriefDeps = {}): Promise<BriefResult> {
   const now = deps.now ?? new Date();
   const env = deps.env ?? process.env;
@@ -199,7 +203,7 @@ export async function buildBrief(root: string, deps: BriefDeps = {}): Promise<Br
     text += "\n" + s.name + ":\n" + s.lines.map(l => "- " + l).join("\n") + "\n";
   }
   if (text.length > MAX_BRIEF_CHARS) text = text.slice(0, MAX_BRIEF_CHARS - 24).trimEnd() + "\n- (brief truncated)";
-  recordActivity(root, "sam", "brief", "Morning brief assembled: " + sections.map(s => s.name.toLowerCase() + "=" + s.state).join(", "));
+  recordActivity(root, "sam", "brief", briefLedgerSummary(sections));
   return { at: now.toISOString(), text: text.trimEnd(), sections };
 }
 

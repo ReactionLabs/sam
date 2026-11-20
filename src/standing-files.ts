@@ -159,6 +159,13 @@ export function readStandingFile(root: string, profile: string, name: string): s
   return content;
 }
 
+export function standingFileSetLedgerSummary(name: string, tier: string, chars: number): string {
+  return "Standing file " + name + " (" + tier + ") set, " + chars + " chars";
+}
+export function standingFileClearedLedgerSummary(name: string): string {
+  return "Standing file " + name + " cleared";
+}
+
 export function writeStandingFile(root: string, profile: string, name: string, content: string): StandingFileEntry {
   assertKnownProfile(root, profile);
   const def = standingFileDef(name);
@@ -169,7 +176,7 @@ export function writeStandingFile(root: string, profile: string, name: string, c
   const dir = standingDir(root, profile);
   mkdirSync(dir, { recursive: true });
   writeFileSync(standingPath(root, profile, name), text + "\n", { mode: 0o600 });
-  recordActivity(root, profile, "standing-file", "Standing file " + def.name + " (" + def.tier + ") set, " + text.length + " chars");
+  recordActivity(root, profile, "standing-file", standingFileSetLedgerSummary(def.name, def.tier, text.length));
   return listStandingFiles(root, profile).find(e => e.name === def.name)!;
 }
 
@@ -178,7 +185,7 @@ export function clearStandingFile(root: string, profile: string, name: string): 
   const path = standingPath(root, profile, name);
   if (!existsSync(path)) return false;
   rmSync(path);
-  recordActivity(root, profile, "standing-file", "Standing file " + name + " cleared");
+  recordActivity(root, profile, "standing-file", standingFileClearedLedgerSummary(name));
   return true;
 }
 

@@ -129,6 +129,9 @@ export function turnFailureNoteSummary(chatId:string,error:unknown):string{
   // reaches the owner; this line is the internal record.
   return "Turn failure noted in chat "+chatId.slice(0,8)+": the owner reads one plain sentence in the chat (the raw error never reaches the owner); error: "+errorReason(error).slice(0,120);
 }
+export function chatCitationLedgerSummary(chatId:string,citedChatId:string,messageId:string):string{
+  return "Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citedChatId.slice(0,8)+", message "+messageId.slice(0,8);
+}
 export function failoverSummary(chatId:string,from:string,to:string,error:unknown):string{
   // The hop line's reason rides the same seam (gap found
   // 2026-11-16, hourly run 19:04 EST): it took error.message
@@ -612,7 +615,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   }finally{saved.close();}
   if(citationHit&&savedId){
     if(attachCitation(root,{messageId:savedId,chatId,actor:profileName,hit:citationHit}))
-      recordActivity(root,profileName,"chat-citation","Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citationHit.chatId.slice(0,8)+", message "+citationHit.messageId.slice(0,8));
+      recordActivity(root,profileName,"chat-citation",chatCitationLedgerSummary(chatId,citationHit.chatId,citationHit.messageId));
   }
   if(savedId&&registeredSources.length){
     if(attachReplySources(root,{messageId:savedId,chatId,actor:profileName,registered:registeredSources,cited:citedSources})&&citedSources.length)

@@ -251,6 +251,13 @@ export function codeFileExists(root: string, rel: string): boolean {
   try { return existsSync(targetPath(base, rel, false)); } catch { return false; }
 }
 
+export function codeRootDesignatedLedgerSummary(path: string): string {
+  return "Designated code root: " + path;
+}
+export function codeRootClearedLedgerSummary(): string {
+  return "Cleared the designated code root";
+}
+
 export function setCodeRoot(root: string, candidate: string): string {
   if (!candidate || typeof candidate !== "string") throw new Error("A code root path is required");
   let real: string;
@@ -261,13 +268,13 @@ export function setCodeRoot(root: string, candidate: string): string {
   if (real.startsWith(sam + sep)) throw new Error("The code root cannot be inside the SAM home");
   if (sam.startsWith(real + sep)) throw new Error("The code root cannot contain the SAM home");
   writeConfig(root, { version: 1, root: real });
-  recordActivity(root, "operator", "code-root", "Designated code root: " + real);
+  recordActivity(root, "operator", "code-root", codeRootDesignatedLedgerSummary(real));
   return real;
 }
 
 export function clearCodeRoot(root: string): void {
   writeConfig(root, { version: 1, root: null });
-  recordActivity(root, "operator", "code-root", "Cleared the designated code root");
+  recordActivity(root, "operator", "code-root", codeRootClearedLedgerSummary());
 }
 
 function requireCodeRoot(root: string): string {
@@ -1534,6 +1541,65 @@ export function sandboxScorecardText(root: string): string {
   parts.push(String(writes) + " writes");
   parts.push(String(installs) + " installs (ok " + String(installsOk) + ", failed " + String(installsFailed) + ")");
   parts.push(String(names.size) + " distinct sandboxes");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
+export function parseStandingFileSetSummary(summary: string): { chars: number } | null {
+  const m = /^Standing file .+ \(.+\) set, (\d+) chars$/.exec(summary);
+  return m ? { chars: Number(m[1]) } : null;
+}
+export function parseStandingFileClearedSummary(summary: string): Record<string, never> | null {
+  return /^Standing file .+ cleared$/.test(summary) ? {} : null;
+}
+export function parseCodeRootDesignatedSummary(summary: string): Record<string, never> | null {
+  return /^Designated code root: .+$/.test(summary) ? {} : null;
+}
+export function parseCodeRootClearedSummary(summary: string): Record<string, never> | null {
+  return summary === "Cleared the designated code root" ? {} : null;
+}
+export function parseChatCitationSummary(summary: string): Record<string, never> | null {
+  return /^Citation attached in chat [0-9a-f]{8} pointing at chat [0-9a-f]{8}, message [0-9a-f]{8}$/.test(summary) ? {} : null;
+}
+export function parseBriefSummary(summary: string): Record<string, never> | null {
+  return /^Morning brief assembled: [a-z][a-z ]*=[a-z]+(, [a-z][a-z ]*=[a-z]+)*$/.test(summary) ? {} : null;
+}
+export function workspaceMiscScorecardText(root: string): string {
+  let standingSet = 0;
+  let standingCleared = 0;
+  let standingChars = 0;
+  let rootsDesignated = 0;
+  let rootsCleared = 0;
+  let citations = 0;
+  let briefs = 0;
+  let unparseable = 0;
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "standing-file" })) {
+    const setParsed = parseStandingFileSetSummary(line.summary);
+    if (setParsed) { standingSet += 1; standingChars += setParsed.chars; continue; }
+    if (parseStandingFileClearedSummary(line.summary)) { standingCleared += 1; continue; }
+    unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "code-root" })) {
+    if (parseCodeRootDesignatedSummary(line.summary)) { rootsDesignated += 1; continue; }
+    if (parseCodeRootClearedSummary(line.summary)) { rootsCleared += 1; continue; }
+    unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "chat-citation" })) {
+    if (parseChatCitationSummary(line.summary)) citations += 1; else unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "brief" })) {
+    if (parseBriefSummary(line.summary)) briefs += 1; else unparseable += 1;
+  }
+  const standing = standingSet + standingCleared;
+  const roots = rootsDesignated + rootsCleared;
+  const total = standing + roots + citations + briefs;
+  const parts: string[] = [];
+  parts.push("Workspace misc: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(standing) + " standing files (" + String(standingSet) + " set, " + String(standingCleared) + " cleared, " + String(standingChars) + " chars)");
+  parts.push(String(roots) + " code roots (" + String(rootsDesignated) + " designated, " + String(rootsCleared) + " cleared)");
+  parts.push(String(citations) + " chat citations");
+  parts.push(String(briefs) + " briefs");
   parts.push(String(total) + " total");
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
