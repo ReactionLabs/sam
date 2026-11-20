@@ -278,6 +278,60 @@ export function actionFailureScorecardText(root: string): string {
   out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries or re-executes an action or prints a title, detail, or reason; a new failed action is the news");
   return out.join("\n");
 }
+// The ONE writer for the proposal activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. Its shape is byte-identical to what proposeAction
+// wrote inline before this writer existed.
+export function proposalLedgerSummary(kind: string, title: string): string {
+  return "Proposed " + kind + ": " + title;
+}
+// The proposal scorecard (2026-11-20, the measured-proof
+// series): every proposal through the ONE gate has ledgered
+// as a "proposal" line since the gate landed, but the class
+// was never folded: the gate scorecard above reads the
+// action STORE (the queue's current state) and the failure
+// scorecard folds the ledger's "failed" lines, yet the
+// proposal lines themselves - the inflow record of
+// everything SAM has ever asked the owner to approve - had
+// no trending surface, so the proposal mix over time (which
+// kinds SAM reaches for, and how often) was invisible in
+// aggregate. Proposing is the gate working as designed, so
+// the verdict is attention only when a line is unparseable
+// (the ONE writer's shape broken or the ledger tampered),
+// else clear; the gate scorecard already carries the
+// pending backlog's attention. The parser validates the
+// kind against the fixed ACTION_KINDS enum - an unknown
+// kind folds to "other", never printed as free text (the
+// action-failure precedent). This text folds the class to
+// counts only, on ONE line: the total and the counts per
+// kind. No stamp, no actor, no title, and no verbatim
+// summary enters the text - the summary carries the
+// proposal's title, which a fold must never print. A pure
+// read: it creates nothing, spends no model call, and
+// proposes, approves, and executes nothing - the gate seam
+// itself is untouched.
+export function parseProposalSummary(summary: string): { kind: string } | null {
+  const m = /^Proposed ([a-z][a-z0-9-]*): (.+)$/.exec(summary);
+  if (!m) return null;
+  return { kind: (KINDS as string[]).includes(m[1]) ? m[1] : "other" };
+}
+export function proposalScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "proposal" });
+  const byKind = new Map<string, number>();
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseProposalSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    byKind.set(parsed.kind, (byKind.get(parsed.kind) ?? 0) + 1);
+  }
+  const kinds = [...KINDS, "other"].filter(k => (byKind.get(k) ?? 0) > 0).map(k => k + " " + String(byKind.get(k)));
+  const parts: string[] = [];
+  parts.push("Proposals: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(lines.length) + " total");
+  parts.push("kinds " + (kinds.length ? kinds.join(" / ") : "none"));
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
@@ -446,7 +500,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
     decidedBy: null,
   };
   insertAction(root, item);
-  recordActivity(root, input.actor, "proposal", "Proposed " + item.kind + ": " + title);
+  recordActivity(root, input.actor, "proposal", proposalLedgerSummary(item.kind, title));
   return item;
 }
 async function execute(root: string, a: ActionProposal): Promise<string> {
