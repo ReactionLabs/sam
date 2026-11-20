@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { draftBlockedFor } from "./contacts.js";
 import { errorReason } from "./error-reason.js";
 
@@ -204,7 +204,7 @@ export function createDraft(root: string, input: { actor: string; to: string; ch
   try { db!.prepare("INSERT INTO drafts (id, data) VALUES (?, ?)").run(draft.id, JSON.stringify(draft)); }
   catch (error) { failDraft(root, "write", error); }
   finally { db!.close(); }
-  recordActivity(root, input.actor, "draft", "Drafted " + channel + " to " + to + (subject ? ": " + subject : ""));
+  recordActivity(root, input.actor, "draft", draftCreatedLedgerSummary(channel, to, subject));
   return draft;
 }
 export function getDraft(root: string, id: string): Draft | null {
@@ -222,6 +222,73 @@ export function removeDraft(root: string, id: string): boolean {
   } catch (error) { failDraft(root, "write", error); }
   finally { db!.close(); }
   if (!removed) return false;
-  recordActivity(root, "owner", "draft", "Discarded draft " + id.slice(0, 8));
+  recordActivity(root, "owner", "draft", draftDiscardedLedgerSummary(id));
   return true;
+}
+// The ONE writer for the draft-created activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. Its shape is byte-identical to what createDraft
+// wrote inline before this writer existed.
+export function draftCreatedLedgerSummary(channel: string, to: string, subject: string | null): string {
+  return "Drafted " + channel + " to " + to + (subject ? ": " + subject : "");
+}
+// The ONE writer for the draft-discarded activity line, on
+// the same terms: byte-identical to what removeDraft wrote
+// inline (the id's first 8 chars, never the full id).
+export function draftDiscardedLedgerSummary(id: string): string {
+  return "Discarded draft " + id.slice(0, 8);
+}
+// The draft scorecard (2026-11-20, the measured-proof
+// series): every draft SAM creates or the owner discards has
+// ledgered as a "draft" line since P12 landed, but the class
+// was never folded - drafts are where SAM's outbound power
+// stops (there is no send surface), so the ledger is the
+// only aggregate record of how much drafting happens on the
+// owner's behalf and how much of it is thrown away, and in
+// aggregate it was invisible. Creating and discarding drafts
+// is the normal owner workflow, not an alarm, so the verdict
+// is attention only when a line is unparseable, else clear.
+// This text folds the class to counts only, on ONE line: the
+// created and discarded counts, the created counts per fixed
+// channel bucket (this module's own CHANNELS enum, in enum
+// order, nonzero only), and the total. No stamp, no actor,
+// no recipient, no subject, no draft id, and no verbatim
+// summary enters the text - the summary carries the
+// recipient and the subject, which a fold must never print.
+// A pure read: it creates nothing, spends no model call,
+// drafts nothing, and discards nothing - the draft seams
+// themselves are untouched.
+export function parseDraftSummary(summary: string): { action: "created"; channel: string } | { action: "discarded" } | null {
+  const created = /^Drafted ([a-z]+) to ([\s\S]+)$/.exec(summary);
+  if (created) {
+    if (!CHANNELS.includes(created[1] ?? "")) return null;
+    if (!(created[2] ?? "").trim()) return null;
+    return { action: "created", channel: created[1] as string };
+  }
+  if (/^Discarded draft \S{8}$/.test(summary)) return { action: "discarded" };
+  return null;
+}
+export function draftScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "draft" });
+  let created = 0;
+  let discarded = 0;
+  let unparseable = 0;
+  const byChannel = new Map<string, number>();
+  for (const line of lines) {
+    const parsed = parseDraftSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.action === "created") {
+      created += 1;
+      byChannel.set(parsed.channel, (byChannel.get(parsed.channel) ?? 0) + 1);
+    } else discarded += 1;
+  }
+  const channels = CHANNELS.filter(c => (byChannel.get(c) ?? 0) > 0).map(c => c + " " + String(byChannel.get(c)));
+  const parts: string[] = [];
+  parts.push("Drafts: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(created) + " created");
+  parts.push(String(discarded) + " discarded");
+  parts.push("channels " + (channels.length ? channels.join(" / ") : "none"));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
