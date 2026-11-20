@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import type { RunSource, SourceKind } from "./source-citations.js";
 import { errorReason } from "./error-reason.js";
 
@@ -315,7 +315,7 @@ export function createArtifact(root: string, input: CreateArtifactInput): Artifa
   } catch (error) {
     failArtifact(root, profile, "create", error);
   } finally { db?.close(); }
-  recordActivity(root, profile, "artifact", "Created artifact '" + title + "' (" + kind + ", v1) " + id.slice(0, 8));
+  recordActivity(root, profile, "artifact", artifactCreatedLedgerSummary(title, kind, id));
   return { id, title, kind, profile, version: 1, createdAt: now, updatedAt: now, createdBy: by, content };
 }
 
@@ -352,8 +352,89 @@ export function updateArtifact(root: string, id: string, input: UpdateArtifactIn
   } finally { db?.close(); }
   const done = result as Artifact | null;
   if (!done) throw new Error("Artifact not found: " + id);
-  recordActivity(root, profile, "artifact", "Updated artifact '" + done.title + "' (" + done.kind + ", v" + String(done.version) + ") " + id.slice(0, 8));
+  recordActivity(root, profile, "artifact", artifactUpdatedLedgerSummary(done.title, done.kind, done.version, id));
   return done;
+}
+
+// The ONE writers for the artifact lifecycle's success activity
+// lines, so the scorecard's parsers below can never drift from
+// the seams they count. Each shape is byte-identical to what the
+// seams wrote inline before these writers existed. (The failure
+// seam already rides its ONE writer, artifactFailureSummary
+// above.)
+export function artifactCreatedLedgerSummary(title: string, kind: string, id: string): string {
+  return "Created artifact '" + title + "' (" + kind + ", v1) " + id.slice(0, 8);
+}
+
+export function artifactUpdatedLedgerSummary(title: string, kind: string, version: number, id: string): string {
+  return "Updated artifact '" + title + "' (" + kind + ", v" + String(version) + ") " + id.slice(0, 8);
+}
+
+// The artifact lifecycle scorecard (2026-11-19, the
+// measured-proof series): the artifact store's ledger classes
+// (artifact / artifact-failed) have ledgered in fixed shapes
+// since the store landed, but the classes were never folded, so
+// how many deliverables SAM has created, how many were ever
+// revised in place, and whether any artifact operation ever
+// failed were invisible in aggregate (the library surfaces list
+// per profile; they do not trend the lifecycle). Creates and
+// updates are operator acts, so the verdict is attention only
+// when an artifact operation failed or a line is unparseable,
+// else clear - a failed store operation is the news. This text
+// folds the two classes to counts only, on ONE line: created /
+// updated / failed, the distinct-artifact count as a number
+// only, and the total. No stamp, no actor, no title, no kind,
+// no version, no id, no failure reason, and no verbatim summary
+// enters the text - a title is owner content and never surfaces.
+// A pure read: it creates nothing, updates nothing, and reads
+// no artifact content - the artifact seams themselves are
+// untouched.
+export function parseArtifactCreatedSummary(summary: string): { id: string } | null {
+  const m = /^Created artifact '.+' \((?:html|markdown), v1\) ([0-9a-f]{8})$/.exec(summary);
+  if (!m) return null;
+  return { id: m[1] };
+}
+
+export function parseArtifactUpdatedSummary(summary: string): { id: string; version: number } | null {
+  const m = /^Updated artifact '.+' \((?:html|markdown), v(\d+)\) ([0-9a-f]{8})$/.exec(summary);
+  if (!m || Number(m[1]) < 2) return null;
+  return { id: m[2], version: Number(m[1]) };
+}
+
+export function parseArtifactFailedSummary(summary: string): Record<string, never> | null {
+  if (!/^Artifact .+ failed: .+$/.test(summary)) return null;
+  return {};
+}
+
+export function artifactScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "artifact" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "artifact-failed" });
+  let created = 0;
+  let updated = 0;
+  let failed = 0;
+  let unparseable = 0;
+  const distinct = new Set<string>();
+  for (const line of lines) {
+    const createdParsed = parseArtifactCreatedSummary(line.summary);
+    if (createdParsed) { created += 1; distinct.add(createdParsed.id); continue; }
+    const updatedParsed = parseArtifactUpdatedSummary(line.summary);
+    if (updatedParsed) { updated += 1; distinct.add(updatedParsed.id); continue; }
+    unparseable += 1;
+  }
+  for (const line of failedLines) {
+    if (!parseArtifactFailedSummary(line.summary)) { unparseable += 1; continue; }
+    failed += 1;
+  }
+  const total = lines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Artifacts: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(created) + " created");
+  parts.push(String(updated) + " updated");
+  parts.push(String(failed) + " failed");
+  parts.push(String(distinct.size) + " distinct artifacts");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** Summaries for one profile (or every profile when none is named -
