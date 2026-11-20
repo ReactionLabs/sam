@@ -150,6 +150,12 @@ function ledger(root: string, actor: string, kind: string, summary: string): voi
 export function messageFailedSummary(chatId: string, count: number, error: unknown): string {
   return ("A queued turn in chat " + chatId.slice(0, 8) + " failed: " + errorReason(error) + "; its " + count + " message(s) are marked failed in the queue, not lost").slice(0, 200);
 }
+export function messageResentLedgerSummary(chatId: string): string {
+  return "Owner resent a failed message in chat " + chatId.slice(0, 8) + "; the saved message is queued again over its original row - no second copy is saved";
+}
+export function messageStatusLedgerSummary(chatId: string): string {
+  return "Owner status check in chat " + chatId.slice(0, 8) + " answered by the runtime while a turn runs; the turn was not disturbed and the model was not called";
+}
 
 // The message-failure scorecard (2026-11-18, the measured-proof
 // series): the drain catch above ledgers every queued turn that
@@ -210,6 +216,45 @@ export function messageFailureScorecardText(root: string): string {
   out.push("By reason: " + (byBucket.length ? byBucket.map(([bucket, n]) => bucket + " " + String(n)).join(", ") : "none"));
   out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries or resends a message or prints a chat id or reason; a new failed queued turn is the news");
   return out.join("\n");
+}
+
+export function parseMessageSteerSummary(summary: string): { messages: number } | null {
+  const m = /^Owner sent (\d+) message\(s\) mid-turn; folded into the running turn, the latest governs$/.exec(summary);
+  return m ? { messages: Number(m[1]) } : null;
+}
+
+export function parseMessageResentSummary(summary: string): Record<string, never> | null {
+  return /^Owner resent a failed message in chat [0-9a-f]{8}; the saved message is queued again over its original row - no second copy is saved$/.test(summary) ? {} : null;
+}
+
+export function parseMessageStatusSummary(summary: string): Record<string, never> | null {
+  return /^Owner status check in chat [0-9a-f]{8} answered by the runtime while a turn runs; the turn was not disturbed and the model was not called$/.test(summary) ? {} : null;
+}
+
+export function parseTurnFailureNoteSummary(summary: string): Record<string, never> | null {
+  return /^Turn failure noted in chat [0-9a-f]{8}: the owner reads one plain sentence in the chat \(the raw error never reaches the owner\); error: .+$/.test(summary) ? {} : null;
+}
+
+export function messageExtrasScorecardText(root: string): string {
+  let steered = 0, foldedMessages = 0, resent = 0, statusChecks = 0, failureNotes = 0, unparseable = 0;
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-steer" })) {
+    const parsed = parseMessageSteerSummary(line.summary);
+    if (parsed) { steered += 1; foldedMessages += parsed.messages; } else unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-resent" })) {
+    if (parseMessageResentSummary(line.summary)) resent += 1; else unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "message-status" })) {
+    if (parseMessageStatusSummary(line.summary)) statusChecks += 1; else unparseable += 1;
+  }
+  for (const line of readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "turn-failure-note" })) {
+    if (parseTurnFailureNoteSummary(line.summary)) failureNotes += 1; else unparseable += 1;
+  }
+  const total = steered + resent + statusChecks + failureNotes;
+  const verdict = failureNotes > 0 || unparseable > 0 ? "attention" : "clear";
+  let text = "Message extras: " + verdict + ", " + String(steered) + " steered (" + String(foldedMessages) + " messages), " + String(resent) + " resent, " + String(statusChecks) + " status checks, " + String(failureNotes) + " failure notes, " + String(total) + " total";
+  if (unparseable > 0) text += ", " + String(unparseable) + " unparseable";
+  return text;
 }
 
 export function listChatQueue(root: string, chatId: string, limit = 12): QueueItem[] {
@@ -332,7 +377,7 @@ function enqueueChatMessageInner(root: string, input: { chatId: string; content:
       const store = new ChatStore(root);
       try { store.add(input.chatId, "user", input.content, source); store.add(input.chatId, "assistant", reply); }
       finally { store.close(); }
-      ledger(root, actor, "message-status", "Owner status check in chat " + input.chatId.slice(0, 8) + " answered by the runtime while a turn runs; the turn was not disturbed and the model was not called");
+      ledger(root, actor, "message-status", messageStatusLedgerSummary(input.chatId));
       return { id, status: "consumed", effect: "status", reply };
     }
     db.prepare("INSERT INTO queue_items (id, chat_id, content, source, status, created_at, settled_at) VALUES (?, ?, ?, ?, 'queued', ?, NULL)").run(id, input.chatId, input.content, source, now);
@@ -587,7 +632,7 @@ export function resendFailedMessage(root: string, chatId: string, itemId: string
       return { ...found, status: "queued" as QueueItemStatus, settledAt: null, createdAt: now };
     } finally { db.close(); }
   });
-  ledger(root, actorForChat(root, chatId), "message-resent", "Owner resent a failed message in chat " + chatId.slice(0, 8) + "; the saved message is queued again over its original row - no second copy is saved");
+  ledger(root, actorForChat(root, chatId), "message-resent", messageResentLedgerSummary(chatId));
   kickChatDrain(root, chatId);
   return item;
 }

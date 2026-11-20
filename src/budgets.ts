@@ -43,6 +43,12 @@ export type ChatSurface = "owner" | "scoped";
  *  owner said stop: the turn closes after this step. */
 export interface SteerBatch { contents: string[]; cancel: boolean }
 export type SteerProvider = () => SteerBatch | null;
+export function messageSteerLedgerSummary(count: number): string {
+  return "Owner sent " + count + " message(s) mid-turn; folded into the running turn, the latest governs";
+}
+export function messageStopLedgerSummary(calls: number): string {
+  return "Owner said stop mid-turn after " + calls + " calls; the turn closes with an accounting";
+}
 export const OWNER_CHAT_BUDGET: ToolBudget = { rounds: 30, maxCalls: 120 };
 export const OWNER_CHAT_CEILING: ToolBudget = { rounds: 60, maxCalls: 300 };
 export function chatTurnBudget(input: { route: TurnRoute; surface?: ChatSurface; visitor?: boolean }): { budget: ToolBudget; ceiling: ToolBudget | null } {
