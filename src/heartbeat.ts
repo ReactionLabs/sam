@@ -802,6 +802,54 @@ export function heartbeatFailureScorecardText(root:string):string{
  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never retries a job or prints a job name or reason; a new failed job is the news");
  return out.join("\n");
 }
+// The ONE writer for the heartbeat changed-delivery activity
+// line, so the scorecard's parser below can never drift from
+// the seam it counts. Its shape is byte-identical to what the
+// tick wrote inline before this writer existed.
+export function heartbeatChangedLedgerSummary(jobName:string,reply:string):string{
+ return "Heartbeat '"+jobName+"' changed: "+reply.replace(/\s+/g," ").trim().slice(0,180);
+}
+// The heartbeat delivery scorecard (2026-11-19, the
+// measured-proof series): the tick's changed deliveries have
+// ledgered as "heartbeat" lines since P3 landed, but the class
+// was never folded - its failure sibling is measured and its
+// unchanged sibling ledgers in heartbeats.jsonl, yet how many
+// changed updates SAM has ever delivered, and across how many
+// distinct jobs, was invisible in aggregate. A changed
+// delivery is the system's normal news, not an alarm, so the
+// verdict is attention only when a line is unparseable, else
+// clear. This text folds the class to counts only, on ONE
+// line: the changed count, the distinct-job count as a number
+// only, and the total. No stamp, no actor, no job name, no
+// reply preview, and no verbatim summary enters the text - a
+// fold that printed names or previews would change on every
+// delivery even at an identical shape. A pure read: it
+// creates nothing, spends no model call, runs no job, and
+// delivers nothing - the tick seam itself is untouched.
+export function parseHeartbeatChangedSummary(summary:string):{job:string}|null{
+ const m=/^Heartbeat '([^']+)' changed: ([\s\S]*)$/.exec(summary);
+ if(!m)return null;
+ return {job:m[1]??""};
+}
+export function heartbeatDeliveryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"heartbeat"});
+ let changed=0;
+ let unparseable=0;
+ const jobs=new Set<string>();
+ for(const line of lines){
+  const parsed=parseHeartbeatChangedSummary(line.summary);
+  if(!parsed){unparseable+=1;continue;}
+  changed+=1;
+  jobs.add(parsed.job);
+ }
+ const parts:string[]=[];
+ parts.push("Heartbeat deliveries: "+(unparseable>0?"attention":"clear"));
+ parts.push(String(changed)+" changed");
+ parts.push(String(jobs.size)+" distinct jobs");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 // Consolidation sub-step failures ledger in the activity
 // record (gap found 2026-11-13, hourly run 10:04): inside
 // consolidatePreferences, two sub-steps swallowed their throws
@@ -988,7 +1036,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   }
   changed.push(job.name);
   appendLog(root,{type:"job",name:job.name,profile:job.profile,changed:true,replyPreview:reply.slice(0,300)});
-  recordActivity(root,job.profile,"heartbeat","Heartbeat '"+job.name+"' changed: "+reply.replace(/\s+/g," ").trim().slice(0,180));
+  recordActivity(root,job.profile,"heartbeat",heartbeatChangedLedgerSummary(job.name,reply));
   if(job.channelId){
    // Queue FIRST in the durable outbox, then decide, then send:
    // a crash anywhere after this line leaves a pending record the
