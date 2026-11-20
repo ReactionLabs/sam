@@ -4,10 +4,12 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  ORCH_MAX_DEPTH, buildConsolidatedResult, getJob, laneWorkerPrompt, listLanes,
+  ORCH_MAX_DEPTH, buildConsolidatedResult, getJob, laneAttemptBudget, laneWorkerPrompt, listLanes,
   openWorkerLane, orchestrate, planJob, remainingPool, setOrchestrationRunnerForTests,
-  type LaneSpec,
+  workerIncompleteReason, type Lane, type LaneSpec,
 } from "./orchestration.js";
+import { budgetFallbackAnswer } from "./budgets.js";
+import { readActivity } from "./activity.js";
 
 function freshRoot(): string { return mkdtempSync(join(tmpdir(), "orch-")); }
 function lane(partial: Partial<LaneSpec> & { name: string }): LaneSpec {
@@ -207,8 +209,8 @@ test("a failed worker is retired by id so its budget carve returns for the repla
     assert.equal(workers.filter(w => w.status === "cancelled").length, 1);
     assert.equal(workers.filter(w => w.status === "done").length, 1);
     const left = remainingPool(root, "sam");
-    assert.equal(left.rounds, 4); // only the surviving worker's {2,5} stays carved
-    assert.equal(left.maxCalls, 11);
+    assert.equal(left.rounds, 3); // only the surviving worker's carve stays: a replacement attempt prices larger ({3,10}, laneAttemptBudget), the retired attempt-1 carve returned in full
+    assert.equal(left.maxCalls, 6);
   } finally { setSubagentRunnerForTests(null); }
 });
 
@@ -281,5 +283,69 @@ test("invisibility: the consolidated result carries no lane internals, the store
     const rebuilt = buildConsolidatedResult(getJob(root, job.id)!, detail);
     assert.equal(rebuilt, job.consolidated);
     assert.equal(lanes.length, 1);
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
+test("worker incompletion: SAM's own fallback shapes are recognized, real results are not", () => {
+  // The exact strings the live job 16781c45 stored as its lanes' results.
+  assert.match(workerIncompleteReason(budgetFallbackAnswer(["sam_workspace_list", "sam_memory_search"], [], 6, "steps"))!, /ran out of steps/);
+  assert.match(workerIncompleteReason(budgetFallbackAnswer(["sam_reach"], [], 6, "calls"))!, /hit its tool budget/);
+  assert.match(workerIncompleteReason("Sub-agent stopped at its round budget (2) after 4 tool calls.")!, /round budget/);
+  assert.match(workerIncompleteReason("(no result)")!, /no result/);
+  assert.match(workerIncompleteReason("   ")!, /returned nothing/);
+  // A finished, sourced result is a claim to verify, never an incompletion.
+  assert.equal(workerIncompleteReason("The launch code is 47-ALPHA, per brief.md."), null);
+  assert.equal(workerIncompleteReason("I ran out of steps once last week, per notes.md."), null);
+});
+
+test("replacement attempts are carved a larger budget than the first attempt", () => {
+  const root = freshRoot();
+  const { lanes } = planJob(root, { ask: "budget shapes", lanes: [lane({ name: "dig", kind: "research" })] });
+  const planned = lanes[0] as Lane;
+  assert.deepEqual(laneAttemptBudget(planned), { rounds: 2, maxCalls: 5 });
+  assert.deepEqual(laneAttemptBudget({ ...planned, attempts: 2 }), { rounds: 3, maxCalls: 10 });
+});
+
+test("an exhausted worker is replaced, not graded: the replacement's real result lands", async () => {
+  const root = freshRoot();
+  setOrchestrationRunnerForTests(async (_root, l) => {
+    if (l.attempts === 1) return budgetFallbackAnswer(["sam_workspace_list", "sam_memory_search", "sam_workspace_list", "sam_workspace_read"], [], 6, "steps");
+    return "The launch code is 47-ALPHA, per brief.md.";
+  });
+  try {
+    const { job, lanes } = await orchestrate(root, {
+      ask: "read the brief",
+      lanes: [lane({ name: "dig", kind: "research" })],
+    });
+    const dig = lanes.find(l => l.name === "dig")!;
+    assert.equal(dig.status, "done"); assert.equal(dig.attempts, 2); assert.equal(dig.verdict, "verified");
+    assert.equal(job.status, "done");
+    const replaced = readActivity(root).filter(a => a.kind === "orchestration-lane-replaced");
+    assert.equal(replaced.length, 1);
+    assert.match(replaced[0].summary, /did not finish/);
+    assert.match(replaced[0].summary, /ran out of steps/);
+    const doneLines = readActivity(root).filter(a => a.kind === "orchestration-lane-done");
+    assert.equal(doneLines.length, 1);
+  } finally { setOrchestrationRunnerForTests(null); }
+});
+
+test("a worker that never finishes fails the lane by its true name, never as a sourceless result", async () => {
+  const root = freshRoot();
+  setOrchestrationRunnerForTests(async () => budgetFallbackAnswer(["sam_workspace_list"], [], 6, "steps"));
+  try {
+    const { job, lanes } = await orchestrate(root, {
+      ask: "read the brief",
+      lanes: [lane({ name: "dig", kind: "research" })],
+    });
+    const dig = lanes.find(l => l.name === "dig")!;
+    assert.equal(dig.status, "failed"); assert.equal(dig.attempts, 2);
+    assert.match(dig.blocker!, /did not finish/);
+    assert.doesNotMatch(dig.blocker!, /no source/);
+    assert.equal(dig.result, null);
+    assert.equal(job.status, "blocked");
+    assert.match(job.consolidated!, /did not finish/);
+    const failed = readActivity(root).filter(a => a.kind === "orchestration-lane-failed");
+    assert.equal(failed.length, 1);
+    assert.match(failed[0].summary, /did not finish/);
   } finally { setOrchestrationRunnerForTests(null); }
 });

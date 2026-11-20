@@ -112,6 +112,24 @@ export const ORCH_LANE_BUDGETS: Record<LaneKind, { rounds: number; maxCalls: num
   general: { rounds: 2, maxCalls: 4 },
 };
 
+/**
+ * The budget one attempt of a lane is carved. Attempt 1 prices at the
+ * kind's base budget; a replacement attempt (attempt 2) is carved
+ * larger - one more round and twice the calls - because the failure
+ * that earns a replacement is so often exhaustion (the worker spent
+ * its turn orienting and ran out of steps before doing the work), and
+ * retrying exhaustion on the identical budget is a designed repeat of
+ * the same death. The carve is still clamped by the live pool in the
+ * runner, and the plan-time pool check keeps pricing attempt 1 only:
+ * a replacement is paid for by the retired worker's returned carve
+ * plus whatever pool remains, and a pool that cannot fund it fails
+ * the lane honestly at hire time.
+ */
+export function laneAttemptBudget(lane: Lane): { rounds: number; maxCalls: number } {
+  if (lane.attempts <= 1) return { rounds: lane.budget.rounds, maxCalls: lane.budget.maxCalls };
+  return { rounds: lane.budget.rounds + 1, maxCalls: lane.budget.maxCalls * 2 };
+}
+
 const ROLE_FOR_KIND: Record<LaneKind, Subagent["role"]> = {
   research: "research", build: "build", verify: "review", coordinate: "task", general: "task",
 };
@@ -481,6 +499,32 @@ export function confinedArtifact(root: string, artifact: string): string | null 
   }
   return null;
 }
+/**
+ * The incompletion shapes a worker's reply can take when it never
+ * finished the lane's work: SAM's own budget fallbacks (the chat
+ * loops' steps and calls forms, budgets.ts), the sub-agent loop's
+ * round-budget stop (subagents.ts), and the empty-handed "(no
+ * result)". These are SAM's own fixed strings, matched by prefix, so
+ * a worker's genuine prose is never mistaken for one. An
+ * incompletion is NOT a result: grading it as a claim misdiagnoses
+ * the lane (live proof, job 16781c45, 2026-11-14: both research
+ * workers returned the steps fallback verbatim after spending their
+ * turns orienting, and the coordinator failed them for "names no
+ * source" - the lanes did not produce sourceless research, they
+ * produced nothing). The runner routes an incompletion through the
+ * failure path with this reason, so the replacement machinery fires
+ * and the consolidated result names what actually happened.
+ */
+export function workerIncompleteReason(resultText: string): string | null {
+  const text = (resultText ?? "").trim();
+  if (!text) return "the worker returned nothing";
+  if (text === "(no result)") return "the worker returned no result";
+  if (text.startsWith("I ran out of steps for this turn (")) return "the worker ran out of steps before finishing, so its reply is the budget fallback, not a result";
+  if (text.startsWith("I reached the tool budget for this turn (")) return "the worker hit its tool budget before finishing, so its reply is the budget fallback, not a result";
+  if (text.startsWith("Sub-agent stopped at its round budget (")) return "the worker stopped at its round budget before finishing";
+  return null;
+}
+
 /** The coordinator's deterministic checks. A worker's output is a claim until these pass. */
 export function verifyLaneOutput(root: string, lane: Lane, resultText: string): LaneVerdictResult {
   const text = (resultText ?? "").trim();
@@ -544,9 +588,10 @@ export function setOrchestrationRunnerForTests(runner: LaneRunner | null): void 
 
 async function defaultLaneRunner(root: string, job: OrchestrationJob, lane: Lane, depResults: Array<{ name: string; result: string }>): Promise<string> {
   const left = remainingPool(root, job.profile);
+  const attemptBudget = laneAttemptBudget(lane);
   const budget = {
-    rounds: Math.max(1, Math.min(lane.budget.rounds, left.rounds)),
-    maxCalls: Math.max(2, Math.min(lane.budget.maxCalls, left.maxCalls)),
+    rounds: Math.max(1, Math.min(attemptBudget.rounds, left.rounds)),
+    maxCalls: Math.max(2, Math.min(attemptBudget.maxCalls, left.maxCalls)),
   };
   if (left.rounds < 1 || left.maxCalls < 2) throw new Error("The worker pool is exhausted (" + left.rounds + " rounds, " + left.maxCalls + " calls left)");
   // The worker id is recorded BEFORE the run settles: spawnSubagent throws
@@ -596,22 +641,32 @@ async function runLane(root: string, job: OrchestrationJob, lane: Lane, lanes: L
       outcome = testRunner ? await testRunner(root, lane, depResults) : await defaultLaneRunner(root, job, lane, depResults);
     } catch (error) { failure = laneFailureReason(error); }
     if (outcome !== null) {
-      const verdict = verifyLaneOutput(root, lane, outcome);
-      if (verdict.verdict === "verified") {
-        const done = updateLane(root, lane.id, { status: "done", result: outcome, verdict: verdict.verdict, verdictReasons: verdict.reasons, blocker: null });
-        if (done) Object.assign(lane, done);
-        recordActivity(root, job.profile, "orchestration-lane-done", orchestrationLaneDoneLedgerSummary(lane.name, job.id, lane.attempts));
-        return;
-      }
-      failure = "Coordinator verification " + verdict.verdict + ": " + verdict.reasons;
-      updateLane(root, lane.id, { result: outcome, verdict: verdict.verdict, verdictReasons: verdict.reasons });
-      lane.result = outcome; lane.verdict = verdict.verdict; lane.verdictReasons = verdict.reasons;
-      if (verdict.verdict === "unverified") {
-        // Not a worker failure: the claim simply is not verified, so it does
-        // not land and is named in the consolidated result as-is.
-        const done = updateLane(root, lane.id, { status: "done", blocker: "Unverified: " + verdict.reasons });
-        if (done) Object.assign(lane, done);
-        return;
+      const incomplete = workerIncompleteReason(outcome);
+      if (incomplete !== null) {
+        // An incompletion is not a result: nothing was produced, so
+        // there is nothing to verify and nothing to store as the
+        // lane's answer. It takes the failure path below with its
+        // true reason, and the replacement is carved the larger
+        // attempt budget (laneAttemptBudget).
+        failure = "Worker did not finish: " + incomplete + ".";
+      } else {
+        const verdict = verifyLaneOutput(root, lane, outcome);
+        if (verdict.verdict === "verified") {
+          const done = updateLane(root, lane.id, { status: "done", result: outcome, verdict: verdict.verdict, verdictReasons: verdict.reasons, blocker: null });
+          if (done) Object.assign(lane, done);
+          recordActivity(root, job.profile, "orchestration-lane-done", orchestrationLaneDoneLedgerSummary(lane.name, job.id, lane.attempts));
+          return;
+        }
+        failure = "Coordinator verification " + verdict.verdict + ": " + verdict.reasons;
+        updateLane(root, lane.id, { result: outcome, verdict: verdict.verdict, verdictReasons: verdict.reasons });
+        lane.result = outcome; lane.verdict = verdict.verdict; lane.verdictReasons = verdict.reasons;
+        if (verdict.verdict === "unverified") {
+          // Not a worker failure: the claim simply is not verified, so it does
+          // not land and is named in the consolidated result as-is.
+          const done = updateLane(root, lane.id, { status: "done", blocker: "Unverified: " + verdict.reasons });
+          if (done) Object.assign(lane, done);
+          return;
+        }
       }
     }
     // Failure or rejection: retire the worker and replace it once.
