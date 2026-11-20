@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import { MemoryStore, MEMORY_RECORD_MAX_WORDS } from "./memory.js";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { auditStoreTouch } from "./audit-store-failure.js";
 import { CAPABILITY_STATEMENT } from "./identity.js";
 import { PLAIN_STYLE_INSTRUCTION } from "./style.js";
@@ -213,8 +213,79 @@ function saveContextAudit(root: string, audit: ContextAudit): void {
 export function runContextAudit(root: string): ContextAudit {
   const audit = buildContextAudit(root);
   saveContextAudit(root, audit);
-  recordActivity(root, "sam", "context-audit", "Context audit recorded: " + String(audit.overall.passed) + "/" + String(audit.overall.total) + " checks, " + String(audit.findings.length) + " finding(s), " + String(audit.profiles.length) + " profile load(s), heaviest " + String(Math.max(0, ...audit.profiles.map(p => p.chars))) + " chars of " + String(audit.budget));
+  recordActivity(root, "sam", "context-audit", contextAuditLedgerSummary(audit.overall.passed, audit.overall.total, audit.findings.length, audit.profiles.length, Math.max(0, ...audit.profiles.map(p => p.chars)), audit.budget));
   return audit;
+}
+
+// The ONE writer for the context audit's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runContextAudit
+// wrote inline before this writer existed.
+export function contextAuditLedgerSummary(passed: number, total: number, findings: number, profileCount: number, heaviest: number, budget: number): string {
+  return "Context audit recorded: " + String(passed) + "/" + String(total) + " checks, " + String(findings) + " finding(s), " + String(profileCount) + " profile load(s), heaviest " + String(heaviest) + " chars of " + String(budget);
+}
+
+// The context audit history scorecard (2026-11-19, the
+// measured-proof series): the audit's ledger class
+// (context-audit) has ledgered one line per recorded run since
+// the audit landed, but the class was never folded - the
+// audit's own surfaces execute a run (context-audit run) or
+// read the last one (context-audit show, over a singleton
+// store holding ONE row), so how many runs ever recorded,
+// whether any run ever carried a finding, and how the
+// heaviest profile's fixed system load has moved against its
+// budget were invisible as a trend; a load that grew toward
+// the cap and later shrank would leave no daily surface
+// remembering it climbed. Runs are the audit's own acts, so
+// the verdict is attention only when any finding was ever
+// recorded or a line is unparseable, else clear - a finding
+// is the news, and the load trend rides the counts so a climb
+// is visible without alarming on it. This text folds the
+// class to counts only, on ONE line: runs, the summed
+// findings, the latest run's heaviest load and its budget,
+// the peak heaviest load across all runs, and the total. No
+// stamp, no actor, no profile name, no finding text, and no
+// verbatim summary enters the text - a finding names what the
+// assembly risks losing and never surfaces here. A pure read:
+// it creates nothing, runs no audit, and spends no model
+// call - the audit seam itself is untouched.
+export function parseContextAuditSummary(summary: string): { passed: number; total: number; findings: number; profileCount: number; heaviest: number; budget: number } | null {
+  const m = /^Context audit recorded: (\d+)\/(\d+) checks, (\d+) finding\(s\), (\d+) profile load\(s\), heaviest (\d+) chars of (\d+)$/.exec(summary);
+  if (!m) return null;
+  const passed = Number(m[1]);
+  const total = Number(m[2]);
+  if (total < 1 || passed > total) return null;
+  const budget = Number(m[6]);
+  if (budget < 1) return null;
+  return { passed, total, findings: Number(m[3]), profileCount: Number(m[4]), heaviest: Number(m[5]), budget };
+}
+
+export function contextAuditHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "context-audit" });
+  let runs = 0;
+  let findings = 0;
+  let latestHeaviest = 0;
+  let latestBudget = 0;
+  let peakHeaviest = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseContextAuditSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    findings += parsed.findings;
+    latestHeaviest = parsed.heaviest;
+    latestBudget = parsed.budget;
+    if (parsed.heaviest > peakHeaviest) peakHeaviest = parsed.heaviest;
+  }
+  const parts: string[] = [];
+  parts.push("Context audit history: " + (findings > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(findings) + " findings");
+  parts.push("latest heaviest " + String(latestHeaviest) + " of " + String(latestBudget));
+  parts.push("peak heaviest " + String(peakHeaviest));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The audit as plain text (the sam-context-audit script job's
