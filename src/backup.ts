@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
@@ -148,7 +148,7 @@ function createBackupWork(root: string, destDir: string, keep: number): BackupIn
     const all = listBackups(dest);
     for (const old of all.slice(0, Math.max(0, all.length - keep))) rmSync(old.path, { force: true });
     const info: BackupInfo = { archive, path: archivePath, bytes: statSync(archivePath).size, created_at: manifest.created_at };
-    recordActivity(root, "sam", "backup", "State backup " + archive + " (" + files.length + " files, " + databases.length + " databases, " + info.bytes + " bytes)");
+    recordActivity(root, "sam", "backup", backupLedgerSummary(archive, files.length, databases.length, info.bytes));
     return info;
   } finally { rmSync(staging, { recursive: true, force: true }); }
 }
@@ -313,7 +313,90 @@ export function restoreBackup(root: string, archivePath: string, force = false):
     }
     mkdirSync(resolve(root), { recursive: true });
     renameSync(dir, target);
-    recordActivity(root, "owner", "restore", "Restored state from " + basename(archivePath) + (keptAside ? " (previous state kept at " + basename(keptAside) + ")" : ""));
+    recordActivity(root, "owner", "restore", restoreLedgerSummary(basename(archivePath), keptAside ? basename(keptAside) : null));
     return { restored: target, keptAside };
   } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+// The ONE writers for the backup history's success and restore
+// activity lines, so the scorecard's parsers below can never
+// drift from the seams they count. Each shape is byte-identical
+// to what the seams wrote inline before these writers existed.
+// (The failure seam already rides its ONE writer,
+// backupFailureSummary above.)
+export function backupLedgerSummary(archive: string, fileCount: number, databaseCount: number, bytes: number): string {
+  return "State backup " + archive + " (" + String(fileCount) + " files, " + String(databaseCount) + " databases, " + String(bytes) + " bytes)";
+}
+
+export function restoreLedgerSummary(archive: string, keptAside: string | null): string {
+  return "Restored state from " + archive + (keptAside ? " (previous state kept at " + keptAside + ")" : "");
+}
+
+// The backup history scorecard (2026-11-19, the measured-proof
+// series): the nightly backup's ledger classes (backup /
+// backup-failed / restore) have ledgered in fixed shapes since
+// P9 landed, but the classes were never folded, so how many
+// backups have landed, whether any backup ever failed, whether
+// a restore ever ran, and how the archive's shape grows were
+// invisible in aggregate (the backup-drill scorecard proves
+// only the NEWEST archive). Every backup and restore is an
+// operator or scheduled act, so the verdict is attention only
+// when a backup failed or a line is unparseable, else clear -
+// a failed backup is the news. This text folds the three
+// classes to counts only, on ONE line: backups / failed /
+// restores, the latest parsed backup's files / databases /
+// bytes, and the total. No stamp, no actor, no archive name,
+// no failure reason, and no verbatim summary enters the text.
+// A pure read: it creates nothing, verifies nothing, drills
+// nothing, and restores nothing - the backup seams themselves
+// are untouched.
+export function parseBackupSummary(summary: string): { files: number; databases: number; bytes: number } | null {
+  const m = /^State backup sam-state-\d{8}T\d{6}Z\.tar\.gz \((\d+) files, (\d+) databases, (\d+) bytes\)$/.exec(summary);
+  if (!m) return null;
+  return { files: Number(m[1]), databases: Number(m[2]), bytes: Number(m[3]) };
+}
+
+export function parseBackupFailedSummary(summary: string): Record<string, never> | null {
+  if (!/^Backup failed: .+$/.test(summary)) return null;
+  return {};
+}
+
+export function parseRestoreSummary(summary: string): Record<string, never> | null {
+  if (!/^Restored state from sam-state-\d{8}T\d{6}Z\.tar\.gz( \(previous state kept at .+\))?$/.test(summary)) return null;
+  return {};
+}
+
+export function backupHistoryScorecardText(root: string): string {
+  const backupLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "backup" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "backup-failed" });
+  const restoreLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "restore" });
+  let backups = 0;
+  let failed = 0;
+  let restores = 0;
+  let unparseable = 0;
+  let latest: { files: number; databases: number; bytes: number } | null = null;
+  for (const line of backupLines) {
+    const parsed = parseBackupSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    backups += 1;
+    latest = parsed;
+  }
+  for (const line of failedLines) {
+    if (!parseBackupFailedSummary(line.summary)) { unparseable += 1; continue; }
+    failed += 1;
+  }
+  for (const line of restoreLines) {
+    if (!parseRestoreSummary(line.summary)) { unparseable += 1; continue; }
+    restores += 1;
+  }
+  const total = backupLines.length + failedLines.length + restoreLines.length;
+  const parts: string[] = [];
+  parts.push("Backups: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(backups) + " backups");
+  parts.push(String(failed) + " failed");
+  parts.push(String(restores) + " restores");
+  parts.push("latest " + String(latest?.files ?? 0) + " files / " + String(latest?.databases ?? 0) + " databases / " + String(latest?.bytes ?? 0) + " bytes");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
