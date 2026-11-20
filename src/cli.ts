@@ -87,6 +87,7 @@ import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
 import { configActsScorecardText } from "./config-acts.js";
+import { agentRepinConnectorLedgerSummary, agentRepinInstructionsLedgerSummary, agentRepinModelLedgerSummary, agentRepinProviderLedgerSummary, agentRepinScorecardText } from "./agent-repins.js";
 import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authStatus, authStatusText, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, removeProvider } from "./providers.js";
@@ -537,6 +538,7 @@ codexCmd.command("login").description("Start the browser OAuth flow and print th
 codexCmd.command("status").description("Whether a Codex login is pending or a token is stored. Tokens are never printed").action(()=>output(codexAuthState(program.opts().workspace)));
 const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector, or rewrite its instructions, after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
 agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
+agentCmd.command("scorecard").description("Agent re-pin ledger lines as plain text with no clock reading - one line: verdict, the parsed act count, model pins set / cleared, provider pins set / cleared, connector pins set / cleared, and instructions rewrites with summed chars (never a stamp, an actor, a profile name, a model name, a provider id, a connector id, or any instruction text), the trending surface a daily script job P3-diffs, so a day no profile is re-pinned stays silent and a malformed line or a mix shift is the news (this is the sam-agent-repins script job's stdout; a pure read over the same activity ledger the re-pin seams ledger: creates nothing, spends no model call, re-pins nothing; exits 0 always, the verdict lives in the text)").action(()=>output(agentRepinScorecardText(program.opts().workspace)));
 agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
   const root=program.opts().workspace as string;
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its model is the SAM_MODEL environment value");
@@ -544,7 +546,7 @@ agentCmd.command("set-model").argument("<name>").argument("<model>").description
   try{
     const updated=db.setAgentModel(name,model==="none"?null:model);
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
-    recordActivity(root,name,"agent-repin","Model pin "+(updated.model?("set to "+updated.model):"cleared (route tier decides)"));
+    recordActivity(root,name,"agent-repin",agentRepinModelLedgerSummary(updated.model));
     output(updated);
   }finally{db.close();}
 });
@@ -557,7 +559,7 @@ agentCmd.command("set-provider").argument("<name>").argument("<provider>").descr
   try{
     const updated=db.setAgentProvider(name,providerId);
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
-    recordActivity(root,name,"agent-repin","Provider pin "+(updated.provider?("set to "+updated.provider):"cleared (environment provider)"));
+    recordActivity(root,name,"agent-repin",agentRepinProviderLedgerSummary(updated.provider));
     output(updated);
   }finally{db.close();}
 });
@@ -587,7 +589,7 @@ agentCmd.command("set-connector").argument("<name>").argument("<connector>").des
   try{
     const updated=db.setAgentConnector(name,connectorId);
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
-    recordActivity(root,name,"agent-repin","Connector pin "+(updated.connector_id?("set to "+updated.connector_id):"cleared"));
+    recordActivity(root,name,"agent-repin",agentRepinConnectorLedgerSummary(updated.connector_id));
     output(updated);
   }finally{db.close();}
 });
@@ -598,7 +600,7 @@ agentCmd.command("set-instructions").argument("<name>").argument("<text...>").de
   try{
     const updated=db.setAgentInstructions(name,text.join(" "));
     if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
-    recordActivity(root,name,"agent-repin","Instructions rewritten ("+String(updated.instructions.length)+" chars)");
+    recordActivity(root,name,"agent-repin",agentRepinInstructionsLedgerSummary(updated.instructions.length));
     output(updated);
   }finally{db.close();}
 });

@@ -11,6 +11,7 @@ import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { recordActivity } from "./activity.js";
+import { agentRepinModelLedgerSummary } from "./agent-repins.js";
 import { errorReason } from "./telegram.js";
 
 // CLI dressing item 1 (Dip, 2026-11-10; OpenClaw borrow, research doc
@@ -435,7 +436,7 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
       try {
         const updated = db.setAgentModel(name, model === "none" ? null : model);
         if (!updated) { io.print("Unknown profile \"" + name + "\". Known profiles: " + d.profiles.map(p => p.name).join(", ")); return; }
-        recordActivity(root, name, "agent-repin", "Model pin " + (updated.model ? "set to " + updated.model : "cleared (route tier decides)") + " via config wizard");
+        recordActivity(root, name, "agent-repin", agentRepinModelLedgerSummary(updated.model, true));
         io.print("Saved: " + name + " model pin is now " + (updated.model ?? "(route tier decides)") + ".");
       } finally { db.close(); }
     } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); return; }
