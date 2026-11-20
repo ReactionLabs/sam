@@ -230,8 +230,88 @@ export async function runEvalBattery(root: string): Promise<EvalBattery> {
   const previous = readEvalBattery(root);
   const battery = await buildEvalBattery(previous);
   saveEvalBattery(root, battery);
-  recordActivity(root, "sam", "eval-battery", "Eval battery recorded: " + String(battery.overall.passed) + "/" + String(battery.overall.total) + " tasks, verdict " + battery.verdict + (battery.previous ? " (was " + String(battery.previous.passed) + "/" + String(battery.previous.total) + ")" : "") + ", " + String(battery.findings.length) + " finding(s)");
+  recordActivity(root, "sam", "eval-battery", evalBatteryLedgerSummary(battery.overall.passed, battery.overall.total, battery.verdict, battery.previous, battery.findings.length));
   return battery;
+}
+
+// The ONE writer for the eval battery's activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. The shape is byte-identical to what runEvalBattery
+// wrote inline before this writer existed.
+export function evalBatteryLedgerSummary(passed: number, total: number, verdict: EvalBattery["verdict"], previous: { passed: number; total: number } | null, findings: number): string {
+  return "Eval battery recorded: " + String(passed) + "/" + String(total) + " tasks, verdict " + verdict + (previous ? " (was " + String(previous.passed) + "/" + String(previous.total) + ")" : "") + ", " + String(findings) + " finding(s)";
+}
+
+// The eval battery history scorecard (2026-11-19, the
+// measured-proof series): the battery's ledger class
+// (eval-battery) has ledgered one line per recorded run since
+// the battery landed, but the class was never folded - the
+// battery's own surfaces execute a run (eval-battery run) or
+// read the last one (eval-battery show), so how many runs ever
+// recorded, how their verdicts split, and whether the ship
+// gate ever fired were invisible as a trend; a regression that
+// a later run improved past would leave no daily surface
+// remembering it happened. Runs are the battery's own acts, so
+// the verdict is attention only when a run regressed, any
+// finding was ever recorded, or a line is unparseable, else
+// clear - a regression or a finding is the news. This text
+// folds the class to counts only, on ONE line: runs, counts
+// per fixed verdict bucket (first-run / improved / held /
+// regressed), the summed findings, and the total. No stamp, no
+// actor, no task label, no finding text, and no verbatim
+// summary enters the text - a finding names what the harness
+// lacks and never surfaces here. A pure read: it creates
+// nothing, runs no battery task, and spends no model call -
+// the battery seam itself is untouched.
+export function parseEvalBatterySummary(summary: string): { passed: number; total: number; verdict: EvalBattery["verdict"]; previousPassed: number | null; previousTotal: number | null; findings: number } | null {
+  const m = /^Eval battery recorded: (\d+)\/(\d+) tasks, verdict (first-run|improved|held|regressed)(?: \(was (\d+)\/(\d+)\))?, (\d+) finding\(s\)$/.exec(summary);
+  if (!m) return null;
+  const verdict = m[3] as EvalBattery["verdict"];
+  const hasPrevious = m[4] !== undefined;
+  // The writer emits the "(was ...)" clause exactly when a
+  // previous run exists, and a previous run exists exactly when
+  // the verdict is not first-run - a line breaking that pairing
+  // is not a shape the seam writes.
+  if (verdict === "first-run" && hasPrevious) return null;
+  if (verdict !== "first-run" && !hasPrevious) return null;
+  const passed = Number(m[1]);
+  const total = Number(m[2]);
+  if (total < 1 || passed > total) return null;
+  const previousPassed = hasPrevious ? Number(m[4]) : null;
+  const previousTotal = hasPrevious ? Number(m[5]) : null;
+  if (previousTotal !== null && (previousTotal < 1 || (previousPassed ?? 0) > previousTotal)) return null;
+  return { passed, total, verdict, previousPassed, previousTotal, findings: Number(m[6]) };
+}
+
+export function evalBatteryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "eval-battery" });
+  let firstRun = 0;
+  let improved = 0;
+  let held = 0;
+  let regressed = 0;
+  let findings = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseEvalBatterySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.verdict === "first-run") firstRun += 1;
+    else if (parsed.verdict === "improved") improved += 1;
+    else if (parsed.verdict === "held") held += 1;
+    else regressed += 1;
+    findings += parsed.findings;
+  }
+  const runs = firstRun + improved + held + regressed;
+  const parts: string[] = [];
+  parts.push("Eval battery history: " + (regressed > 0 || findings > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push("first-run " + String(firstRun));
+  parts.push("improved " + String(improved));
+  parts.push("held " + String(held));
+  parts.push("regressed " + String(regressed));
+  parts.push(String(findings) + " findings");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The battery as plain text (the sam-eval-battery script job's
