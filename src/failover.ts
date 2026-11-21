@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
 import { errorReason } from "./error-reason.js";
@@ -107,6 +107,106 @@ function tagFailoverLedgered(error: unknown): void {
 export function isFailoverLedgered(error: unknown): boolean {
   return error !== null && (typeof error === "object" || typeof error === "function")
     && (error as { failoverLedgered?: boolean }).failoverLedgered === true;
+}
+
+// The ONE writer for the failover-route activity line, so
+// the history scorecard's parser below can never drift from
+// the seam it counts. Its shape is byte-identical to what
+// the CLI's add-fallback seam wrote inline before this
+// writer existed.
+export function failoverRouteLedgerSummary(provider: string, model: string): string {
+  return "Fallback route added: " + provider + "/" + model;
+}
+
+// The failover history scorecard (2026-11-21, the
+// measured-proof series): the failover family ledgers
+// three classes - "failover" (a turn's hop to the next
+// route, through failoverSummary in agent-turn.ts; for a
+// rescued turn the hop line is the ONLY record the primary
+// route died), "failover-route" (a fallback route added,
+// through the writer above), and "failover-failed" (a dead
+// fallbacks store touch, through failoverFailureSummary,
+// phases read / write) - but none of the three was ever
+// folded, so how many turns were ever rescued by a hop,
+// how many routes were ever configured, and how many store
+// touches ever died fail-closed was invisible in
+// aggregate; the fallbacks store holds only CURRENT routes
+// per profile, so a removed route and every past hop leave
+// no surface but these ledger lines. A hop is failover
+// working as designed, not an alarm, so the verdict is
+// attention only when a store failure was ever recorded or
+// a line is unparseable, else clear (the heartbeat-
+// deliveries precedent). This text folds the family to
+// counts only, on ONE line: the hop count, the routes-added
+// count, the failed count with its read / write split, the
+// distinct-chat count as a number only, and the total. No
+// stamp, no actor, no chat id, no provider or model name,
+// no reason, and no verbatim summary enters the text - the
+// summaries carry provider and model names and verbatim
+// error reasons, and the fold consumes and never prints
+// them. The parsers validate each line against the fixed
+// shapes the writers themselves produce, so a drifted line
+// counts as unparseable rather than surfacing as free
+// text. A pure read: it creates nothing, opens no store,
+// and routes nothing - the seams themselves are untouched
+// beyond the CLI seam riding the writer above.
+export function parseFailoverSummary(summary: string): { chat: string; from: string; to: string } | null {
+  const m = /^Failover in chat (\S{8}): (\S+) -> (\S+) \(([\s\S]+)\)$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[1] ?? "", from: m[2] ?? "", to: m[3] ?? "" };
+}
+
+export function parseFailoverRouteSummary(summary: string): { provider: string; model: string } | null {
+  const m = /^Fallback route added: ([^/\s]+)\/(\S+)$/.exec(summary);
+  if (!m) return null;
+  return { provider: m[1] ?? "", model: m[2] ?? "" };
+}
+
+export function parseFailoverFailureSummary(summary: string): { phase: FailoverPhase } | null {
+  const m = /^Failover (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  return { phase: (m[1] ?? "read") as FailoverPhase };
+}
+
+export function failoverHistoryScorecardText(root: string): string {
+  const hopLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "failover" });
+  const routeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "failover-route" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "failover-failed" });
+  let hops = 0;
+  let routesAdded = 0;
+  let failed = 0;
+  let failedRead = 0;
+  let failedWrite = 0;
+  let unparseable = 0;
+  const chats = new Set<string>();
+  for (const line of hopLines) {
+    const parsed = parseFailoverSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    hops += 1;
+    chats.add(parsed.chat);
+  }
+  for (const line of routeLines) {
+    const parsed = parseFailoverRouteSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    routesAdded += 1;
+  }
+  for (const line of failedLines) {
+    const parsed = parseFailoverFailureSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    if (parsed.phase === "read") failedRead += 1; else failedWrite += 1;
+  }
+  const total = hopLines.length + routeLines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Failover history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(hops) + " hops");
+  parts.push(String(routesAdded) + " routes added");
+  parts.push(String(failed) + " failed");
+  parts.push("read " + String(failedRead) + " / write " + String(failedWrite));
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 const FAILOVER_VALIDATION = [/^Invalid profile$/, /^Invalid provider id$/, /^Invalid model$/, /^Unknown provider "/, /^Fallback limit reached \(/];
