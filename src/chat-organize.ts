@@ -1,7 +1,7 @@
 import { ChatStore, type ChatRecord } from "./chats.js";
 import { archiveManagedChat, isManagedChat } from "./chat-manage.js";
 import { autotitleChat, provisionalTitle, type TitleCompleter } from "./chat-title.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 /**
  * The chat organize pass (Dip ask 2026-11-14: "clean up the chats and
@@ -133,8 +133,64 @@ export async function organizeChats(
   }
 
   const summary = organizeSummary(scanned, renamed, archived);
-  recordActivity(root, actor, "chat-organize",
-    "Organized chats: scanned " + scanned + ", renamed " + renamed.length + ", archived " + archived.length +
-    " (stale threshold " + ORGANIZE_STALE_DAYS + " days; nothing deleted, nothing pinned)");
+  recordActivity(root, actor, "chat-organize", chatOrganizeLedgerSummary(scanned, renamed.length, archived.length));
   return { scanned, renamed, archived, kept: scanned - archived.length, summary };
+}
+
+// The chat-organize ledger shape has ONE writer here (the
+// measured-proof series, 2026-11-21): the line lived as inline
+// concatenation at the organizeChats seam, and any drift was
+// invisible. The shape is byte-identical to what that seam
+// wrote inline before this writer existed.
+export function chatOrganizeLedgerSummary(scanned: number, renamed: number, archived: number): string {
+  return "Organized chats: scanned " + scanned + ", renamed " + renamed + ", archived " + archived +
+    " (stale threshold " + ORGANIZE_STALE_DAYS + " days; nothing deleted, nothing pinned)";
+}
+
+// Organize history fold (2026-11-21): an organize pass is an
+// act, not a store - nothing persists its outcome except this
+// ledger line (the chats it archived read back as ordinary
+// archived chats, indistinguishable from single-chat
+// archives), so the ledger is the only place the history of
+// passes survives. This family has no failure class of its
+// own (a failed pass surfaces through the chat tool's error
+// path, not a ledger kind), so the verdict is attention only
+// when a line is unparseable. The parser validates the stale
+// threshold against the module's own ORGANIZE_STALE_DAYS, so
+// a threshold change in code reads older lines as drift,
+// never silently as the new shape.
+export function parseChatOrganizeSummary(summary: string): { scanned: number; renamed: number; archived: number } | null {
+  const m = /^Organized chats: scanned (\d+), renamed (\d+), archived (\d+) \(stale threshold (\d+) days; nothing deleted, nothing pinned\)$/.exec(summary);
+  if (!m) return null;
+  if (Number(m[4]) !== ORGANIZE_STALE_DAYS) return null;
+  return { scanned: Number(m[1]), renamed: Number(m[2]), archived: Number(m[3]) };
+}
+
+export function chatOrganizeHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "chat-organize" });
+  let passes = 0;
+  let unparseable = 0;
+  let scanned = 0;
+  let renamed = 0;
+  let archived = 0;
+  const actorSet = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseChatOrganizeSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    passes += 1;
+    scanned += parsed.scanned;
+    renamed += parsed.renamed;
+    archived += parsed.archived;
+    actorSet.add(line.actor);
+  }
+  const parts: string[] = [];
+  parts.push("Chat organize history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(passes) + " passes");
+  parts.push(String(scanned) + " scanned");
+  parts.push(String(renamed) + " renamed");
+  parts.push(String(archived) + " archived");
+  parts.push(String(actorSet.size) + " distinct actors");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
