@@ -14,7 +14,7 @@ import { readActivity, recordActivity } from "./activity.js";
 import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
-import { approvalAutoVia, classifyProposal, loadApprovalPolicy, scanNeverList, type ProposalRisk } from "./approval-policy.js";
+import { approvalAutoVia, classifyProposal, loadApprovalPolicy, neverListSummary, scanNeverList, type ProposalRisk } from "./approval-policy.js";
 import { pushBranch, validateGitPushDetail } from "./git-work.js";
 import { queueEngineTask, validateEngineDetail } from "./engine.js";
 import { spawnMini, validateSpawnDetail } from "./minis.js";
@@ -413,6 +413,92 @@ export function decisionScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writers for the never-list activity lines, so the
+// scorecard's parser below can never drift from the seams it
+// counts. Their shapes are byte-identical to what the two
+// seams wrote inline before these writers existed: a proposal
+// refusal is "Refused a <kind> proposal (<hit>): <title>" and
+// a decision-time block is "Blocked execution of <kind> <id>
+// (<hit>): <title>", the title sliced to 120 chars at both.
+export function neverListRefusedLedgerSummary(kind: string, hitId: string, title: string): string {
+  return "Refused a " + kind + " proposal (" + hitId + "): " + title.slice(0, 120);
+}
+export function neverListBlockedLedgerSummary(kind: string, id: string, hitId: string, title: string): string {
+  return "Blocked execution of " + kind + " " + id + " (" + hitId + "): " + title.slice(0, 120);
+}
+// The never-list history scorecard (2026-11-21, the
+// measured-proof series): the hardline never-list ledgers one
+// "never-list" line per hit - at proposal time, when a
+// command-form payload is refused outright and never becomes
+// a card, and at decision time, when a legacy or tampered
+// record is blocked from executing - but the class was never
+// folded, so how many hardline payloads were ever refused or
+// blocked, and which of the five hardline classes they hit,
+// was invisible in aggregate. The proposal-time half has no
+// other witness at all: a refused proposal is never stored,
+// so this ledger line is the only record the refusal ever
+// happened; a decision-time block lands on its record as an
+// ordinary failure, indistinguishable in the gate folds. A
+// recorded hit is itself the signal, so the verdict is
+// attention when any hit was ever recorded or any line is
+// unparseable, else clear (the delivery-failure precedent).
+// The parser validates the fixed shapes exactly: the hit id
+// against the approval-policy module's own five-class
+// neverListSummary vocabulary (a hit id outside it is drift,
+// never a new class), the kind against the fixed
+// ACTION_KINDS enum with an unknown kind folding to "other",
+// never printed as free text (the proposal precedent), and
+// the blocked shape's proposal id as a non-space token,
+// consumed and never printed. This text folds the class to
+// counts only, on ONE line: the refused and blocked counts,
+// the counts per fixed hit class, the counts per kind, and
+// the total. No stamp, no actor, no proposal id, no title,
+// and no verbatim summary enters the text - the summary
+// carries the proposal's title, which a fold must never
+// print. A pure read: it creates nothing, spends no model
+// call, and proposes, decides, and executes nothing - the
+// never-list seams themselves are untouched.
+export function parseNeverListSummary(summary: string): { stage: "refused" | "blocked"; kind: string; hit: string } | null {
+  const hits = new Set(neverListSummary().map(h => h.id));
+  const refused = /^Refused a ([a-z][a-z0-9-]*) proposal \(([a-z0-9-]+)\): (.+)$/.exec(summary);
+  if (refused) {
+    if (!hits.has(refused[2] as string)) return null;
+    return { stage: "refused", kind: (KINDS as string[]).includes(refused[1] as string) ? (refused[1] as string) : "other", hit: refused[2] as string };
+  }
+  const blocked = /^Blocked execution of ([a-z][a-z0-9-]*) (\S+) \(([a-z0-9-]+)\): (.+)$/.exec(summary);
+  if (blocked) {
+    if (!hits.has(blocked[3] as string)) return null;
+    return { stage: "blocked", kind: (KINDS as string[]).includes(blocked[1] as string) ? (blocked[1] as string) : "other", hit: blocked[3] as string };
+  }
+  return null;
+}
+export function neverListHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "never-list" });
+  let refused = 0;
+  let blocked = 0;
+  let unparseable = 0;
+  const byHit = new Map<string, number>();
+  const byKind = new Map<string, number>();
+  for (const line of lines) {
+    const parsed = parseNeverListSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.stage === "refused") refused += 1; else blocked += 1;
+    byHit.set(parsed.hit, (byHit.get(parsed.hit) ?? 0) + 1);
+    byKind.set(parsed.kind, (byKind.get(parsed.kind) ?? 0) + 1);
+  }
+  const hitOrder = neverListSummary().map(h => h.id);
+  const hits = hitOrder.filter(h => (byHit.get(h) ?? 0) > 0).map(h => h + " " + String(byHit.get(h)));
+  const kinds = [...KINDS, "other"].filter(k => (byKind.get(k) ?? 0) > 0).map(k => k + " " + String(byKind.get(k)));
+  const parts: string[] = [];
+  parts.push("Never-list history: " + (refused + blocked > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(refused) + " refused");
+  parts.push(String(blocked) + " blocked");
+  parts.push("hits " + (hits.length ? hits.join(" / ") : "none"));
+  parts.push("kinds " + (kinds.length ? kinds.join(" / ") : "none"));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
@@ -569,7 +655,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // itself is not stored.
   const neverHit = scanNeverList(title + "\n" + detail);
   if (neverHit) {
-    recordActivity(root, input.actor, "never-list", "Refused a " + input.kind + " proposal (" + neverHit.id + "): " + title.slice(0, 120));
+    recordActivity(root, input.actor, "never-list", neverListRefusedLedgerSummary(input.kind, neverHit.id, title));
     throw new Error("Refused by the never-list: this proposal contains " + neverHit.label + ". That can never be proposed or executed in any approval mode; reword it as prose if you only meant to discuss it.");
   }
   const item: ActionProposal = {
@@ -767,7 +853,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
     a.status = "failed";
     a.result = "Refused by the never-list at decision time (" + neverHit.id + "): " + neverHit.label + " can never execute in any approval mode";
     updateAction(root, a);
-    recordActivity(root, decider, "never-list", "Blocked execution of " + a.kind + " " + a.id + " (" + neverHit.id + "): " + a.title.slice(0, 120));
+    recordActivity(root, decider, "never-list", neverListBlockedLedgerSummary(a.kind, a.id, neverHit.id, a.title));
     return a;
   }
   try { a.result = await execute(root, a); a.status = "done"; }
