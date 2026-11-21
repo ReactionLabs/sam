@@ -850,6 +850,69 @@ export function heartbeatDeliveryScorecardText(root:string):string{
  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
  return parts.join(", ");
 }
+// The delivery-failure history scorecard (2026-11-21, the
+// measured-proof series): failed channel deliveries have
+// ledgered as "delivery-failed" lines since 2026-11-13 from
+// TWO writers shaped alike - this module's
+// deliveryFailureSummary (both heartbeat send paths) and
+// loop-revisit's loopDeliveryFailureSummary (the second-
+// answer channel leg) - and self-work's defect queue counts
+// the class, but no scorecard ever folded it: the outbox
+// scorecard folds the outbox STORE, not these ledger lines,
+// so how many deliveries ever failed, from which sender,
+// how many attempts they burned, and how many settled as
+// gave-up was invisible in aggregate. Every line in this
+// family IS a failure, so the verdict is attention when any
+// line exists or any line is unparseable, else clear (the
+// heartbeat-failures precedent). This text folds the class
+// to counts only, on ONE line: the failed count per fixed
+// source (heartbeat / second answer), the settled count,
+// the summed attempts, the distinct-job count as a number
+// only, and the total. The reason each writer carries is
+// consumed by the parse and never printed, and no stamp, no
+// actor, no job name, and no verbatim summary enters the
+// text. A pure read: it creates nothing, spends no model
+// call, sends nothing, and retries nothing - the ledger and
+// both delivery seams are untouched.
+export function parseDeliveryFailureSummary(summary:string):{source:"heartbeat"|"second-answer";job:string|null;attempts:number;settled:boolean}|null{
+ const settledTail=" - gave up after 5 attempts; the update will not be retried";
+ const settled=summary.endsWith(settledTail);
+ const body=settled?summary.slice(0,summary.length-settledTail.length):summary;
+ const hb=/^Delivery for heartbeat '([^']+)' failed \(attempt (\d+) of 5\): ([\s\S]+)$/.exec(body);
+ if(hb){const attempts=Number(hb[2]);if(attempts<1)return null;return {source:"heartbeat",job:hb[1]??"",attempts,settled};}
+ const loop=/^Delivery for second answer failed \(attempt (\d+) of 5\): ([\s\S]+)$/.exec(body);
+ if(loop){const attempts=Number(loop[1]);if(attempts<1)return null;return {source:"second-answer",job:null,attempts,settled};}
+ return null;
+}
+export function deliveryFailureHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"delivery-failed"});
+ let failed=0;
+ let unparseable=0;
+ let heartbeatCount=0;
+ let secondAnswerCount=0;
+ let settledCount=0;
+ let attemptsTotal=0;
+ const jobs=new Set<string>();
+ for(const line of lines){
+  const parsed=parseDeliveryFailureSummary(line.summary);
+  if(!parsed){unparseable+=1;continue;}
+  failed+=1;
+  if(parsed.source==="heartbeat"){heartbeatCount+=1;if(parsed.job)jobs.add(parsed.job);}
+  else secondAnswerCount+=1;
+  if(parsed.settled)settledCount+=1;
+  attemptsTotal+=parsed.attempts;
+ }
+ const parts:string[]=[];
+ parts.push("Delivery failure history: "+(failed>0||unparseable>0?"attention":"clear"));
+ parts.push(String(failed)+" failed");
+ parts.push("heartbeat "+String(heartbeatCount)+" / second answer "+String(secondAnswerCount));
+ parts.push(String(settledCount)+" settled");
+ parts.push(String(attemptsTotal)+" attempts");
+ parts.push(String(jobs.size)+" distinct jobs");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 // Consolidation sub-step failures ledger in the activity
 // record (gap found 2026-11-13, hourly run 10:04): inside
 // consolidatePreferences, two sub-steps swallowed their throws
