@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { runChatTurn } from "./agent-turn.js";
 import type { TurnRoute } from "./budgets.js";
 import { errorReason } from "./error-reason.js";
@@ -256,11 +256,21 @@ export function bindEvent(root: string, input: EventBinding): EventBinding {
 export function unbindEvent(root: string, name: string): boolean {
   if (!storeExists(root)) return false;
   const db = openEventsGuarded(root, "write");
+  let removed = false;
+  let profile: string | null = null;
   try {
+    const existing = findBindingRow(db, name);
     const result = db.prepare("DELETE FROM event_bindings WHERE name = ?").run(name);
-    return result.changes > 0;
+    removed = result.changes > 0;
+    if (removed) profile = existing?.profile ?? null;
   } catch (error) { failEvent(root, "write", error); }
   finally { db.close(); }
+  // The door's close is a lifecycle act and ledgers like its
+  // open (event history fold, 2026-11-21): before this, a
+  // binding that was set, fired, and unbound left a history
+  // that could never show the door was ever closed.
+  if (removed) recordActivity(root, profile ?? "sam", "event-unbind", eventUnbindLedgerSummary(name));
+  return removed;
 }
 
 // The store's update door (the providers precedent): patch one
@@ -371,7 +381,7 @@ export async function acceptEvent(root: string, input: { name: string; rawBody: 
   const run = input.runTurn ?? ((id, content, route) => runChatTurn(root, id, content, { route }));
   const reply = await run(chatId, prompt, "heartbeat");
   if (event.id) rememberId(root, binding.name + ":" + event.id);
-  recordActivity(root, binding.profile, "event", "Event " + event.type + (event.id ? " " + event.id : "") + " woke profile " + binding.profile);
+  recordActivity(root, binding.profile, "event", eventWokeLedgerSummary(event.type, event.id, binding.profile));
   return { status: 200, reply, chatId, profile: binding.profile };
 }
 
@@ -393,6 +403,154 @@ export async function serveEvents(root: string, port: number, env: NodeJS.Proces
   });
   await new Promise<void>((done, fail) => { server.once("error", fail); server.listen(port, "127.0.0.1", () => { server.off("error", fail); done(); }); });
   return server;
+}
+
+// The ONE writers for the event door lifecycle's activity
+// lines, so the history scorecard's parsers below can never
+// drift from the seams they count. The bind and woke shapes
+// are byte-identical to what the CLI bind command and
+// acceptEvent wrote inline before these writers existed.
+// (The event-failed line already rides its ONE writer,
+// eventFailureSummary above.) The unbind shape is NEW: before
+// this fold, unbindEvent removed a binding silently, so a
+// door that was bound, fired, and closed left a history that
+// could never show it was closed.
+export function eventBindLedgerSummary(name: string, profile: string, secretEnv: string): string {
+  return "Event " + name + " bound to " + profile + " (secret env " + secretEnv + ")";
+}
+export function eventWokeLedgerSummary(type: string, id: string | null, profile: string): string {
+  return "Event " + type + (id ? " " + id : "") + " woke profile " + profile;
+}
+export function eventUnbindLedgerSummary(name: string): string {
+  return "Event " + name + " unbound";
+}
+
+// The event door history scorecard (2026-11-21, the
+// measured-proof series): every event door lifecycle act
+// ledgers as an event-bind / event / event-failed line since
+// the signed webhook door landed, and unbind joins them with
+// this fold - the bind and woke lines as inline concatenation
+// with no ONE writer until now, and with no fold, so how many
+// doors were ever bound or closed, how many signed events
+// ever woke a profile, across how many profiles, and whether
+// an event-store touch ever failed, was invisible in
+// aggregate (eventBindings reads only the current store - a
+// binding that was set, fired, and unbound leaves no surface
+// remembering it happened). A store failure is the signal of
+// the family - the door fails closed dressed as a generic 502
+// on the webhook leg, indistinguishable from a model failure
+// without the ledger - so the verdict is attention only when
+// any event-failed was ever recorded or a line is
+// unparseable, else clear. This text folds the four classes
+// to counts only, on ONE line: the bound, woke, with-id,
+// unbound, and failed counts with the failed read / write
+// split, the distinct-binding-name, distinct-event-type, and
+// distinct-profile counts as numbers only, and the total. No
+// stamp, no actor, no binding name, no event type, no event
+// id, no profile name, no secret env name, no reason, and no
+// verbatim summary enters the text - the summaries carry
+// binding names, event ids, secret env NAMES, and failure
+// reasons, which the fold consumes and never prints. The
+// parsers validate each line's fixed shape: the binding
+// name, event type, and profile against the door's own
+// NAME_RE, and the secret env name against ENV_RE, so a line
+// whose shape drifted counts as unparseable rather than
+// surfacing as free text. A woke line's id is free-form
+// (the sender's id, trimmed and capped at the door), so the
+// parser counts its presence and never its value. A pure
+// read: it creates nothing, binds nothing, unbinds nothing,
+// and accepts nothing - the event seams themselves are
+// untouched beyond riding their ONE writers, plus the new
+// unbind line.
+export function parseEventBindSummary(summary: string): { name: string; profile: string; secretEnv: string } | null {
+  const m = /^Event (\S+) bound to (\S+) \(secret env (\S+)\)$/.exec(summary);
+  if (!m) return null;
+  if (!NAME_RE.test(m[1]) || !NAME_RE.test(m[2]) || !ENV_RE.test(m[3])) return null;
+  return { name: m[1], profile: m[2], secretEnv: m[3] };
+}
+export function parseEventWokeSummary(summary: string): { type: string; id: string | null; profile: string } | null {
+  const m = /^Event (.+) woke profile (\S+)$/.exec(summary);
+  if (!m) return null;
+  if (!NAME_RE.test(m[2])) return null;
+  const head = m[1];
+  const split = head.indexOf(" ");
+  const type = split < 0 ? head : head.slice(0, split);
+  const id = split < 0 ? null : head.slice(split + 1).trim();
+  if (!NAME_RE.test(type)) return null;
+  if (split >= 0 && !id) return null;
+  return { type, id, profile: m[2] };
+}
+export function parseEventUnbindSummary(summary: string): { name: string } | null {
+  const m = /^Event (\S+) unbound$/.exec(summary);
+  if (!m) return null;
+  if (!NAME_RE.test(m[1])) return null;
+  return { name: m[1] };
+}
+export function parseEventFailedSummary(summary: string): { phase: EventPhase } | null {
+  const m = /^Event (read|write) failed: (.+)$/.exec(summary);
+  if (!m) return null;
+  if (!m[2].trim()) return null;
+  return { phase: m[1] as EventPhase };
+}
+export function eventHistoryScorecardText(root: string): string {
+  const bindLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "event-bind" });
+  const wokeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "event" });
+  const unbindLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "event-unbind" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "event-failed" });
+  let bound = 0;
+  let woke = 0;
+  let withId = 0;
+  let unbound = 0;
+  let failed = 0;
+  let reads = 0;
+  let writes = 0;
+  let unparseable = 0;
+  const nameSet = new Set<string>();
+  const typeSet = new Set<string>();
+  const profileSet = new Set<string>();
+  for (const line of bindLines) {
+    const parsed = parseEventBindSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    bound += 1;
+    nameSet.add(parsed.name);
+    profileSet.add(parsed.profile);
+  }
+  for (const line of wokeLines) {
+    const parsed = parseEventWokeSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    woke += 1;
+    if (parsed.id) withId += 1;
+    typeSet.add(parsed.type);
+    profileSet.add(parsed.profile);
+  }
+  for (const line of unbindLines) {
+    const parsed = parseEventUnbindSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    unbound += 1;
+    nameSet.add(parsed.name);
+  }
+  for (const line of failedLines) {
+    const parsed = parseEventFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    if (parsed.phase === "read") reads += 1; else writes += 1;
+  }
+  const total = bindLines.length + wokeLines.length + unbindLines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Event history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(bound) + " bound");
+  parts.push(String(woke) + " woke");
+  parts.push(String(withId) + " with id");
+  parts.push(String(unbound) + " unbound");
+  parts.push(String(failed) + " failed");
+  parts.push(String(reads) + " read");
+  parts.push(String(writes) + " write");
+  parts.push(String(nameSet.size) + " distinct names");
+  parts.push(String(typeSet.size) + " distinct types");
+  parts.push(String(profileSet.size) + " distinct profiles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function newEventId(): string { return randomUUID(); }
