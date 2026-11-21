@@ -6,7 +6,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
 import { commitTaskPaths, gitRepoRoot, headFileContent, prepareTaskBranch, worktreeChanges, type CodingGitState } from "./git-work.js";
 import { verificationStatus } from "./verification.js";
@@ -451,8 +451,167 @@ export function queueEngineTask(root: string, input: { actor: string; chatId: st
     changes: [], unreviewable: [], verification: null, review: null, git: null,
   };
   insertEngineTask(root, item);
-  recordActivity(root, input.actor, "engine-queued", "Queued engine run (" + engineRunProviderLabel(provider) + "): " + item.title);
+  recordActivity(root, input.actor, "engine-queued", engineQueuedLedgerSummary(engineRunProviderLabel(provider), item.title));
   return item;
+}
+
+// The ONE writers for the engine run lifecycle's activity
+// lines, so the history scorecard's parsers below can never
+// drift from the seams they count. The shapes are
+// byte-identical to what queueEngineTask and
+// drainEngineTasks wrote inline before these writers
+// existed; the blocked and failed writers own the 120-char
+// reason cap the close seam applied inline.
+export function engineQueuedLedgerSummary(providerLabel: string, title: string): string {
+  return "Queued engine run (" + providerLabel + "): " + title;
+}
+export function engineStartedLedgerSummary(title: string): string {
+  return "Engine run started: " + title;
+}
+export function engineDoneLedgerSummary(title: string, files: number): string {
+  return "Engine run done and verified: " + title + " (" + files + " file(s))";
+}
+export function engineBlockedLedgerSummary(title: string, reason: string): string {
+  return "Engine run blocked: " + title + " - " + reason.slice(0, 120);
+}
+export function engineFailedLedgerSummary(title: string, reason: string): string {
+  return "Engine run failed: " + title + " - " + reason.slice(0, 120);
+}
+export function engineDiedLedgerSummary(title: string): string {
+  return "Engine run died mid-run: " + title;
+}
+export function engineReviewLedgerSummary(verdict: string, title: string): string {
+  return "Self-review " + verdict + " for engine run: " + title;
+}
+
+// The engine history scorecard (2026-11-21, the
+// measured-proof series): every managed engine run has
+// ledgered as an engine-queued / engine-started /
+// engine-done / engine-blocked / engine-failed /
+// engine-review line since the C6 runtime landed - until
+// now as inline concatenation at the seams, with no ONE
+// writer and no fold, so how many runs were ever queued,
+// started, verified done, blocked, failed, or reviewed was
+// invisible in aggregate (engineStatus reads only the
+// current store - a done, blocked, or failed row is
+// overwritten in place as the next run closes, and a
+// recovered stale task's died-mid-run failure leaves no
+// current-state trace). A blocked or failed run is the
+// signal of the six - a run that did not land verified,
+// reviewed, and committed - so the verdict is attention
+// only when any blocked or failed was ever recorded or a
+// line is unparseable, else clear. This text folds the six
+// classes to counts only, on ONE line: queued, started,
+// done, blocked, failed, and review counts, the
+// distinct-title count as a number only, and the total. No
+// stamp, no actor, no title, no provider label, no reason,
+// no review verdict, and no verbatim summary enters the
+// text - the summaries carry task titles, provider labels,
+// and closing reasons, which are the owner's words, and
+// the fold consumes and never prints them. A pure read: it
+// creates nothing, queues nothing, and drains nothing -
+// the engine seams themselves are untouched beyond riding
+// their ONE writers.
+export function parseEngineQueuedSummary(summary: string): { provider: string; title: string } | null {
+  const m = /^Queued engine run \((.+)\): (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { provider: m[1], title: m[2] };
+}
+export function parseEngineStartedSummary(summary: string): { title: string } | null {
+  const m = /^Engine run started: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1] };
+}
+export function parseEngineDoneSummary(summary: string): { title: string; files: number } | null {
+  const m = /^Engine run done and verified: (.+) \((\d+) file\(s\)\)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1], files: Number(m[2]) };
+}
+export function parseEngineBlockedSummary(summary: string): { title: string } | null {
+  const m = /^Engine run blocked: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { title: m[1] };
+}
+export function parseEngineFailedSummary(summary: string): { title: string } | null {
+  const died = /^Engine run died mid-run: (.+)$/.exec(summary);
+  if (died) {
+    if (!died[1].trim()) return null;
+    return { title: died[1] };
+  }
+  const m = /^Engine run failed: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { title: m[1] };
+}
+export function parseEngineReviewSummary(summary: string): { verdict: string; title: string } | null {
+  const m = /^Self-review (.+) for engine run: (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { verdict: m[1], title: m[2] };
+}
+
+export function engineHistoryScorecardText(root: string): string {
+  const queuedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-queued" });
+  const startedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-started" });
+  const doneLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-done" });
+  const blockedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-blocked" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-failed" });
+  const reviewLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "engine-review" });
+  let queued = 0;
+  let started = 0;
+  let done = 0;
+  let blocked = 0;
+  let failed = 0;
+  let reviews = 0;
+  let unparseable = 0;
+  const titles = new Set<string>();
+  for (const line of queuedLines) {
+    const parsed = parseEngineQueuedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    queued += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of startedLines) {
+    const parsed = parseEngineStartedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    started += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of doneLines) {
+    const parsed = parseEngineDoneSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    done += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of blockedLines) {
+    const parsed = parseEngineBlockedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    blocked += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of failedLines) {
+    const parsed = parseEngineFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of reviewLines) {
+    const parsed = parseEngineReviewSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    reviews += 1;
+    titles.add(parsed.title);
+  }
+  const total = queuedLines.length + startedLines.length + doneLines.length + blockedLines.length + failedLines.length + reviewLines.length;
+  const parts: string[] = [];
+  parts.push("Engine history: " + (blocked > 0 || failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(queued) + " queued");
+  parts.push(String(started) + " started");
+  parts.push(String(done) + " done");
+  parts.push(String(blocked) + " blocked");
+  parts.push(String(failed) + " failed");
+  parts.push(String(reviews) + " reviews");
+  parts.push(String(titles.size) + " distinct titles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function postToChat(root: string, chatId: string, text: string): void {
@@ -552,7 +711,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       if (t.status === "running" && t.startedAt && now - Date.parse(t.startedAt) > STALE_RUNNING_MS) {
         updateEngineTask(root, t.id, { status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-run; marked failed by the next drain." });
         recovered.push(t.id);
-        recordActivity(root, t.actor, "engine-failed", "Engine run died mid-run: " + t.title);
+        recordActivity(root, t.actor, "engine-failed", engineDiedLedgerSummary(t.title));
       }
     }
     // One engine run per drain: an engine pass is the heaviest work
@@ -563,7 +722,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
       const found = getEngineTask(root, task.id);
       if (!found || found.status !== "queued") continue;
       const current = updateEngineTask(root, task.id, { status: "running", startedAt: new Date().toISOString() }) ?? found;
-      recordActivity(root, current.actor, "engine-started", "Engine run started: " + current.title);
+      recordActivity(root, current.actor, "engine-started", engineStartedLedgerSummary(current.title));
       const close = (status: EngineStatus, result: string) => {
         // Carry every field the run accumulated on `current` - the
         // record on disk only holds what the mid-run updates wrote.
@@ -575,9 +734,9 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
         });
         if (!done) return;
         postToChat(root, current.chatId, engineSummaryText(done));
-        if (status === "done") { ran.push(task.id); recordActivity(root, current.actor, "engine-done", "Engine run done and verified: " + current.title + " (" + done.changes.length + " file(s))"); }
-        else if (status === "blocked") { blocked.push(task.id); recordActivity(root, current.actor, "engine-blocked", "Engine run blocked: " + current.title + " - " + result.slice(0, 120)); }
-        else { failed.push(task.id); recordActivity(root, current.actor, "engine-failed", "Engine run failed: " + current.title + " - " + result.slice(0, 120)); }
+        if (status === "done") { ran.push(task.id); recordActivity(root, current.actor, "engine-done", engineDoneLedgerSummary(current.title, done.changes.length)); }
+        else if (status === "blocked") { blocked.push(task.id); recordActivity(root, current.actor, "engine-blocked", engineBlockedLedgerSummary(current.title, result)); }
+        else { failed.push(task.id); recordActivity(root, current.actor, "engine-failed", engineFailedLedgerSummary(current.title, result)); }
       };
       // C4 branch sandbox first: the engine never runs in an
       // unbranched tree or on top of the owner's uncommitted work.
@@ -672,7 +831,7 @@ export async function drainEngineTasks(root: string, deps: EngineDrainDeps = {})
         try {
           const record = await deps.review(current);
           reviewOutcome = record.verdict + ": " + record.summary;
-          recordActivity(root, current.actor, "engine-review", "Self-review " + record.verdict + " for engine run: " + current.title);
+          recordActivity(root, current.actor, "engine-review", engineReviewLedgerSummary(record.verdict, current.title));
         } catch (e) { reviewUnavailable = e instanceof Error ? errorReason(e) : "Self-review failed"; }
         current.review = reviewUnavailable ? "unavailable: " + reviewUnavailable.slice(0, 240) : reviewOutcome;
         updateEngineTask(root, task.id, { review: current.review });
