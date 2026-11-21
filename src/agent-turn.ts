@@ -176,6 +176,65 @@ export function turnFailureNoteScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writer for the chat-citation ledger line
+// (2026-11-20, the measured-proof series): the citation seam
+// above has always ledgered this exact shape, until now as
+// inline concatenation at the seam itself - its sibling
+// source-citation line rides a named writer and carries two
+// scorecards, this class carried neither. The line carries
+// only 8-char prefixes (the citing chat, the cited chat, the
+// cited message) - never message content, never a reply.
+export function chatCitationLedgerSummary(chatId: string, targetChatId: string, messageId: string): string {
+  return "Citation attached in chat " + chatId.slice(0, 8) + " pointing at chat " + targetChatId.slice(0, 8) + ", message " + messageId.slice(0, 8);
+}
+// The chat-citation scorecard (2026-11-20, the measured-proof
+// series): the citation seam ledgers a chat-citation line
+// whenever a reply attaches a citation to a past chat - but
+// the class was never folded, so how often SAM cites a chat,
+// and whether citations point across chats or back at the
+// citing chat itself, was invisible in aggregate. An attached
+// citation is the citation pass working as designed, so the
+// verdict is attention only when a line is unparseable (a
+// writer's shape broken or the ledger tampered), else clear.
+// The scorecard text is a script job's stdout and is
+// P3-diffed on its facts, so it is ONE line carrying counts
+// only: no stamp, no actor, and never a chat or message id -
+// the summaries carry the prefixes, which a fold consumes
+// into distinct and self-citation counts and never prints.
+// The scorecard path is a pure read - it creates nothing,
+// spends no model call, and cites nothing; every state is
+// built through the ledger's own public door (recordActivity)
+// with the writer above, never around either.
+export function parseChatCitationSummary(
+  summary: string,
+): { chatId: string; targetChatId: string; messageId: string } | null {
+  const m = /^Citation attached in chat ([0-9a-f]{8}) pointing at chat ([0-9a-f]{8}), message ([0-9a-f]{8})$/.exec(summary);
+  if (!m) return null;
+  return { chatId: m[1], targetChatId: m[2], messageId: m[3] };
+}
+
+export function chatCitationScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "chat-citation" });
+  let unparseable = 0;
+  let citations = 0;
+  let selfCitations = 0;
+  const distinct = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseChatCitationSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    citations += 1;
+    distinct.add(parsed.chatId);
+    if (parsed.chatId === parsed.targetChatId) selfCitations += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Chat citations: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(citations) + " citations");
+  parts.push(String(distinct.size) + " distinct chats");
+  parts.push(String(selfCitations) + " self-citations");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function failoverSummary(chatId:string,from:string,to:string,error:unknown):string{
   // The hop line's reason rides the same seam (gap found
   // 2026-11-16, hourly run 19:04 EST): it took error.message
@@ -659,7 +718,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   }finally{saved.close();}
   if(citationHit&&savedId){
     if(attachCitation(root,{messageId:savedId,chatId,actor:profileName,hit:citationHit}))
-      recordActivity(root,profileName,"chat-citation","Citation attached in chat "+chatId.slice(0,8)+" pointing at chat "+citationHit.chatId.slice(0,8)+", message "+citationHit.messageId.slice(0,8));
+      recordActivity(root,profileName,"chat-citation",chatCitationLedgerSummary(chatId,citationHit.chatId,citationHit.messageId));
   }
   if(savedId&&registeredSources.length){
     if(attachReplySources(root,{messageId:savedId,chatId,actor:profileName,registered:registeredSources,cited:citedSources})&&citedSources.length)
