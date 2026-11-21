@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { channels, setChannelOwners, type Channel } from "./channels.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Pairing-code channel auth (Plan Phase A item 3): how a person proves they
@@ -270,7 +270,7 @@ export function issuePairingCode(root: string, idOrName: string, now = Date.now(
     issue();
   } catch (error) { failPairing(root, "issue", error); }
   finally { db!.close(); }
-  recordActivity(root, channel.profile, "pairing-issued", "Pairing code issued for channel " + channel.name + " (expires " + rec.expiresAt + ")");
+  recordActivity(root, channel.profile, "pairing-issued", pairingIssuedLedgerSummary(channel.name, rec.expiresAt));
   return { channel: channel.name, profile: channel.profile, code: formatPairingCode(normalized), expiresAt: rec.expiresAt };
 }
 
@@ -303,7 +303,7 @@ export function redeemPairingCode(root: string, channelId: string, rawCode: stri
         guard.lockedUntil = new Date(now + LOCK_MS).toISOString();
         guard.failures = [];
         saveGuard(guard);
-        recordActivity(root, channel.profile, "pairing-lockout", "Pairing locked for channel " + channel.name + " until " + guard.lockedUntil + " after repeated failed attempts");
+        recordActivity(root, channel.profile, "pairing-lockout", pairingLockoutLedgerSummary(channel.name, guard.lockedUntil));
         return { ok: false, reason: "locked" };
       }
       saveGuard(guard);
@@ -335,8 +335,106 @@ export function redeemPairingCode(root: string, channelId: string, rawCode: stri
   } catch (error) { failPairing(root, "redeem", error); }
   finally { db!.close(); }
   const updated = setChannelOwners(root, channelId, [...channel.ownerIds, userId]);
-  recordActivity(root, channel.profile, "pairing-redeemed", "Paired telegram user " + userId + " as an owner of channel " + channel.name);
+  recordActivity(root, channel.profile, "pairing-redeemed", pairingRedeemedLedgerSummary(userId, channel.name));
   return { ok: true, channel: updated };
+}
+
+// The ONE writers for the pairing lifecycle's activity lines,
+// so the history scorecard's parsers below can never drift
+// from the seams they count. The shapes are byte-identical to
+// what issuePairingCode, redeemPairingCode, and its lockout
+// branch wrote inline before these writers existed.
+export function pairingIssuedLedgerSummary(channelName: string, expiresAt: string): string {
+  return "Pairing code issued for channel " + channelName + " (expires " + expiresAt + ")";
+}
+export function pairingRedeemedLedgerSummary(userId: number, channelName: string): string {
+  return "Paired telegram user " + String(userId) + " as an owner of channel " + channelName;
+}
+export function pairingLockoutLedgerSummary(channelName: string, lockedUntil: string): string {
+  return "Pairing locked for channel " + channelName + " until " + lockedUntil + " after repeated failed attempts";
+}
+
+// The pairing history scorecard (2026-11-21, the
+// measured-proof series): every pairing lifecycle event has
+// ledgered as a pairing-issued / pairing-redeemed /
+// pairing-lockout line since pairing landed - until now as
+// inline concatenation at the seams, with no ONE writer and
+// no fold, so how many codes were ever issued, how many
+// redemptions ever landed an owner, and whether the
+// anti-brute-force lockout has EVER tripped was invisible in
+// aggregate (pairingStatus reads only the current store - a
+// lockout that tripped and expired leaves no surface
+// remembering it happened). A lockout is the security signal
+// of the three - someone burned the failure budget against
+// a channel - so the verdict is attention only when any
+// lockout was ever recorded or a line is unparseable, else
+// clear. This text folds the three classes to counts only,
+// on ONE line: issued, redeemed, and lockout counts, the
+// distinct-channel count as a number only, and the total.
+// No stamp, no actor, no channel name, no user id, and no
+// verbatim summary enters the text - the summaries carry
+// channel names, expiry and lockout stamps, and the paired
+// user's id, which the fold consumes and never prints. A
+// pure read: it creates nothing, issues nothing, and redeems
+// nothing - the pairing seams themselves are untouched
+// beyond riding their ONE writers.
+export function parsePairingIssuedSummary(summary: string): { channel: string } | null {
+  const m = /^Pairing code issued for channel (.+) \(expires (\S+)\)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  if (!m[2].includes("T") || Number.isNaN(Date.parse(m[2]))) return null;
+  return { channel: m[1] };
+}
+export function parsePairingRedeemedSummary(summary: string): { channel: string } | null {
+  const m = /^Paired telegram user (\d+) as an owner of channel (.+)$/.exec(summary);
+  if (!m || !m[2].trim()) return null;
+  const userId = Number(m[1]);
+  if (!Number.isSafeInteger(userId) || userId <= 0) return null;
+  return { channel: m[2] };
+}
+export function parsePairingLockoutSummary(summary: string): { channel: string } | null {
+  const m = /^Pairing locked for channel (.+) until (\S+) after repeated failed attempts$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  if (!m[2].includes("T") || Number.isNaN(Date.parse(m[2]))) return null;
+  return { channel: m[1] };
+}
+
+export function pairingHistoryScorecardText(root: string): string {
+  const issuedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "pairing-issued" });
+  const redeemedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "pairing-redeemed" });
+  const lockoutLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "pairing-lockout" });
+  let issued = 0;
+  let redeemed = 0;
+  let lockouts = 0;
+  let unparseable = 0;
+  const channelNames = new Set<string>();
+  for (const line of issuedLines) {
+    const parsed = parsePairingIssuedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    issued += 1;
+    channelNames.add(parsed.channel);
+  }
+  for (const line of redeemedLines) {
+    const parsed = parsePairingRedeemedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    redeemed += 1;
+    channelNames.add(parsed.channel);
+  }
+  for (const line of lockoutLines) {
+    const parsed = parsePairingLockoutSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    lockouts += 1;
+    channelNames.add(parsed.channel);
+  }
+  const total = issuedLines.length + redeemedLines.length + lockoutLines.length;
+  const parts: string[] = [];
+  parts.push("Pairing history: " + (lockouts > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(issued) + " issued");
+  parts.push(String(redeemed) + " redeemed");
+  parts.push(String(lockouts) + " lockouts");
+  parts.push(String(channelNames.size) + " distinct channels");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export interface PairingChannelStatus { channel: string; channelId: string; profile: string; owners: number; liveCode: boolean; codeExpiresAt: string | null; recentFailures: number; lockedUntil: string | null }
