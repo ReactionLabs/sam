@@ -10,7 +10,7 @@ import { modelRoutingTable } from "./model-routing.js";
 import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider, setEngineProvider, ENGINE_PROVIDERS, type EngineAuthRunner, type EngineConnection, type EngineProvider, type EngineProviderStatus } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { agentRepinModelLedgerSummary } from "./agent-repins.js";
 import { errorReason } from "./telegram.js";
 
@@ -380,8 +380,57 @@ export async function verifyAndSaveSetup(root: string, env: NodeJS.ProcessEnv = 
     reply: verify.reply ?? "",
   };
   saveSetupRecord(root, record);
-  recordActivity(root, "owner", "setup-verified", "Model setup verified: " + record.model + " via " + record.provider + " (one real completion; recorded in the setup store)");
+  recordActivity(root, "owner", "setup-verified", setupVerifiedLedgerSummary(record.model, record.provider));
   return { verify, saved: record };
+}
+
+// The setup verification's ledger shape has ONE writer here
+// (the measured-proof series, 2026-11-21): the verified line
+// lived as inline concatenation at the verifyAndSaveSetup
+// seam, and any drift was invisible. The shape is
+// byte-identical to what that seam wrote inline before this
+// writer existed.
+export function setupVerifiedLedgerSummary(model: string, provider: string): string {
+  return "Model setup verified: " + model + " via " + provider + " (one real completion; recorded in the setup store)";
+}
+
+// Setup history fold (2026-11-21): the setup store is a
+// singleton - every successful verification overwrites the
+// one baseline row - so the ledger is the only place the
+// history of verifications survives. This family has no
+// failure class of its own (setup-store-failed rides the
+// store-failure fold), so the verdict is attention only
+// when a line is unparseable.
+export const SETUP_PROVIDERS = ["minimax", "none"] as const;
+
+export function parseSetupVerifiedSummary(summary: string): { model: string; provider: string } | null {
+  const m = /^Model setup verified: (\S+) via (\S+) \(one real completion; recorded in the setup store\)$/.exec(summary);
+  if (!m) return null;
+  if (!(SETUP_PROVIDERS as readonly string[]).includes(m[2])) return null;
+  return { model: m[1], provider: m[2] };
+}
+
+export function setupHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "setup-verified" });
+  let verified = 0;
+  let unparseable = 0;
+  const modelSet = new Set<string>();
+  const providerSet = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseSetupVerifiedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    verified += 1;
+    modelSet.add(parsed.model);
+    providerSet.add(parsed.provider);
+  }
+  const parts: string[] = [];
+  parts.push("Setup history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(verified) + " verified");
+  parts.push(String(modelSet.size) + " distinct models");
+  parts.push(String(providerSet.size) + " distinct providers");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 // --- the interactive wizard ---------------------------------------------
