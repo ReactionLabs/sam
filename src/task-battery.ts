@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { modelApiKey } from "./config-wizard.js";
 import { ChatStore } from "./chats.js";
 import { MemoryStore } from "./memory.js";
@@ -483,9 +483,98 @@ export async function runTaskBattery(root: string, opts: { live?: boolean; env?:
     };
     recordTaskBattery(root, run);
     const findings = cases.filter(c => !c.passed).length;
-    recordActivity(root, "sam", "task-battery", "Task battery " + run.version + " recorded: " + String(passed) + "/" + String(cases.length) + " passed, live " + liveRun + ", " + String(findings) + " finding(s)");
+    recordActivity(root, "sam", "task-battery", taskBatteryLedgerSummary(run.version, passed, cases.length, liveRun, findings));
     return run;
   });
+}
+
+/** The ONE writer for the task battery's activity line, so
+ *  the scorecard's parser below can never drift from the seam
+ *  it counts. Its shape is byte-identical to what
+ *  runTaskBattery wrote inline before this writer existed:
+ *  the battery version, the passed/total counts, the live
+ *  state, and the finding count - never a case label or any
+ *  evidence, which can carry the owner's words. */
+export function taskBatteryLedgerSummary(version: string, passed: number, total: number, liveRun: TaskBatteryLiveRun, findings: number): string {
+  return "Task battery " + version + " recorded: " + String(passed) + "/" + String(total) + " passed, live " + liveRun + ", " + String(findings) + " finding(s)";
+}
+
+const TASK_BATTERY_LIVE_RUNS: TaskBatteryLiveRun[] = ["not-requested", "pending-keys", "pending-ruling"];
+
+/** Parse one task-battery ledger summary. Only the fixed
+ *  shape parses: a single non-space version token, a sane
+ *  passed/total pair, a live state from the fixed vocabulary,
+ *  and a finding count equal to total-passed - the seam
+ *  computes findings as the failed-case count, so a line
+ *  breaking that equality is not a shape the seam writes.
+ *  Anything else returns null, so a drifted shape counts as
+ *  unparseable instead of being silently miscounted. */
+export function parseTaskBatterySummary(summary: string): { version: string; passed: number; total: number; liveRun: TaskBatteryLiveRun; findings: number } | null {
+  const m = /^Task battery (\S+) recorded: (\d+)\/(\d+) passed, live (not-requested|pending-keys|pending-ruling), (\d+) finding\(s\)$/.exec(summary);
+  if (!m) return null;
+  const passed = Number(m[2]);
+  const total = Number(m[3]);
+  const findings = Number(m[5]);
+  if (total < 1 || passed > total) return null;
+  if (findings !== total - passed) return null;
+  return { version: m[1] ?? "", passed, total, liveRun: m[4] as TaskBatteryLiveRun, findings };
+}
+
+/** The task battery history scorecard (2026-11-20, the
+ *  measured-proof series): every recorded run has ledgered
+ *  as a "task-battery" line since the battery landed, but
+ *  the class was never folded - it was written inline at its
+ *  only seam, with no ONE writer and no reader, so how many
+ *  runs ever recorded, how their scores and live states
+ *  split, and whether the battery ever passed clean was
+ *  invisible as a trend (the battery's own surfaces execute
+ *  a run or read the last stored scorecard per version;
+ *  neither trends the history - the eval battery's history
+ *  fold is the sibling this one was left behind by). A run
+ *  that fell short is the battery naming a real job Sam
+ *  cannot yet do, so the verdict is attention only when any
+ *  finding was ever recorded, any run fell short of a full
+ *  pass, or a line is unparseable, else clear. This text
+ *  folds the class to counts only, on ONE line: the parsed
+ *  run count, the summed findings, the latest passed/total,
+ *  counts per fixed live bucket, the distinct-version count
+ *  as a number only, and the total. No stamp, no actor, no
+ *  version string, no case label, no evidence, and no
+ *  verbatim summary enters the text. A pure read: it creates
+ *  nothing, runs no battery case, and spends no model call -
+ *  runTaskBattery itself is untouched apart from riding the
+ *  ONE writer. */
+export function taskBatteryHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "task-battery" });
+  let runs = 0;
+  let findings = 0;
+  let latestPassed = 0;
+  let latestTotal = 0;
+  let short = 0;
+  let unparseable = 0;
+  const live = new Map<string, number>();
+  const versions = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseTaskBatterySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    findings += parsed.findings;
+    latestPassed = parsed.passed;
+    latestTotal = parsed.total;
+    if (parsed.passed < parsed.total) short += 1;
+    live.set(parsed.liveRun, (live.get(parsed.liveRun) ?? 0) + 1);
+    versions.add(parsed.version);
+  }
+  const parts: string[] = [];
+  parts.push("Task battery history: " + (findings > 0 || short > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(findings) + " findings");
+  parts.push("latest " + String(latestPassed) + "/" + String(latestTotal) + " passed");
+  for (const state of TASK_BATTERY_LIVE_RUNS) parts.push(state + " " + String(live.get(state) ?? 0));
+  parts.push(String(versions.size) + " versions");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export const TASK_BATTERY_SCRIPT = "sam-task-battery";
