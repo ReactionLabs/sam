@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { resolveModelForRoute, tierForRoute, type ModelSource, type ModelTier } from "./model-routing.js";
 import type { TurnRoute } from "./budgets.js";
@@ -183,6 +183,80 @@ export function providerStoreFailureReason(error: unknown): string {
 export function recordProviderStoreFailure(root: string, phase: ProviderStorePhase, error: unknown): void {
   const reason = providerStoreFailureReason(error);
   recordActivity(root, "sam", "provider-store-failed", providerStoreFailureSummary(phase, reason));
+}
+
+// Provider lifecycle history (gap found 2026-11-21, hourly run
+// 18:04 EST): the CLI's providers add / remove seams ledger
+// "provider-add" and "provider-remove" lines, but the shapes
+// were inline strings in cli.ts with no writer, no parser, and
+// no fold, so how many providers were ever registered or
+// removed over an install's life was invisible in aggregate;
+// the providers store holds only CURRENT providers, so a
+// removed provider leaves no surface but these lines (the
+// failover-routes precedent). These are the ONE writers for
+// both shapes (byte-identical to the inline shapes they
+// replace; the CLI seams ride them), the parsers, and the
+// history scorecard. Adds and removes are operator acts, not
+// failures, so the verdict is attention only when a line is
+// unparseable, else clear; the provider-store-failed class
+// folds in the store-failure history, not here. The scorecard
+// text is a script job's stdout and is P3-diffed on its
+// facts, so it is ONE line carrying counts only: no stamp, no
+// actor, no provider id, no key env name, and no verbatim
+// summary. The scorecard path is a pure read - it creates
+// nothing, registers nothing, and opens no store.
+export function providerAddLedgerSummary(id: string, keyEnv: string, key: "present" | "absent"): string {
+  return "Provider " + id + " registered (key env " + keyEnv + ", " + key + ")";
+}
+
+export function providerRemoveLedgerSummary(id: string): string {
+  return "Provider " + id + " removed";
+}
+
+export function parseProviderAddSummary(summary: string): { id: string; keyEnv: string; key: "present" | "absent" } | null {
+  const m = /^Provider (\S+) registered \(key env (\S+), (present|absent)\)$/.exec(summary);
+  if (!m) return null;
+  return { id: m[1] ?? "", keyEnv: m[2] ?? "", key: (m[3] ?? "absent") as "present" | "absent" };
+}
+
+export function parseProviderRemoveSummary(summary: string): { id: string } | null {
+  const m = /^Provider (\S+) removed$/.exec(summary);
+  if (!m) return null;
+  return { id: m[1] ?? "" };
+}
+
+export function providerHistoryScorecardText(root: string): string {
+  const addLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "provider-add" });
+  const removeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "provider-remove" });
+  let added = 0;
+  let addedKeyPresent = 0;
+  let addedKeyAbsent = 0;
+  let removed = 0;
+  let unparseable = 0;
+  const providers = new Set<string>();
+  for (const line of addLines) {
+    const parsed = parseProviderAddSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    added += 1;
+    if (parsed.key === "present") addedKeyPresent += 1; else addedKeyAbsent += 1;
+    providers.add(parsed.id);
+  }
+  for (const line of removeLines) {
+    const parsed = parseProviderRemoveSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    removed += 1;
+    providers.add(parsed.id);
+  }
+  const total = addLines.length + removeLines.length;
+  const parts: string[] = [];
+  parts.push("Provider history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(added) + " added");
+  parts.push("key present " + String(addedKeyPresent) + " / absent " + String(addedKeyAbsent));
+  parts.push(String(removed) + " removed");
+  parts.push(String(providers.size) + " distinct providers");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagProviderStoreLedgered(error: unknown): void {
