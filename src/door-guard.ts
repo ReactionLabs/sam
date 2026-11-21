@@ -1,3 +1,5 @@
+import { readActivity } from "./activity.js";
+
 // Stranger hardening for the web doors (program P10). A door key is a bearer
 // link: anyone holding it talks to that mini as its person, through the full
 // chat pipeline - preference capture, correction proposals, and SAM's own
@@ -132,4 +134,79 @@ export class DoorAbuseGuard {
   stats(now = Date.now()): DoorGuardStats {
     return { probes: this.probes, blockedMessages: this.blockedMessages, rateLimited: this.rateLimited, probeLockedUntil: now < this.lockUntil ? new Date(this.lockUntil).toISOString() : null };
   }
+}
+// The ONE writers for the door-guard activity lines, so the
+// scorecard's parsers below can never drift from the seams
+// they count. Their shapes are byte-identical to what the
+// two dashboard seams wrote inline before these writers
+// existed: a refused message is "Refused a <category>
+// message at the door" and a probe lockout is the one
+// constant line, written exactly once per lockout.
+export const DOOR_INJECTION_CATEGORIES: InjectionCategory[] = ["instruction-override", "prompt-extraction", "role-impersonation", "memory-poisoning", "tool-coercion"];
+export function doorBlockedLedgerSummary(category: string): string {
+  return "Refused a " + category + " message at the door";
+}
+export function doorLockoutLedgerSummary(): string {
+  return "Invalid door keys locked the doors for 5 minutes";
+}
+// The door history scorecard (2026-11-21, the
+// measured-proof series): the door guard ledgers one
+// "door-blocked" line per injection-shaped message refused
+// at a web door and one "door-lockout" line per probe
+// lockout - but neither class was ever folded, so how many
+// attacks were ever refused, which injection families they
+// belonged to, and how many lockouts ever fired was
+// invisible in aggregate; the guard's own stats are
+// in-memory and reset on every dashboard restart. A
+// recorded refusal or lockout is itself the signal, so the
+// verdict is attention when any was ever recorded or any
+// line is unparseable, else clear (the never-list
+// precedent). The blocked parser validates the fixed shape
+// exactly: the category against this module's own
+// five-class InjectionCategory vocabulary (a category
+// outside it is drift, never a new class), and the lockout
+// shape is the exact constant line. This text folds both
+// classes to counts only, on ONE line: the blocked and
+// lockout counts, the counts per fixed category, and the
+// total. No stamp, no actor, no mini name, and no verbatim
+// summary enters the text - the blocked line's actor is
+// the mini's name, which a fold must never print. A pure
+// read: it creates nothing, spends no model call, and
+// screens, blocks, probes, and locks nothing - the door
+// seams themselves are untouched.
+export function parseDoorBlockedSummary(summary: string): { category: string } | null {
+  const blocked = /^Refused a ([a-z][a-z0-9-]*) message at the door$/.exec(summary);
+  if (!blocked) return null;
+  if (!(DOOR_INJECTION_CATEGORIES as string[]).includes(blocked[1] as string)) return null;
+  return { category: blocked[1] as string };
+}
+export function parseDoorLockoutSummary(summary: string): boolean {
+  return summary === doorLockoutLedgerSummary();
+}
+export function doorHistoryScorecardText(root: string): string {
+  const blockedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "door-blocked" });
+  const lockoutLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "door-lockout" });
+  let blocked = 0;
+  let lockouts = 0;
+  let unparseable = 0;
+  const byCategory = new Map<string, number>();
+  for (const line of blockedLines) {
+    const parsed = parseDoorBlockedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    blocked += 1;
+    byCategory.set(parsed.category, (byCategory.get(parsed.category) ?? 0) + 1);
+  }
+  for (const line of lockoutLines) {
+    if (!parseDoorLockoutSummary(line.summary)) { unparseable += 1; continue; }
+    lockouts += 1;
+  }
+  const categories = DOOR_INJECTION_CATEGORIES.filter(c => (byCategory.get(c) ?? 0) > 0).map(c => c + " " + String(byCategory.get(c)));
+  const parts: string[] = [];
+  parts.push("Door history: " + (blocked + lockouts > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(blocked) + " blocked");
+  parts.push(String(lockouts) + " lockouts");
+  parts.push("categories " + (categories.length ? categories.join(" / ") : "none"));
+  parts.push(String(blockedLines.length + lockoutLines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }

@@ -128,7 +128,7 @@ import { backupDrillHistoryScorecardText, backupDrillText, backupHistoryScorecar
 import { correctionScorecardText, detectCorrection, proposeCorrection } from "./corrections.js";
 import { providerRetryScorecardText } from "./provider-retry.js";
 import { listDoors } from "./mini-door.js";
-import { runRedTeamPack, screenDoorMessage } from "./door-guard.js";
+import { doorHistoryScorecardText, runRedTeamPack, screenDoorMessage } from "./door-guard.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 import { modelRoutingTable } from "./model-routing.js";
 import { connectors } from "./connectors.js";
@@ -493,6 +493,7 @@ miniCmd.command("door").argument("<name>").description("Issue (or rotate) the we
 miniCmd.command("door-off").argument("<name>").action((name:string)=>output({disabled:disableDoor(program.opts().workspace,name)}));
 miniCmd.command("doors").description("Door audit (P10): every door with its expiry, key version, and session count - a door is a bearer credential, so its age must be visible").action(()=>output(listDoors(program.opts().workspace)));
 miniCmd.command("screen").argument("<text>").description("Screening only (P10): show whether a message would be refused at a web door, and why; sends nothing").action((text:string)=>output(screenDoorMessage(text)));
+miniCmd.command("door-history").description("Door guard history as plain text with no clock reading - one line: verdict, the blocked and lockout counts, counts per fixed injection category (the door-guard module's five-class vocabulary), and the total (never a stamp, an actor, a mini name, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded refusal or lockout is the news (this is the sam-door-history script job's stdout; a pure read over the same activity ledger the door seams ledger: creates nothing, spends no model call, screens nothing, blocks nothing, locks nothing; exits 0 always, the verdict lives in the text)").action(()=>output(doorHistoryScorecardText(program.opts().workspace)));
 miniCmd.command("redteam").description("Run the prompt-injection red-team pack against the door screen (P10): every attack must be refused under its category, every benign near-miss must pass").action(()=>output(runRedTeamPack()));
 miniCmd.command("remove").argument("<name>").action((name:string)=>output({removed:removeMini(program.opts().workspace,name)}));
 const linkCmd=program.command("links").description("Link groups: the only bridge between profiles. Linked profiles share one memory level");

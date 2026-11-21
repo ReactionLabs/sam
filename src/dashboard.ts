@@ -9,7 +9,7 @@ import { sourceFromApiBody } from "./message-provenance.js";
 import { PreferenceStore, lawRevokedLedgerSummary } from "./preferences.js";
 import { minis } from "./minis.js";
 import { doorForKey, doorHomeLink, doorModeForKey, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
-import { DoorAbuseGuard, screenDoorMessage } from "./door-guard.js";
+import { DoorAbuseGuard, doorBlockedLedgerSummary, doorLockoutLedgerSummary, screenDoorMessage } from "./door-guard.js";
 import { connectors, addConnector, getConnector, removeConnector, testConnector, readConnectorTool } from "./connectors.js";
 import { listActions, decideAction } from "./actions.js";
 import { recordActivity } from "./activity.js";
@@ -357,7 +357,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
       // the legitimate person's retry a few minutes later simply works.
       if(doorGuard.probeLocked()){json(429,{error:"Doors are paused briefly after too many invalid keys. Try again in a few minutes."});return;}
       const miniName=doorForKey(workspace,doorMatch[1]);
-      if(!miniName){const probe=doorGuard.noteProbe();if(probe.justLocked)recordActivity(workspace,"sam","door-lockout","Invalid door keys locked the doors for 5 minutes");res.writeHead(404);res.end();return;}
+      if(!miniName){const probe=doorGuard.noteProbe();if(probe.justLocked)recordActivity(workspace,"sam","door-lockout",doorLockoutLedgerSummary());res.writeHead(404);res.end();return;}
       const miniRecord=minis(workspace).find(m=>m.name===miniName);
       if(req.method==="GET"&&!doorMatch[2]){res.setHeader("Content-Type","text/html; charset=utf-8");res.end(miniDoorPage(miniRecord?.person??miniName,miniName,doorHomeLink(workspace,doorMatch[1])));return;}
       if(req.method==="GET"&&doorMatch[2]==="/history"){
@@ -378,7 +378,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
           // it can reach preference capture, law proposals, or SAM's tools,
           // and the refusal itself lands in the owner's ledger.
           const screen=screenDoorMessage(content);
-          if(screen.blocked){doorGuard.noteBlocked();recordActivity(workspace,miniName,"door-blocked","Refused a "+screen.category+" message at the door");json(400,{error:"That message can't be sent through this door."});return;}
+          if(screen.blocked){doorGuard.noteBlocked();recordActivity(workspace,miniName,"door-blocked",doorBlockedLedgerSummary(screen.category as string));json(400,{error:"That message can't be sent through this door."});return;}
           if(!doorLimiter.allow(miniName+":"+session)) {json(429,{error:"Slow down a little. Try again in a moment."});return;}
           if(!doorGuard.allowMini(miniName)) {json(429,{error:"This SAM has had a lot of messages in the last hour. Try again later."});return;}
           const visitorDoor=doorModeForKey(workspace,doorMatch[1])==="visitor";
