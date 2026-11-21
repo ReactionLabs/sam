@@ -8,7 +8,7 @@ import { skillUseEntries } from "./skill-use.js";
 import { installedSkills } from "./skill-registry.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Skill authoring + curator (Plan Phase B item 3, Hermes borrow: the
@@ -306,6 +306,24 @@ export function validateSkillAuthorDetail(root: string, detail: string): { draft
   return { draft, patch: skillDraftIsPatch(root, draft.name) };
 }
 
+// The authoring lifecycle's ledger shapes each have ONE writer
+// here (the measured-proof series, 2026-11-21): the gated line
+// (a draft or patch routed to the ONE gate), the written lines
+// (an approved author or patch), and the curator line below
+// (a pass whose finding set changed) lived as inline
+// concatenation at their seams, and any drift between them was
+// invisible. The shapes are byte-identical to what those seams
+// wrote inline before these writers existed.
+export function skillGatedLedgerSummary(patch: boolean, draft: SkillDraft): string {
+  return (patch ? "Skill patch" : "Skill draft") + " routed to owner approval: " + draft.name + " - " + draft.description.slice(0, 120);
+}
+export function skillWrittenLedgerSummary(patch: boolean, draft: SkillDraft, version: number): string {
+  return (patch ? "Patched" : "Authored") + " skill " + draft.name + " (v" + version + "): " + draft.description.slice(0, 120);
+}
+export function skillCuratorLedgerSummary(findings: CuratorFinding[]): string {
+  return "Skill curator flagged " + findings.length + " issue(s): " + findings.map(f => f.kind + " (" + f.skills.join(", ") + ")").join("; ").slice(0, 300);
+}
+
 export type ProposeSkillResult = { status: "pending_owner_approval"; patch: boolean; proposal: ActionProposal };
 
 export function proposeAuthoredSkill(root: string, input: { actor: string; name: string; description: string; instructions: string; chatId?: string | null }): ProposeSkillResult {
@@ -321,7 +339,7 @@ export function proposeAuthoredSkill(root: string, input: { actor: string; name:
     title: (patch ? "Patch skill: " : "New skill: ") + draft.name,
     detail: JSON.stringify(draft), chatId: input.chatId ?? null,
   });
-  recordActivity(root, input.actor, "skill-gated", (patch ? "Skill patch" : "Skill draft") + " routed to owner approval: " + draft.name + " - " + draft.description.slice(0, 120));
+  recordActivity(root, input.actor, "skill-gated", skillGatedLedgerSummary(patch, draft));
   return { status: "pending_owner_approval", patch, proposal };
 }
 
@@ -361,7 +379,7 @@ export function writeAuthoredSkill(root: string, draftInput: SkillDraft, opts: {
     ? { ...prior, actor: opts.actor, version: prior.version + 1, updatedAt: now }
     : { name: draft.name, source: "sam-authored", actor: opts.actor, version: 1, createdAt: now, updatedAt: now };
   upsertAuthoredRow(root, record);
-  recordActivity(root, opts.actor, patch ? "skill-patched" : "skill-authored", (patch ? "Patched" : "Authored") + " skill " + draft.name + " (v" + record.version + "): " + draft.description.slice(0, 120));
+  recordActivity(root, opts.actor, patch ? "skill-patched" : "skill-authored", skillWrittenLedgerSummary(patch, draft, record.version));
   return record;
 }
 
@@ -727,7 +745,155 @@ export function runSkillCurator(root: string): { findings: CuratorFinding[]; cha
   } catch (error) { failSkillCuratorStore(root, "write", error); }
   finally { db.close(); }
   if (changed && findings.length) {
-    recordActivity(root, "sam", "skill-curator", "Skill curator flagged " + findings.length + " issue(s): " + findings.map(f => f.kind + " (" + f.skills.join(", ") + ")").join("; ").slice(0, 300));
+    recordActivity(root, "sam", "skill-curator", skillCuratorLedgerSummary(findings));
   }
   return { findings, changed };
+}
+
+// --- Authoring history fold (the measured-proof series,
+// 2026-11-21): the authoring lifecycle's four ledger classes
+// (skill-gated, skill-authored, skill-patched, skill-curator)
+// fold to counts. The current-state surfaces forget the arc -
+// authoredSkills reads only the provenance store, so a skill
+// authored, patched, and later removed leaves no count, and
+// curatorFindings reads only the last pass's finding set, so
+// a finding that appeared and cleared leaves no trace. The
+// parsers validate each line's fixed shape only (the gated
+// draft/patch flag and the written version are the fixed
+// vocabulary, the skill name against this module's own
+// SKILL_NAME_RE, the curator's finding kinds against the
+// fixed seven-class vocabulary; the name and description
+// slices are free text the parser checks for presence and
+// never surfaces), so a line whose shape drifted counts as
+// unparseable rather than surfacing as free text. Two
+// slices bound the curator line (the writer caps the
+// findings body at 300 chars, the ledger caps the whole
+// summary at 300), so a stored line can end mid-entry or
+// mid-kind-token: a tail fragment the slices can produce is
+// never a parse failure, its kind counts when the kind
+// token is complete, and the header's declared count stays
+// the findings total of record. This
+// family has no failure class of its own (its store failures
+// ride the store-failure fold), so the verdict is attention
+// only when a line is unparseable. A pure read: it creates
+// nothing, gates nothing, writes nothing, and runs no
+// curator pass - the seams themselves are untouched beyond
+// riding their ONE writers above.
+export const CURATOR_FINDING_KINDS: CuratorFindingKind[] = ["duplicate-content", "duplicate-description", "shadowed", "orphaned-provenance", "unmatchable-description", "unused-skill", "stale-skill"];
+
+export function parseSkillGatedSummary(summary: string): { patch: boolean; name: string } | null {
+  const m = /^Skill (draft|patch) routed to owner approval: (\S+) - (.+)$/.exec(summary);
+  if (!m || !SKILL_NAME_RE.test(m[2]) || !m[3].trim()) return null;
+  return { patch: m[1] === "patch", name: m[2] };
+}
+export function parseSkillAuthoredSummary(summary: string): { name: string; version: number } | null {
+  const m = /^Authored skill (\S+) \(v(\d+)\): (.+)$/.exec(summary);
+  if (!m || !SKILL_NAME_RE.test(m[1]) || !m[3].trim()) return null;
+  return { name: m[1], version: Number(m[2]) };
+}
+export function parseSkillPatchedSummary(summary: string): { name: string; version: number } | null {
+  const m = /^Patched skill (\S+) \(v(\d+)\): (.+)$/.exec(summary);
+  if (!m || !SKILL_NAME_RE.test(m[1]) || !m[3].trim()) return null;
+  return { name: m[1], version: Number(m[2]) };
+}
+export function parseSkillCuratorSummary(summary: string): { declared: number; kinds: Partial<Record<CuratorFindingKind, number>> } | null {
+  const m = /^Skill curator flagged (\d+) issue\(s\): (.+)$/.exec(summary);
+  if (!m) return null;
+  const declared = Number(m[1]);
+  if (!Number.isInteger(declared) || declared < 1) return null;
+  const entries = m[2].split("; ");
+  if (entries.length > declared) return null;
+  const kinds: Partial<Record<CuratorFindingKind, number>> = {};
+  const countKind = (kind: CuratorFindingKind): void => { kinds[kind] = (kinds[kind] ?? 0) + 1; };
+  for (let i = 0; i < entries.length; i += 1) {
+    const isLast = i === entries.length - 1;
+    // Two slices bound this line: the writer caps the findings
+    // body at 300 chars and the ledger caps the whole summary
+    // at 300, so a stored line can end mid-entry or even
+    // mid-kind-token. A cut landing between the separator's
+    // ";" and its " " leaves the semicolon on the last entry.
+    const entry = isLast && entries[i].endsWith(";") ? entries[i].slice(0, -1) : entries[i];
+    const complete = /^([a-z-]+) \((.+)\)$/.exec(entry);
+    if (complete && (CURATOR_FINDING_KINDS as string[]).includes(complete[1]) && complete[2].trim()) {
+      countKind(complete[1] as CuratorFindingKind);
+      continue;
+    }
+    if (!isLast) return null;
+    // The tail fragment: a complete kind token (with or
+    // without its skills list started) counts its kind; a
+    // partial kind token that is a prefix of a known kind,
+    // or an empty fragment, counts nothing. Anything else
+    // is a shape the two slices cannot produce.
+    const started = /^([a-z-]+) \(/.exec(entry);
+    if (started && (CURATOR_FINDING_KINDS as string[]).includes(started[1])) { countKind(started[1] as CuratorFindingKind); continue; }
+    if ((CURATOR_FINDING_KINDS as string[]).includes(entry)) { countKind(entry as CuratorFindingKind); continue; }
+    if (entry === "" || CURATOR_FINDING_KINDS.some(k => k.startsWith(entry))) continue;
+    return null;
+  }
+  // The header's declared count is the findings total of
+  // record; per-kind counts are floors, because a slice can
+  // drop whole trailing entries the parser never sees.
+  const counted = Object.values(kinds).reduce((a, b) => a + b, 0);
+  if (counted > declared) return null;
+  return { declared, kinds };
+}
+export function skillAuthorHistoryScorecardText(root: string): string {
+  const gatedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-gated" });
+  const authoredLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-authored" });
+  const patchedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-patched" });
+  const curatorLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-curator" });
+  let gated = 0;
+  let gatedDrafts = 0;
+  let gatedPatches = 0;
+  let authored = 0;
+  let patched = 0;
+  let curatorPasses = 0;
+  let findingsFlagged = 0;
+  let unparseable = 0;
+  const skillSet = new Set<string>();
+  const kindCounts = new Map<CuratorFindingKind, number>();
+  for (const line of gatedLines) {
+    const parsed = parseSkillGatedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    gated += 1;
+    if (parsed.patch) gatedPatches += 1; else gatedDrafts += 1;
+    skillSet.add(parsed.name);
+  }
+  for (const line of authoredLines) {
+    const parsed = parseSkillAuthoredSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    authored += 1;
+    skillSet.add(parsed.name);
+  }
+  for (const line of patchedLines) {
+    const parsed = parseSkillPatchedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    patched += 1;
+    skillSet.add(parsed.name);
+  }
+  for (const line of curatorLines) {
+    const parsed = parseSkillCuratorSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    curatorPasses += 1;
+    findingsFlagged += parsed.declared;
+    for (const kind of CURATOR_FINDING_KINDS) {
+      const n = parsed.kinds[kind] ?? 0;
+      if (n) kindCounts.set(kind, (kindCounts.get(kind) ?? 0) + n);
+    }
+  }
+  const total = gatedLines.length + authoredLines.length + patchedLines.length + curatorLines.length;
+  const parts: string[] = [];
+  parts.push("Skill author history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(gated) + " gated");
+  parts.push(String(gatedDrafts) + " drafts");
+  parts.push(String(gatedPatches) + " gated patches");
+  parts.push(String(authored) + " authored");
+  parts.push(String(patched) + " patched");
+  parts.push(String(skillSet.size) + " distinct skills");
+  parts.push(String(curatorPasses) + " curator passes");
+  parts.push(String(findingsFlagged) + " findings flagged");
+  for (const kind of CURATOR_FINDING_KINDS) parts.push(String(kindCounts.get(kind) ?? 0) + " " + kind);
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
