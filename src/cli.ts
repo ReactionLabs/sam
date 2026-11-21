@@ -23,6 +23,7 @@ import { heartbeatJobs, addHeartbeatJob, addScheduledJob, jobNextRun, removeHear
 import { describeSchedule, scriptCommandNames, SCRIPT_JOB_COMMANDS } from "./schedule.js";
 import { deliverySummary, outboxScorecardText, readDeliveries } from "./delivery-outbox.js";
 import { backgroundHistoryScorecardText, listBackgroundTasks, queueBackgroundTask, drainBackgroundTasks } from "./background.js";
+import { storeFailureHistoryScorecardText } from "./store-failure-history.js";
 import { listCodingTasks, queueCodingTask, drainCodingTasks, codingScorecardText } from "./coding.js";
 import { drainEngineTasks, engineHistoryScorecardText, engineStatus, listEngineTasks, queueEngineTask } from "./engine.js";
 import { drainParallelJobs, listParallelJobs, getParallelJob, parallelHistoryScorecardText, parallelSummaryText, proposeParallelPush, queueParallelJob, type ParallelSliceSpec } from "./parallel-coding.js";
@@ -379,6 +380,8 @@ program.command("heartbeat").description("Run one heartbeat tick now: consolidat
   const deliver=makeChannelDeliver(root);
   output(await runHeartbeat(root,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"heartbeat"}),runBackgroundTurn:(chatId,content)=>runChatTurn(root,chatId,content,{route:"background"}),ensureChat,deliver,reviewCoding:codingReviewer(root),reviewEngine:codingReviewer(root),reviewParallel:parallelReviewer(root)}));
  });
+const storesCmd=program.command("stores").description("Guarded stores: the dead-store failure record every store touch ledgers fail-closed");
+storesCmd.command("history").description("Store failure history as plain text with no clock reading - verdict, the failed count, the read, write, and resolve phase counts, the distinct-store count as a number only, and the total (never a stamp, an actor, a failure reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a store failure or a malformed line is the news (this is the sam-store-failures script job's stdout; a pure read over the same activity ledger the store seams ledger: creates nothing, opens no store, retries nothing; exits 0 always, the verdict lives in the text)").action(()=>output(storeFailureHistoryScorecardText(program.opts().workspace)));
 const bgCmd=program.command("background").description("Background work (legs): tasks a chat handed off to run async and post back into the chat");
 bgCmd.command("list").option("--chat <id>","Only this chat").action((o:{chat?:string})=>output(listBackgroundTasks(program.opts().workspace).filter(t=>!o.chat||t.chatId===o.chat)));
 bgCmd.command("handoff").requiredOption("--chat <id>","Chat the task reports back into").requiredOption("--prompt <text>","The self-contained task").option("--actor <name>","Acting profile","sam").option("--title <text>","Short label").action((o:{chat:string;prompt:string;actor:string;title?:string})=>output(queueBackgroundTask(program.opts().workspace,{actor:o.actor,chatId:o.chat,prompt:o.prompt,title:o.title})));
