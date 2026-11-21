@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 
 // Legs (program P5): background work. A chat can hand off a long task - the
@@ -224,7 +224,7 @@ export function queueBackgroundTask(root: string, input: { actor: string; chatId
     status: "queued", createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, result: null,
   };
   insertTask(root, item);
-  recordActivity(root, input.actor, "background-queued", "Handed off background task: " + title);
+  recordActivity(root, input.actor, "background-queued", backgroundQueuedLedgerSummary(title));
   return item;
 }
 // Background failures carry their cause (gap found
@@ -251,6 +251,124 @@ export function backgroundFailedSummary(title: string, error: unknown): string {
   return "Background task failed: " + title + " - " + backgroundFailureReason(error).slice(0, 120);
 }
 
+// The ONE writers for the background lifecycle's activity
+// lines, so the history scorecard's parsers below can never
+// drift from the seams they count. The shapes are
+// byte-identical to what queueBackgroundTask and
+// drainBackgroundTasks wrote inline before these writers
+// existed; backgroundFailedSummary above stays the
+// drain-failure writer for the same reason.
+export function backgroundQueuedLedgerSummary(title: string): string {
+  return "Handed off background task: " + title;
+}
+export function backgroundStartedLedgerSummary(title: string): string {
+  return "Background task started: " + title;
+}
+export function backgroundDoneLedgerSummary(title: string): string {
+  return "Background task finished in its chat: " + title;
+}
+export function backgroundDiedLedgerSummary(title: string): string {
+  return "Background task died mid-run: " + title;
+}
+
+// The background history scorecard (2026-11-21, the
+// measured-proof series): every background lifecycle event
+// has ledgered as a background-queued / background-started /
+// background-done / background-failed line since the legs
+// landed - until now as inline concatenation at the seams,
+// with no ONE writer and no fold, so how many tasks were
+// ever handed off, started, finished, or failed was
+// invisible in aggregate (listBackgroundTasks reads only
+// the current store - a done or failed row is overwritten
+// in place, and a recovered stale task's died-mid-run
+// failure leaves no current-state trace). A failure is the
+// signal of the four - a handed-off task that never landed
+// its result in its chat - so the verdict is attention only
+// when any failure was ever recorded or a line is
+// unparseable, else clear. This text folds the four classes
+// to counts only, on ONE line: queued, started, done, and
+// failed counts, the distinct-title count as a number only,
+// and the total. No stamp, no actor, no title, no failure
+// reason, and no verbatim summary enters the text - the
+// summaries carry task titles and failure reasons, which
+// are the owner's words, and the fold consumes and never
+// prints them. A pure read: it creates nothing, queues
+// nothing, and drains nothing - the background seams
+// themselves are untouched beyond riding their ONE writers.
+export function parseBackgroundQueuedSummary(summary: string): { title: string } | null {
+  const m = /^Handed off background task: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1] };
+}
+export function parseBackgroundStartedSummary(summary: string): { title: string } | null {
+  const m = /^Background task started: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1] };
+}
+export function parseBackgroundDoneSummary(summary: string): { title: string } | null {
+  const m = /^Background task finished in its chat: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1] };
+}
+export function parseBackgroundFailedSummary(summary: string): { title: string } | null {
+  const died = /^Background task died mid-run: (.+)$/.exec(summary);
+  if (died) {
+    if (!died[1].trim()) return null;
+    return { title: died[1] };
+  }
+  const m = /^Background task failed: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { title: m[1] };
+}
+
+export function backgroundHistoryScorecardText(root: string): string {
+  const queuedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "background-queued" });
+  const startedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "background-started" });
+  const doneLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "background-done" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "background-failed" });
+  let queued = 0;
+  let started = 0;
+  let done = 0;
+  let failed = 0;
+  let unparseable = 0;
+  const titles = new Set<string>();
+  for (const line of queuedLines) {
+    const parsed = parseBackgroundQueuedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    queued += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of startedLines) {
+    const parsed = parseBackgroundStartedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    started += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of doneLines) {
+    const parsed = parseBackgroundDoneSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    done += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of failedLines) {
+    const parsed = parseBackgroundFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    titles.add(parsed.title);
+  }
+  const total = queuedLines.length + startedLines.length + doneLines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Background history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(queued) + " queued");
+  parts.push(String(started) + " started");
+  parts.push(String(done) + " done");
+  parts.push(String(failed) + " failed");
+  parts.push(String(titles.size) + " distinct titles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 const draining = new Set<string>();
 export interface DrainDeps { runTurn: (chatId: string, content: string) => Promise<string>; maxPerDrain?: number }
 export async function drainBackgroundTasks(root: string, deps: DrainDeps): Promise<{ ran: string[]; failed: string[]; recovered: string[] }> {
@@ -266,7 +384,7 @@ export async function drainBackgroundTasks(root: string, deps: DrainDeps): Promi
       if (t.status === "running" && t.startedAt && now - Date.parse(t.startedAt) > STALE_RUNNING_MS) {
         updateTaskRow(root, { ...t, status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-task; marked failed by the next drain." });
         recovered.push(t.id);
-        recordActivity(root, t.actor, "background-failed", "Background task died mid-run: " + t.title);
+        recordActivity(root, t.actor, "background-failed", backgroundDiedLedgerSummary(t.title));
       }
     }
     const limit = deps.maxPerDrain ?? 3;
@@ -276,13 +394,13 @@ export async function drainBackgroundTasks(root: string, deps: DrainDeps): Promi
       if (!current || current.status !== "queued") continue;
       const running: BackgroundTask = { ...current, status: "running", startedAt: new Date().toISOString() };
       updateTaskRow(root, running);
-      recordActivity(root, current.actor, "background-started", "Background task started: " + current.title);
+      recordActivity(root, current.actor, "background-started", backgroundStartedLedgerSummary(current.title));
       try {
         const reply = await deps.runTurn(current.chatId, current.prompt);
         const done = getBackgroundTask(root, task.id);
         if (done) updateTaskRow(root, { ...done, status: "done", finishedAt: new Date().toISOString(), result: reply.slice(0, 300) });
         ran.push(task.id);
-        recordActivity(root, current.actor, "background-done", "Background task finished in its chat: " + current.title);
+        recordActivity(root, current.actor, "background-done", backgroundDoneLedgerSummary(current.title));
       } catch (e) {
         const message = backgroundFailureReason(e);
         const bad = getBackgroundTask(root, task.id);
