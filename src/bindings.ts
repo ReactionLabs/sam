@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Deterministic bindings (Plan Phase C item 3): which profile an incoming
@@ -228,13 +228,13 @@ export function setBinding(root: string, input: { channelId: string; peer: strin
   if (existing) {
     const moved: Binding = { ...existing, profile: input.profile };
     updateBindingRow(root, moved);
-    recordActivity(root, input.profile, "binding-set", "Binding updated: channel " + channel.name + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + input.profile);
+    recordActivity(root, input.profile, "binding-set", bindingSetLedgerSummary(true, channel.name, peer, input.profile));
     return moved;
   }
   if (countBindings(root) >= MAX_BINDINGS) throw Error("Binding limit reached (" + MAX_BINDINGS + ")");
   const item: Binding = { id: randomUUID(), channelId: channel.id, peer, profile: input.profile, createdAt: new Date().toISOString() };
   insertBindingRow(root, item);
-  recordActivity(root, input.profile, "binding-set", "Binding set: channel " + channel.name + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + input.profile);
+  recordActivity(root, input.profile, "binding-set", bindingSetLedgerSummary(false, channel.name, peer, input.profile));
   return item;
 }
 // The store's update door (the contacts precedent): patch one binding by
@@ -261,7 +261,7 @@ export function removeBinding(root: string, id: string): boolean {
     const result = db.prepare("DELETE FROM bindings WHERE id = ?").run(id);
     if (result.changes === 0) return false;
   } finally { db.close(); }
-  recordActivity(root, gone.profile, "binding-removed", "Binding removed: channel " + gone.channelId + (gone.peer ? ", peer " + gone.peer : " (all peers)") + " -> profile " + gone.profile);
+  recordActivity(root, gone.profile, "binding-removed", bindingRemovedLedgerSummary(gone.channelId, gone.peer, gone.profile));
   return true;
 }
 // The one resolver every channel surface rides. peer may be a number
@@ -287,4 +287,145 @@ export function resolveBindingProfile(root: string, channel: Channel, peer?: str
   const channelBinding = mine.find(b => b.peer === null);
   if (channelBinding) return { profile: channelBinding.profile, via: "channel", binding: channelBinding };
   return { profile: channel.profile, via: "default", binding: null };
+}
+
+// The ONE writers for the binding lifecycle's set-side activity
+// lines, so the history scorecard's parsers below can never drift
+// from the seams they count. The shapes are byte-identical to what
+// setBinding and removeBinding wrote inline before these writers
+// existed. (The binding-failed line already rides its ONE writer,
+// bindingFailureSummary above.)
+export function bindingSetLedgerSummary(updated: boolean, channelName: string, peer: string | null, profile: string): string {
+  return "Binding " + (updated ? "updated" : "set") + ": channel " + channelName + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + profile;
+}
+export function bindingRemovedLedgerSummary(channelId: string, peer: string | null, profile: string): string {
+  return "Binding removed: channel " + channelId + (peer ? ", peer " + peer : " (all peers)") + " -> profile " + profile;
+}
+
+// The binding history scorecard (2026-11-21, the measured-proof
+// series): every binding lifecycle event has ledgered as a
+// binding-set / binding-removed / binding-failed line since
+// deterministic bindings landed (Phase C item 3) - the set and
+// removed lines as inline concatenation with no ONE writer until
+// now, and with no fold, so how many bindings were ever set,
+// moved, or removed, across how many channels and profiles, and
+// whether a binding resolve ever failed, was invisible in
+// aggregate (listBindings reads only the current store - a
+// binding that was set, moved, and removed leaves no surface
+// remembering it happened). A resolve failure is the signal of
+// the family - a person bound to their own scoped SAM silently
+// landing on the channel's default profile, a routing / scoping
+// failure dressed as an ordinary unbound message - so the
+// verdict is attention only when any binding-failed was ever
+// recorded or a line is unparseable, else clear. This text folds
+// the three classes to counts only, on ONE line: the set,
+// updated, and removed counts, the failed count with its read /
+// resolve split, the distinct-channel and distinct-profile
+// counts as numbers only, and the total. No stamp, no actor, no
+// channel name or id, no peer id, no profile name, no reason,
+// and no verbatim summary enters the text - the summaries carry
+// channel names, peer sender ids, and failure reasons, which the
+// fold consumes and never prints. One shape note the fold
+// honors: a removed line names its channel by ID, not by name
+// (the remove seam holds the stored record, not the channel), so
+// the distinct-channel count is taken from the name-carrying
+// lines only (set, updated, resolve-failed) and the removed
+// line's id token never enters it; the distinct-profile count
+// rides every parsed line, removed included, because every shape
+// names its profile the same way. The parsers validate each
+// line's profile against the registry's own profile pattern, so
+// a line whose shape drifted counts as unparseable rather than
+// surfacing as free text. A pure read: it creates nothing, sets
+// nothing, removes nothing, and resolves nothing - the binding
+// seams themselves are untouched beyond riding their ONE
+// writers.
+function parseBindingRouteSegment(segment: string): { channel: string; peer: string | null } | null {
+  if (segment.endsWith(" (all peers)")) {
+    const channel = segment.slice(0, -" (all peers)".length);
+    if (!channel.trim()) return null;
+    return { channel, peer: null };
+  }
+  const idx = segment.lastIndexOf(", peer ");
+  if (idx < 0) return null;
+  const channel = segment.slice(0, idx);
+  const peer = segment.slice(idx + ", peer ".length);
+  if (!channel.trim() || !peer.trim()) return null;
+  return { channel, peer };
+}
+export function parseBindingSetSummary(summary: string): { action: "set" | "updated"; channel: string; peer: string | null; profile: string } | null {
+  const m = /^Binding (set|updated): channel (.+) -> profile (\S+)$/.exec(summary);
+  if (!m) return null;
+  if (!profilePattern.test(m[3])) return null;
+  const route = parseBindingRouteSegment(m[2]);
+  if (!route) return null;
+  return { action: m[1] as "set" | "updated", channel: route.channel, peer: route.peer, profile: m[3] };
+}
+export function parseBindingRemovedSummary(summary: string): { channel: string; peer: string | null; profile: string } | null {
+  const m = /^Binding removed: channel (.+) -> profile (\S+)$/.exec(summary);
+  if (!m) return null;
+  if (!profilePattern.test(m[2])) return null;
+  const route = parseBindingRouteSegment(m[1]);
+  if (!route) return null;
+  return { channel: route.channel, peer: route.peer, profile: m[2] };
+}
+export function parseBindingFailedSummary(summary: string): { phase: BindingPhase; channel: string | null } | null {
+  const read = /^Binding read failed: (.+)$/.exec(summary);
+  if (read) {
+    if (!read[1].trim()) return null;
+    return { phase: "read", channel: null };
+  }
+  const resolve = /^Binding resolve failed for channel (.+?): (.+)$/.exec(summary);
+  if (resolve) {
+    if (!resolve[1].trim() || !resolve[2].trim()) return null;
+    return { phase: "resolve", channel: resolve[1] };
+  }
+  return null;
+}
+export function bindingHistoryScorecardText(root: string): string {
+  const setLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "binding-set" });
+  const removedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "binding-removed" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "binding-failed" });
+  let set = 0;
+  let updated = 0;
+  let removed = 0;
+  let failed = 0;
+  let reads = 0;
+  let resolves = 0;
+  let unparseable = 0;
+  const channelNames = new Set<string>();
+  const profileNames = new Set<string>();
+  for (const line of setLines) {
+    const parsed = parseBindingSetSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    if (parsed.action === "set") set += 1; else updated += 1;
+    channelNames.add(parsed.channel);
+    profileNames.add(parsed.profile);
+  }
+  for (const line of removedLines) {
+    const parsed = parseBindingRemovedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    removed += 1;
+    profileNames.add(parsed.profile);
+  }
+  for (const line of failedLines) {
+    const parsed = parseBindingFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    if (parsed.phase === "read") reads += 1;
+    else { resolves += 1; if (parsed.channel) channelNames.add(parsed.channel); }
+  }
+  const total = setLines.length + removedLines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Binding history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(set) + " set");
+  parts.push(String(updated) + " updated");
+  parts.push(String(removed) + " removed");
+  parts.push(String(failed) + " failed");
+  parts.push(String(reads) + " read");
+  parts.push(String(resolves) + " resolve");
+  parts.push(String(channelNames.size) + " distinct channels");
+  parts.push(String(profileNames.size) + " distinct profiles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
