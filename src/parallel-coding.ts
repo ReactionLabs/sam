@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { codeRoot, defaultCodeRunner, type CodeRunner } from "./code.js";
 import { proposeAction } from "./actions.js";
 import { gitRepoRoot, isTaskBranch } from "./git-work.js";
@@ -402,6 +402,240 @@ function surveyLine(survey: RepoSurvey): string {
   return "Repo survey at " + survey.baseSha.slice(0, 12) + (survey.branch ? " (branch " + survey.branch + ")" : "") + ": " + survey.fileCount + " files (" + exts + "); key files: " + (survey.keyFiles.join(", ") || "none") + "; scripts: " + (Object.keys(survey.scripts).join(", ") || "none") + ".";
 }
 
+// The ONE writers for the parallel lifecycle's activity
+// lines, so the history scorecard's parsers below can never
+// drift from the seams they count. The shapes are
+// byte-identical to what queueParallelJob and
+// drainParallelJobs wrote inline before these writers
+// existed; the blocked and failed writers own the 140-char
+// result cap and the review writer the 160-char blocker cap
+// the seams applied inline, and the slice writer owns the
+// 140-char error cap.
+export function parallelQueuedLedgerSummary(slices: number, concurrency: number, provider: string, title: string): string {
+  return "Queued parallel job (" + slices + " slices, concurrency " + concurrency + ", engine " + provider + "): " + title;
+}
+export function parallelStartedLedgerSummary(title: string, slices: number, concurrency: number): string {
+  return "Parallel job started: " + title + " (" + slices + " slices, concurrency " + concurrency + ")";
+}
+export function parallelDoneLedgerSummary(title: string, files: number, slices: number, durationMs: number): string {
+  return "Parallel job done: " + title + " (" + files + " files, " + slices + " slices, " + Math.round(durationMs / 100) / 10 + "s)";
+}
+export function parallelBlockedLedgerSummary(title: string, result: string): string {
+  return "Parallel job blocked: " + title + " - " + result.slice(0, 140);
+}
+export function parallelFailedLedgerSummary(title: string, result: string): string {
+  return "Parallel job failed: " + title + " - " + result.slice(0, 140);
+}
+export function parallelDiedLedgerSummary(title: string): string {
+  return "Parallel job died mid-run: " + title;
+}
+export function parallelSurveyLedgerSummary(survey: RepoSurvey): string {
+  return surveyLine(survey);
+}
+export function parallelSliceLedgerSummary(name: string, status: string, title: string, error: string | null): string {
+  return "Slice " + name + " " + status + " for parallel job: " + title + (error ? " - " + error.slice(0, 140) : "");
+}
+export function parallelMergeLedgerSummary(name: string, branch: string | null, conflicts: string[]): string {
+  return "Slice " + name + " conflicted merging into " + branch + (conflicts.length ? " (" + conflicts.join(", ") + ")" : "");
+}
+export function parallelVerifyLedgerSummary(n: number, title: string, buildOk: boolean | null, testOk: boolean | null): string {
+  return "Coordinator fix iteration " + n + " for parallel job: " + title + " - build " + (buildOk === null ? "n/a" : buildOk ? "pass" : "FAIL") + ", test " + (testOk === null ? "n/a" : testOk ? "pass" : "FAIL");
+}
+export function parallelReviewLedgerSummary(verdict: string, title: string, blockers: string): string {
+  return "Self-review " + verdict + " for parallel job: " + title + (blockers ? " - " + blockers.slice(0, 160) : "");
+}
+
+// The parallel history scorecard (2026-11-21, the
+// measured-proof series): every parallel job has ledgered
+// across ten classes since Program E landed - queued,
+// started, done, blocked, failed, survey, slice, merge,
+// verify, review - until now as inline concatenation at the
+// seams, with no ONE writer and no fold, so how many jobs
+// were ever queued, started, done, blocked, failed,
+// surveyed, sliced, conflicted, verified, or reviewed was
+// invisible in aggregate (parallelSummary reads only the
+// current store - a done, blocked, or failed row is
+// overwritten in place as the next job closes, and a
+// recovered stale job's died-mid-run failure leaves no
+// current-state trace). A blocked or failed job is the
+// signal - a job that did not land merged, verified, and
+// reviewed - so the verdict is attention only when any
+// blocked or failed was ever recorded or a line is
+// unparseable, else clear. This text folds the ten classes
+// to counts only, on ONE line: queued, started, done,
+// blocked, failed, survey, slice counts with the slice
+// done/failed/conflicted split, merge, verify, and review
+// counts, the distinct-title count as a number only
+// (counted from the queued lines, the one line each job
+// writes exactly once, so a slice error or review blocker
+// riding another line's title can never inflate it), and
+// the total. No stamp, no actor, no title, no provider
+// label, no slice name, no branch, no survey fact, no
+// reason, no review verdict, and no verbatim summary enters
+// the text - the summaries carry job titles, slice names,
+// and closing reasons, which are the owner's words, and the
+// fold consumes and never prints them. A pure read: it
+// creates nothing, queues nothing, and drains nothing -
+// the parallel seams themselves are untouched beyond riding
+// their ONE writers.
+export function parseParallelQueuedSummary(summary: string): { slices: number; concurrency: number; provider: string; title: string } | null {
+  const m = /^Queued parallel job \((\d+) slices, concurrency (\d+), engine (.+)\): (.+)$/.exec(summary);
+  if (!m || !m[3].trim() || !m[4].trim()) return null;
+  return { slices: Number(m[1]), concurrency: Number(m[2]), provider: m[3], title: m[4] };
+}
+export function parseParallelStartedSummary(summary: string): { title: string } | null {
+  const m = /^Parallel job started: (.+) \((\d+) slices, concurrency (\d+)\)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1] };
+}
+export function parseParallelDoneSummary(summary: string): { title: string; files: number } | null {
+  const m = /^Parallel job done: (.+) \((\d+) files, (\d+) slices, ([\d.]+)s\)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return { title: m[1], files: Number(m[2]) };
+}
+export function parseParallelBlockedSummary(summary: string): { title: string } | null {
+  const m = /^Parallel job blocked: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { title: m[1] };
+}
+export function parseParallelFailedSummary(summary: string): { title: string } | null {
+  const died = /^Parallel job died mid-run: (.+)$/.exec(summary);
+  if (died) {
+    if (!died[1].trim()) return null;
+    return { title: died[1] };
+  }
+  const m = /^Parallel job failed: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return { title: m[1] };
+}
+export function parseParallelSurveySummary(summary: string): { base: string; files: number } | null {
+  const m = /^Repo survey at ([0-9a-f]{12})(?: \(branch ([^)]+)\))?: (\d+) files \((.*)\); key files: (.*); scripts: (.+)\.$/.exec(summary);
+  if (!m) return null;
+  return { base: m[1], files: Number(m[3]) };
+}
+export function parseParallelSliceSummary(summary: string): { name: string; status: string; title: string } | null {
+  const m = /^Slice (\S+) (\S+) for parallel job: (.+)$/.exec(summary);
+  if (!m || !m[3].trim()) return null;
+  return { name: m[1], status: m[2], title: m[3] };
+}
+export function parseParallelMergeSummary(summary: string): { name: string; branch: string } | null {
+  const m = /^Slice (\S+) conflicted merging into (\S+)(?: \((.*)\))?$/.exec(summary);
+  if (!m) return null;
+  return { name: m[1], branch: m[2] };
+}
+export function parseParallelVerifySummary(summary: string): { n: number; title: string } | null {
+  const m = /^Coordinator fix iteration (\d+) for parallel job: (.+) - build (pass|FAIL|n\/a), test (pass|FAIL|n\/a)$/.exec(summary);
+  if (!m || !m[2].trim()) return null;
+  return { n: Number(m[1]), title: m[2] };
+}
+export function parseParallelReviewSummary(summary: string): { verdict: string; title: string } | null {
+  const m = /^Self-review (\S+) for parallel job: (.+)$/.exec(summary);
+  if (!m || !m[2].trim()) return null;
+  return { verdict: m[1], title: m[2] };
+}
+
+export function parallelHistoryScorecardText(root: string): string {
+  const queuedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-queued" });
+  const startedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-started" });
+  const doneLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-done" });
+  const blockedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-blocked" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-failed" });
+  const surveyLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-survey" });
+  const sliceLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-slice" });
+  const mergeLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-merge" });
+  const verifyLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-verify" });
+  const reviewLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "parallel-review" });
+  let queued = 0;
+  let started = 0;
+  let done = 0;
+  let blocked = 0;
+  let failed = 0;
+  let surveys = 0;
+  let slices = 0;
+  let slicesDone = 0;
+  let slicesFailed = 0;
+  let slicesConflicted = 0;
+  let merges = 0;
+  let verifies = 0;
+  let reviews = 0;
+  let unparseable = 0;
+  const titles = new Set<string>();
+  for (const line of queuedLines) {
+    const parsed = parseParallelQueuedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    queued += 1;
+    titles.add(parsed.title);
+  }
+  for (const line of startedLines) {
+    const parsed = parseParallelStartedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    started += 1;
+  }
+  for (const line of doneLines) {
+    const parsed = parseParallelDoneSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    done += 1;
+  }
+  for (const line of blockedLines) {
+    const parsed = parseParallelBlockedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    blocked += 1;
+  }
+  for (const line of failedLines) {
+    const parsed = parseParallelFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+  }
+  for (const line of surveyLines) {
+    const parsed = parseParallelSurveySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    surveys += 1;
+  }
+  for (const line of sliceLines) {
+    const parsed = parseParallelSliceSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    slices += 1;
+    if (parsed.status === "done") slicesDone += 1;
+    else if (parsed.status === "failed") slicesFailed += 1;
+    else if (parsed.status === "conflicted") slicesConflicted += 1;
+  }
+  for (const line of mergeLines) {
+    const parsed = parseParallelMergeSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    merges += 1;
+  }
+  for (const line of verifyLines) {
+    const parsed = parseParallelVerifySummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    verifies += 1;
+  }
+  for (const line of reviewLines) {
+    const parsed = parseParallelReviewSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    reviews += 1;
+  }
+  const total = queuedLines.length + startedLines.length + doneLines.length + blockedLines.length + failedLines.length + surveyLines.length + sliceLines.length + mergeLines.length + verifyLines.length + reviewLines.length;
+  const parts: string[] = [];
+  parts.push("Parallel history: " + (blocked > 0 || failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(queued) + " queued");
+  parts.push(String(started) + " started");
+  parts.push(String(done) + " done");
+  parts.push(String(blocked) + " blocked");
+  parts.push(String(failed) + " failed");
+  parts.push(String(surveys) + " surveys");
+  parts.push(String(slices) + " slices");
+  parts.push(String(slicesDone) + " slices done");
+  parts.push(String(slicesFailed) + " slices failed");
+  parts.push(String(slicesConflicted) + " slices conflicted");
+  parts.push(String(merges) + " merges");
+  parts.push(String(verifies) + " verifies");
+  parts.push(String(reviews) + " reviews");
+  parts.push(String(titles.size) + " distinct titles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // ---- queue ---------------------------------------------------------------
 
 export interface ParallelSliceSpec { name: string; task: string; files?: string[] }
@@ -458,7 +692,7 @@ export function queueParallelJob(root: string, input: QueueParallelInput, env: N
     merges: [], verifyIterations: [], verification: null, review: null, result: null, filesTouched: [],
   };
   insertParallelJob(root, job);
-  recordActivity(root, input.actor, "parallel-queued", "Queued parallel job (" + job.slices.length + " slices, concurrency " + job.concurrency + ", engine " + provider + "): " + job.title);
+  recordActivity(root, input.actor, "parallel-queued", parallelQueuedLedgerSummary(job.slices.length, job.concurrency, provider, job.title));
   return job;
 }
 
@@ -693,7 +927,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       if (j.status === "running" && j.startedAt && now - Date.parse(j.startedAt) > STALE_RUNNING_MS) {
         updateParallelJob(root, j.id, { status: "failed", finishedAt: new Date().toISOString(), result: "Runner stopped mid-job; marked failed by the next drain. Slice branches, if any were created, stay for inspection." });
         recovered.push(j.id);
-        recordActivity(root, j.actor, "parallel-failed", "Parallel job died mid-run: " + j.title);
+        recordActivity(root, j.actor, "parallel-failed", parallelDiedLedgerSummary(j.title));
       }
     }
     const queued = listParallelJobs(root).filter(j => j.status === "queued").slice(0, 1);
@@ -702,7 +936,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       if (!found || found.status !== "queued") continue;
       const job = updateParallelJob(root, queuedJob.id, { status: "running", startedAt: new Date().toISOString() }) ?? found;
       const jobStart = Date.now();
-      recordActivity(root, job.actor, "parallel-started", "Parallel job started: " + job.title + " (" + job.slices.length + " slices, concurrency " + job.concurrency + ")");
+      recordActivity(root, job.actor, "parallel-started", parallelStartedLedgerSummary(job.title, job.slices.length, job.concurrency));
       const repo = codeRoot(root) ? gitRepoRoot(root) : null;
       const close = (status: ParallelStatus, result: string) => {
         job.status = status;
@@ -729,9 +963,9 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
         }
         saveParallelJob(root, job);
         postToChat(root, job.chatId, parallelSummaryText(job));
-        if (status === "done") { ran.push(job.id); recordActivity(root, job.actor, "parallel-done", "Parallel job done: " + job.title + " (" + job.filesTouched.length + " files, " + job.slices.length + " slices, " + Math.round((job.durationMs ?? 0) / 100) / 10 + "s)"); }
-        else if (status === "blocked") { blocked.push(job.id); recordActivity(root, job.actor, "parallel-blocked", "Parallel job blocked: " + job.title + " - " + result.slice(0, 140)); }
-        else { failed.push(job.id); recordActivity(root, job.actor, "parallel-failed", "Parallel job failed: " + job.title + " - " + result.slice(0, 140)); }
+        if (status === "done") { ran.push(job.id); recordActivity(root, job.actor, "parallel-done", parallelDoneLedgerSummary(job.title, job.filesTouched.length, job.slices.length, job.durationMs ?? 0)); }
+        else if (status === "blocked") { blocked.push(job.id); recordActivity(root, job.actor, "parallel-blocked", parallelBlockedLedgerSummary(job.title, result)); }
+        else { failed.push(job.id); recordActivity(root, job.actor, "parallel-failed", parallelFailedLedgerSummary(job.title, result)); }
       };
       if (!repo) { close("blocked", "The designated code root is not a git repository rooted at itself - a parallel job has no tree to branch. Designate a git code root and re-queue."); continue; }
       const provider = job.provider ?? selectedEngineProvider(root);
@@ -747,12 +981,12 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
       job.survey = survey;
       job.baseSha = survey.baseSha;
       saveParallelJob(root, job);
-      recordActivity(root, job.actor, "parallel-survey", surveyLine(survey));
+      recordActivity(root, job.actor, "parallel-survey", parallelSurveyLedgerSummary(survey));
       // FAN-OUT: slices run concurrently, bounded by the job's cap.
       await runPool(job.slices, job.concurrency, async slice => {
         await runSlice(root, repo, job, slice, deps, survey);
         saveParallelJob(root, job);
-        recordActivity(root, job.actor, "parallel-slice", "Slice " + slice.name + " " + slice.status + " for parallel job: " + job.title + (slice.error ? " - " + slice.error.slice(0, 140) : ""));
+        recordActivity(root, job.actor, "parallel-slice", parallelSliceLedgerSummary(slice.name, slice.status, job.title, slice.error));
       });
       saveParallelJob(root, job);
       const doneSlices = job.slices.filter(s => s.status === "done");
@@ -781,7 +1015,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
         const detail = conflicts.length ? " in: " + conflicts.join(", ") : (merge.out ? ": " + merge.out.replace(/\s+/g, " ").slice(0, 180) : "");
         slice.error = "Merge conflict" + detail + " - the slice's work stays on " + slice.branch + " for the owner to resolve.";
         job.merges.push({ slice: slice.name, ok: false, conflicts });
-        recordActivity(root, job.actor, "parallel-merge", "Slice " + slice.name + " conflicted merging into " + job.branch + (conflicts.length ? " (" + conflicts.join(", ") + ")" : ""));
+        recordActivity(root, job.actor, "parallel-merge", parallelMergeLedgerSummary(slice.name, job.branch, conflicts));
       }
       saveParallelJob(root, job);
       const conflictedSlices = job.slices.filter(s => s.status === "conflicted");
@@ -813,7 +1047,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
           }
           battery = await runVerify(mergedTree, verifyRunner);
           job.verifyIterations.push({ n, buildOk: battery.buildOk, testOk: battery.testOk, output: battery.output.slice(-500) });
-          recordActivity(root, job.actor, "parallel-verify", "Coordinator fix iteration " + n + " for parallel job: " + job.title + " - build " + (battery.buildOk === null ? "n/a" : battery.buildOk ? "pass" : "FAIL") + ", test " + (battery.testOk === null ? "n/a" : battery.testOk ? "pass" : "FAIL"));
+          recordActivity(root, job.actor, "parallel-verify", parallelVerifyLedgerSummary(n, job.title, battery.buildOk, battery.testOk));
           if (battery.buildOk !== false && battery.testOk !== false) break;
         }
         job.verification = "build: " + (battery.buildOk === null ? "n/a" : battery.buildOk ? "pass" : "FAIL") + ", test: " + (battery.testOk === null ? "n/a" : battery.testOk ? "pass" : "FAIL") + " (after " + job.verifyIterations.length + " fix iteration(s))";
@@ -854,7 +1088,7 @@ export async function drainParallelJobs(root: string, deps: ParallelDrainDeps = 
           const record = await deps.reviewDiff(job.spec, inputs);
           job.review = record.verdict + ": " + record.summary;
           const blockers = record.findings.filter(f => f.severity === "BLOCKER").map(f => (f.patternId ? "[" + f.patternId + "] " : "") + f.detail).join("; ");
-          recordActivity(root, job.actor, "parallel-review", "Self-review " + record.verdict + " for parallel job: " + job.title + (blockers ? " - " + blockers.slice(0, 160) : ""));
+          recordActivity(root, job.actor, "parallel-review", parallelReviewLedgerSummary(record.verdict, job.title, blockers));
           if (record.verdict !== "PASS") {
             close("blocked", "The fresh-context reviewer BLOCKED the merged diff: " + record.summary + (blockers ? " Blockers: " + blockers : "") + " The merged work stays on " + job.branch + "; a new job can take the findings as its spec.");
             continue;
