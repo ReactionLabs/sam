@@ -209,9 +209,10 @@ export function codingReviewLedgerSummary(verdict: string, title: string, blocke
 }
 
 // The coding-task scorecard (2026-11-19, the measured-proof
-// series): the C3 coding loop ledgers its whole lifecycle
-// across six activity kinds - queued, started, done,
-// blocked, failed, reviewed - carrying the task's title (the
+// series; the branch stage folded in 2026-11-20): the C3
+// coding loop ledgers its whole lifecycle
+// across seven activity kinds - queued, started, branched,
+// done, blocked, failed, reviewed - carrying the task's title (the
 // head of its spec) on every line and, on the failed and
 // review lines, free text (the failure reason, the
 // reviewer's blocker findings). No daily surface ever
@@ -239,6 +240,7 @@ export function codingReviewLedgerSummary(verdict: string, title: string, blocke
 // running coding work stays the loop's job.
 export type CodingSummaryParse =
   | { stage: "queued" | "started"; title: string }
+  | { stage: "branch"; branch: string }
   | { stage: "done"; title: string; outcome: "verified" | "no-changes"; files: number; iterations: number }
   | { stage: "blocked"; title: string; bucket: "git" | "review-block" | "review-unavailable" | "uncommitted" | "state" | "other" }
   | { stage: "failed"; title: string }
@@ -252,6 +254,10 @@ export function parseCodingSummary(kind: string, summary: string): CodingSummary
   if (kind === "coding-started") {
     const m = /^Coding task started: (.+)$/.exec(summary);
     return m ? { stage: "started", title: m[1] } : null;
+  }
+  if (kind === "coding-branch") {
+    const m = /^Coding branch (\S+) ready at ([0-9a-f]{7,40})$/.exec(summary);
+    return m ? { stage: "branch", branch: m[1] } : null;
   }
   if (kind === "coding-done") {
     const v = /^Coding task done and verified: (.+) \((\d+) file\(s\), (\d+) iteration\(s\)\)$/.exec(summary);
@@ -288,12 +294,14 @@ export function codingScorecardText(root: string): string {
   const stages: [string, string][] = [
     ["coding-queued", "Queued"],
     ["coding-started", "Started"],
+    ["coding-branch", "Branched"],
     ["coding-done", "Done"],
     ["coding-blocked", "Blocked"],
     ["coding-failed", "Failed"],
     ["coding-review", "Reviewed"],
   ];
   const tasks = new Set<string>();
+  const branches = new Set<string>();
   let failed = 0;
   let blocked = 0;
   let unparseable = 0;
@@ -310,6 +318,7 @@ export function codingScorecardText(root: string): string {
       const parsed = parseCodingSummary(kind, line.summary);
       if (!parsed) { unparseable += 1; continue; }
       if (parsed.stage === "queued") tasks.add(parsed.title);
+      if (parsed.stage === "branch") branches.add(parsed.branch);
       if (parsed.stage === "done" && parsed.outcome === "verified") { doneVerified += 1; verifiedFiles += parsed.files; verifiedIterations += parsed.iterations; }
       if (parsed.stage === "done" && parsed.outcome === "no-changes") doneNoChanges += 1;
       if (parsed.stage === "blocked") blockedBuckets[parsed.bucket] += 1;
@@ -336,7 +345,8 @@ export function codingScorecardText(root: string): string {
   out.push("Reviews block: " + String(reviewBuckets.block));
   out.push("Reviews other: " + String(reviewBuckets.other));
   out.push("Distinct tasks: " + String(tasks.size));
-  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never queues or drains a task, never prints a title, a reason, or a finding; a blocked or failed task, a malformed line, or a mix shift is the news");
+  out.push("Distinct branches: " + String(branches.size));
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never queues or drains a task, never prints a title, a reason, a finding, a branch, or a head; a blocked or failed task, a malformed line, or a mix shift is the news");
   return out.join("\n");
 }
 

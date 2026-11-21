@@ -127,6 +127,16 @@ export function listTaskBranches(root: string): { repo: string | null; current: 
   return { repo, current: currentBranch(repo), branches: listed.ok ? listed.out.split("\n").map(s => s.trim()).filter(Boolean) : [] };
 }
 
+/** The ONE writer for the coding-branch ledger line: the
+ *  branch name and the head it was prepared at (the caller
+ *  passes the head already trimmed to 12 chars, exactly as
+ *  the historical inline shape wrote it). The branch name
+ *  and the head are locator data: the coding scorecard
+ *  counts them and never prints either. */
+export function codingBranchLedgerSummary(branch: string, head: string): string {
+  return "Coding branch " + branch + " ready at " + head;
+}
+
 /** Prepare the task's branch before its first iteration. Creating
  *  or resuming sam/<task> is the only mutation; a dirty tree or an
  *  unborn HEAD refuses (mode "refused", the reason in `error`), and
@@ -146,7 +156,7 @@ export function prepareTaskBranch(root: string, task: { id: string; title: strin
       : gitSync(repo, ["checkout", "-b", branch]);
     if (!step.ok) return { mode: "refused", branch, baseSha: null, commits: [], pending: [], error: "Could not check out the task branch " + branch + ": " + step.out.slice(0, 200) };
   }
-  recordActivity(root, "sam", "coding-branch", "Coding branch " + branch + " ready at " + head.out.trim().slice(0, 12));
+  recordActivity(root, "sam", "coding-branch", codingBranchLedgerSummary(branch, head.out.trim().slice(0, 12)));
   return { mode: "branch", branch, baseSha: head.out.trim(), commits: [], pending: [], error: null };
 }
 
