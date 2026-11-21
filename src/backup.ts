@@ -269,11 +269,11 @@ export function runBackupDrill(root: string, explicitDest?: string): DrillReport
   const dest = backupDrillDest(root, explicitDest);
   const newest = listBackups(dest).at(-1);
   if (!newest) {
-    recordActivity(root, "sam", "backup-drill", "Restore drill recorded: no state backup archive found in " + dest);
+    recordActivity(root, "sam", "backup-drill", backupDrillNoArchiveLedgerSummary(dest));
     return null;
   }
   const report = runRestoreDrill(newest.path);
-  recordActivity(root, "sam", "backup-drill", "Restore drill recorded: " + (report.ok ? "OK" : "FAILED") + ", " + String(report.files) + " files, " + String(report.databases.length) + " databases, boot counts " + String(report.chats) + " chats / " + String(report.missions) + " missions / " + String(report.memories) + " memories / " + String(report.preferences) + " preferences, " + String(report.errors.length) + " error(s)");
+  recordActivity(root, "sam", "backup-drill", backupDrillLedgerSummary(report));
   return report;
 }
 
@@ -397,6 +397,94 @@ export function backupHistoryScorecardText(root: string): string {
   parts.push(String(restores) + " restores");
   parts.push("latest " + String(latest?.files ?? 0) + " files / " + String(latest?.databases ?? 0) + " databases / " + String(latest?.bytes ?? 0) + " bytes");
   parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
+// The ONE writers for the backup-drill activity lines, so the
+// history scorecard's parser below can never drift from the
+// seam it counts. Each shape is byte-identical to what
+// runBackupDrill wrote inline before these writers existed.
+export function backupDrillLedgerSummary(report: DrillReport): string {
+  return "Restore drill recorded: " + (report.ok ? "OK" : "FAILED") + ", " + String(report.files) + " files, " + String(report.databases.length) + " databases, boot counts " + String(report.chats) + " chats / " + String(report.missions) + " missions / " + String(report.memories) + " memories / " + String(report.preferences) + " preferences, " + String(report.errors.length) + " error(s)";
+}
+
+export function backupDrillNoArchiveLedgerSummary(dest: string): string {
+  return "Restore drill recorded: no state backup archive found in " + dest;
+}
+
+// The backup drill history scorecard (2026-11-20, the
+// measured-proof series): every recorded restore drill has
+// ledgered as a backup-drill line since the drill landed -
+// until now as inline concatenation at the seam, with no ONE
+// writer and no fold, so how many drills ever recorded,
+// whether any drill ever FAILED, and how the drilled state's
+// boot counts trend were invisible in aggregate (the drill's
+// own text proves only the NEWEST archive, and the backup
+// history scorecard above folds backup / backup-failed /
+// restore but not backup-drill). A failed drill is the
+// restore path naming itself broken before restore day, so
+// the verdict is attention only when a drill failed, any
+// error was ever summed, a run found no archive to drill, or
+// a line is unparseable, else clear. This text folds the
+// class to counts only, on ONE line: runs, ok / failed /
+// no-archive counts, summed errors, the latest recorded
+// drill's files / databases and boot counts, and the total.
+// No stamp, no actor, no archive name, no destination path,
+// no error text, and no verbatim summary enters the text.
+// A pure read: it creates nothing, verifies nothing, drills
+// nothing, and restores nothing - the drill seam itself is
+// untouched beyond riding its ONE writers.
+export type BackupDrillSummary =
+  | { state: "ok" | "failed"; files: number; databases: number; chats: number; missions: number; memories: number; preferences: number; errors: number }
+  | { state: "no-archive" };
+
+export function parseBackupDrillSummary(summary: string): BackupDrillSummary | null {
+  const m = /^Restore drill recorded: (OK|FAILED), (\d+) files, (\d+) databases, boot counts (\d+) chats \/ (\d+) missions \/ (\d+) memories \/ (\d+) preferences, (\d+) error\(s\)$/.exec(summary);
+  if (m) {
+    return {
+      state: m[1] === "OK" ? "ok" : "failed",
+      files: Number(m[2]),
+      databases: Number(m[3]),
+      chats: Number(m[4]),
+      missions: Number(m[5]),
+      memories: Number(m[6]),
+      preferences: Number(m[7]),
+      errors: Number(m[8]),
+    };
+  }
+  if (/^Restore drill recorded: no state backup archive found in .+$/.test(summary)) return { state: "no-archive" };
+  return null;
+}
+
+export function backupDrillHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "backup-drill" });
+  let runs = 0;
+  let ok = 0;
+  let failed = 0;
+  let noArchive = 0;
+  let errors = 0;
+  let unparseable = 0;
+  let latest: { files: number; databases: number; chats: number; missions: number; memories: number; preferences: number } | null = null;
+  for (const line of lines) {
+    const parsed = parseBackupDrillSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    if (parsed.state === "no-archive") { noArchive += 1; continue; }
+    if (parsed.state === "ok") ok += 1; else failed += 1;
+    errors += parsed.errors;
+    latest = parsed;
+  }
+  const parts: string[] = [];
+  parts.push("Backup drill history: " + (failed > 0 || noArchive > 0 || errors > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(ok) + " ok");
+  parts.push(String(failed) + " failed");
+  parts.push(String(noArchive) + " no-archive");
+  parts.push(String(errors) + " errors");
+  parts.push("latest " + String(latest?.files ?? 0) + " files / " + String(latest?.databases ?? 0) + " databases");
+  parts.push("latest boot " + String(latest?.chats ?? 0) + " chats / " + String(latest?.missions ?? 0) + " missions / " + String(latest?.memories ?? 0) + " memories / " + String(latest?.preferences ?? 0) + " preferences");
+  parts.push(String(lines.length) + " total");
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
