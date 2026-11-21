@@ -4,7 +4,7 @@ import { heartbeatFactSignatureString, heartbeatOutputHash, heartbeatOutputsEqui
 import { assessDelivery } from "./worthiness.js";
 import { markAttemptFailed, markDelivered, markSuppressed, queueDelivery } from "./delivery-outbox.js";
 import { channelForChat, errorReason } from "./telegram.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 // SECOND ANSWERS revisit engine (Dip ruling 2026-11-09 17:51: SAM
 // "should be able to sit there and reason and answer you and come
@@ -167,6 +167,37 @@ export function loopFailedSummary(question: string, error: unknown): string {
   return "Open loop re-check failed, will look again later: " + question.slice(0, 120) + " - " + errorReason(error).slice(0, 120);
 }
 
+// The loop lifecycle's ONE ledger writers (2026-11-21, the
+// measured-proof series): every other act of the SECOND
+// ANSWERS lifecycle ledgered as inline concatenation with no
+// ONE writer until this fold - the open seam in own-tools.ts,
+// and the closed / resolved / updated seams below - so the
+// shapes lived in four places and any drift between them was
+// invisible. The shapes are byte-identical to what those
+// seams wrote inline before these writers existed. (The
+// failed line already rides its ONE writer, loopFailedSummary
+// above.) The closed writer's reason is a fixed two-class
+// vocabulary - the chat the loop belonged to no longer
+// exists, or the chat was a visitor's - because those are
+// the only two closes the engine performs itself; an owner's
+// own close through the loops CLI writes no line here.
+export type LoopClosedReason = "chat-gone" | "visitor";
+
+export function loopOpenLedgerSummary(question: string): string {
+  return "Opened loop: " + question.slice(0, 120);
+}
+export function loopClosedLedgerSummary(reason: LoopClosedReason, question: string): string {
+  return reason === "visitor"
+    ? "Open loop closed (visitor chat): " + question.slice(0, 140)
+    : "Open loop closed (its chat no longer exists): " + question.slice(0, 140);
+}
+export function loopResolvedLedgerSummary(question: string, text: string): string {
+  return "Open loop resolved: " + question.slice(0, 120) + " - " + text.replace(/\s+/g, " ").slice(0, 140);
+}
+export function loopUpdatedLedgerSummary(posted: boolean, question: string, text: string): string {
+  return "Open loop updated" + (posted ? " in its chat" : "") + ": " + question.slice(0, 120) + " - " + text.replace(/\s+/g, " ").slice(0, 140);
+}
+
 const revisiting = new Set<string>();
 
 export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Promise<LoopRevisitResult> {
@@ -188,12 +219,12 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
         try { chat = db.get(homeChat); } finally { db.close(); }
         if (!chat) {
           closeLoop(root, loop.id, "Closed by the revisit engine: the chat this loop belonged to no longer exists.");
-          recordActivity(root, loop.profile, "loop-closed", "Open loop closed (its chat no longer exists): " + loop.question.slice(0, 140));
+          recordActivity(root, loop.profile, "loop-closed", loopClosedLedgerSummary("chat-gone", loop.question));
           continue;
         }
         if (chat.visitor === 1) {
           closeLoop(root, loop.id, "Closed by the revisit engine: visitor chats never receive proactive updates.");
-          recordActivity(root, loop.profile, "loop-closed", "Open loop closed (visitor chat): " + loop.question.slice(0, 140));
+          recordActivity(root, loop.profile, "loop-closed", loopClosedLedgerSummary("visitor", loop.question));
           continue;
         }
       }
@@ -237,13 +268,144 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
       if (verdict === "resolved") {
         closeLoop(root, loop.id, text);
         result.resolved.push(loop.id);
-        recordActivity(root, loop.profile, "loop-resolved", "Open loop resolved: " + loop.question.slice(0, 120) + " - " + text.replace(/\s+/g, " ").slice(0, 140));
+        recordActivity(root, loop.profile, "loop-resolved", loopResolvedLedgerSummary(loop.question, text));
       } else {
         updateLoopAnswer(root, loop.id, text);
         result.changed.push(loop.id);
-        recordActivity(root, loop.profile, "loop-updated", "Open loop updated" + (posted ? " in its chat" : "") + ": " + loop.question.slice(0, 120) + " - " + text.replace(/\s+/g, " ").slice(0, 140));
+        recordActivity(root, loop.profile, "loop-updated", loopUpdatedLedgerSummary(posted, loop.question, text));
       }
     }
     return result;
   } finally { revisiting.delete(root); }
+}
+
+// The loop history scorecard (2026-11-21, the measured-proof
+// series): every act of the SECOND ANSWERS lifecycle ledgers
+// as a loop-open / loop-updated / loop-resolved / loop-closed
+// / loop-failed line since the revisit engine landed - the
+// open, closed, resolved, and updated lines as inline
+// concatenation with no ONE writer until this fold, and with
+// no fold, so how many loops were ever opened, how their
+// revisits ended, and across how many profiles was invisible
+// in aggregate (listLoops reads only the current store - a
+// loop that opened, updated, and resolved leaves no surface
+// remembering the arc). A failed re-check is the signal of
+// the family - the revisit reschedules and stays open by
+// design, so the failure is visible only in the ledger - so
+// the verdict is attention only when any loop-failed was
+// ever recorded or a line is unparseable, else clear. This
+// text folds the five classes to counts only, on ONE line:
+// the opened, updated (with the posted-in-chat split),
+// resolved, and closed (with the chat-gone / visitor split)
+// counts, the failed count, the distinct-profile count as a
+// number only, and the total. No stamp, no actor, no
+// question, no answer, no reason, and no verbatim summary
+// enters the text - the summaries carry the owner's own
+// questions and SAM's answers, which the fold consumes and
+// never prints. The parsers validate each line's fixed
+// shape only: the closed reason and the updated posted flag
+// are the fixed vocabulary, and the question and answer
+// slices are free text checked for presence (a resolved or
+// updated line must carry its " - " separator and a
+// non-empty answer slice, exactly as its writer composes
+// it), so a line whose shape drifted counts as unparseable
+// rather than surfacing as free text. The distinct-profile
+// count rides the lines' actors: on every seam of this
+// family the actor IS the profile (the open seam ledgers
+// under the acting profile, the revisit seams under the
+// loop's own profile), so the count is a count of profiles
+// whose loops ever moved, never a name. A pure read: it
+// creates nothing, opens nothing, revisits nothing, and
+// closes nothing - the loop seams themselves are untouched
+// beyond riding their ONE writers.
+export function parseLoopOpenSummary(summary: string): Record<string, never> | null {
+  const m = /^Opened loop: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return {};
+}
+export function parseLoopClosedSummary(summary: string): { reason: LoopClosedReason } | null {
+  const gone = /^Open loop closed \(its chat no longer exists\): (.+)$/.exec(summary);
+  if (gone) return gone[1].trim() ? { reason: "chat-gone" } : null;
+  const visitor = /^Open loop closed \(visitor chat\): (.+)$/.exec(summary);
+  if (visitor) return visitor[1].trim() ? { reason: "visitor" } : null;
+  return null;
+}
+export function parseLoopFailedSummary(summary: string): Record<string, never> | null {
+  const m = /^Open loop re-check failed, will look again later: (.+)$/.exec(summary);
+  if (!m || !m[1].trim()) return null;
+  return {};
+}
+export function parseLoopResolvedSummary(summary: string): Record<string, never> | null {
+  const m = /^Open loop resolved: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[1].trim() || !m[2].trim()) return null;
+  return {};
+}
+export function parseLoopUpdatedSummary(summary: string): { posted: boolean } | null {
+  const m = /^Open loop updated( in its chat)?: (.+) - (.+)$/.exec(summary);
+  if (!m || !m[2].trim() || !m[3].trim()) return null;
+  return { posted: Boolean(m[1]) };
+}
+export function loopRevisitHistoryScorecardText(root: string): string {
+  const openLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-open" });
+  const updatedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-updated" });
+  const resolvedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-resolved" });
+  const closedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-closed" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "loop-failed" });
+  let opened = 0;
+  let updated = 0;
+  let posted = 0;
+  let resolved = 0;
+  let closed = 0;
+  let chatGone = 0;
+  let visitor = 0;
+  let failed = 0;
+  let unparseable = 0;
+  const profileSet = new Set<string>();
+  for (const line of openLines) {
+    const parsed = parseLoopOpenSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    opened += 1;
+    profileSet.add(line.actor);
+  }
+  for (const line of updatedLines) {
+    const parsed = parseLoopUpdatedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    updated += 1;
+    if (parsed.posted) posted += 1;
+    profileSet.add(line.actor);
+  }
+  for (const line of resolvedLines) {
+    const parsed = parseLoopResolvedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    resolved += 1;
+    profileSet.add(line.actor);
+  }
+  for (const line of closedLines) {
+    const parsed = parseLoopClosedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    closed += 1;
+    if (parsed.reason === "visitor") visitor += 1; else chatGone += 1;
+    profileSet.add(line.actor);
+  }
+  for (const line of failedLines) {
+    const parsed = parseLoopFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failed += 1;
+    profileSet.add(line.actor);
+  }
+  const total = openLines.length + updatedLines.length + resolvedLines.length + closedLines.length + failedLines.length;
+  const parts: string[] = [];
+  parts.push("Loop history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(opened) + " opened");
+  parts.push(String(updated) + " updated");
+  parts.push(String(posted) + " posted");
+  parts.push(String(resolved) + " resolved");
+  parts.push(String(closed) + " closed");
+  parts.push(String(chatGone) + " chat-gone");
+  parts.push(String(visitor) + " visitor");
+  parts.push(String(failed) + " failed");
+  parts.push(String(profileSet.size) + " distinct profiles");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }

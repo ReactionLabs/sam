@@ -18,6 +18,7 @@ import { patchNote, saveNote } from "./notes.js";
 import { proposeAuthoredSkill } from "./skill-author.js";
 import { ChatStore } from "./chats.js";
 import { openLoop } from "./loops.js";
+import { loopOpenLedgerSummary } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, createManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
 import { organizeChats } from "./chat-organize.js";
 import { searchSkillRegistry } from "./skill-registry.js";
@@ -539,7 +540,7 @@ function executeOwnToolInner(root:string,actor:string,name:string,args:Record<st
    try{
     if(chatId){const cs=new ChatStore(root);try{if(cs.isVisitor(chatId))return {error:"Visitors cannot open loops: a visitor is not the owner"};}finally{cs.close();}}
     const loop=openLoop(root,{profile:actor,chatId:chatId??null,question:String(args.question??""),answer:String(args.answer??""),watchFor:String(args.watchFor??""),dueInHours:typeof args.dueInHours==="number"?args.dueInHours:undefined});
-    recordActivity(root,actor,"loop-open","Opened loop: "+loop.question.slice(0,120));
+    recordActivity(root,actor,"loop-open",loopOpenLedgerSummary(loop.question));
     return {status:"open",id:loop.id,dueAt:loop.dueAt,note:"This loop will greet the owner at the next session start under 'Where things stand'."};
    }catch(e){return {error:chatToolFailureError(e)};}
   }
