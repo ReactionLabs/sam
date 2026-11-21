@@ -6,7 +6,7 @@ import { buildStatusPayload, dashboardBuildId } from "./status.js";
 import { runInspectorForChat, panelMemory, panelFiles } from "./run-inspector.js";
 import { runChatTurn } from "./agent-turn.js";
 import { sourceFromApiBody } from "./message-provenance.js";
-import { PreferenceStore } from "./preferences.js";
+import { PreferenceStore, lawRevokedLedgerSummary } from "./preferences.js";
 import { minis } from "./minis.js";
 import { doorForKey, doorHomeLink, doorModeForKey, miniDoorPage, peekSessionChat, sessionChat, rotateSessionChat, RateLimiter } from "./mini-door.js";
 import { DoorAbuseGuard, screenDoorMessage } from "./door-guard.js";
@@ -74,7 +74,7 @@ export function revokeLaw(root:string,id:string):Preference|null{
     const pref=store.get(id);
     if(!pref||pref.status==="revoked")return null;
     if(!store.revoke(id))return null;
-    recordActivity(root,"owner","law-revoked",pref.profile+": "+pref.statement);
+    recordActivity(root,"owner","law-revoked",lawRevokedLedgerSummary(pref.profile,pref.statement));
     return store.get(id)??null;
   }finally{store.close();}
 }

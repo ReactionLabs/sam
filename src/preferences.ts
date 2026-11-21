@@ -3,7 +3,7 @@ import { openDatabase } from "./sqlite.js";
 import { randomUUID, createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Preference memory: what the person likes, captured from their own chats with a
@@ -189,4 +189,53 @@ export function lawPromptBlock(laws:Preference[]):string{
     return head+"\n"+[...included,marker(omitted)].join("\n");
   }
   return head+"\n"+included.join("\n");
+}
+
+// The law-revoked ledger shape has ONE writer here (the
+// measured-proof series, 2026-11-21): the line lived as inline
+// concatenation at the dashboard revokeLaw seam, and any drift
+// was invisible. The shape is byte-identical to what that seam
+// wrote inline before this writer existed.
+export function lawRevokedLedgerSummary(profile: string, statement: string): string {
+  return profile + ": " + statement;
+}
+
+// Law revocation history fold (2026-11-21): a dashboard
+// revocation is an act - the preference store shows only each
+// record's CURRENT status, so a profile whose law was revoked
+// and later re-stated reads as ordinary live law and the
+// revocation survives nowhere except this ledger line. The
+// class counts dashboard-door revocations only (the CLI
+// `preferences revoke` verb rides the store directly and
+// ledgers nothing; its revocations stay visible as revoked
+// records in the store). This family has no failure class of
+// its own, so the verdict is attention only when a line is
+// unparseable. The parser validates the profile against the
+// store's own profile shape and requires a non-empty
+// statement; the statement is the owner's own words - it is
+// consumed by the parse and NEVER printed by the fold.
+export function parseLawRevokedSummary(summary: string): { profile: string } | null {
+  const m = /^([a-z][a-z0-9._-]{0,63}): ([\s\S]*\S[\s\S]*)$/.exec(summary);
+  if (!m) return null;
+  return { profile: m[1] as string };
+}
+
+export function lawRevokedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "law-revoked" });
+  let revoked = 0;
+  let unparseable = 0;
+  const profileSet = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseLawRevokedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    revoked += 1;
+    profileSet.add(parsed.profile);
+  }
+  const parts: string[] = [];
+  parts.push("Law revoked history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(revoked) + " revoked");
+  parts.push(String(profileSet.size) + " distinct profiles");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }

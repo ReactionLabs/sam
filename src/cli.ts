@@ -18,7 +18,7 @@ import { verificationGate, verificationStatus } from "./verification.js";
 import { defaultCodingReviewer, defaultDiffReviewer, goldfishStatus, runGoldfishReview, sessionGate, verifyScorecardText, type GoldfishChangeInput } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
-import { PreferenceStore } from "./preferences.js";
+import { PreferenceStore, lawRevokedHistoryScorecardText } from "./preferences.js";
 import { heartbeatJobs, addHeartbeatJob, addScheduledJob, jobNextRun, removeHeartbeatJob, runHeartbeat, deliverToChannel, heartbeatFailureScorecardText, heartbeatDeliveryScorecardText, deliveryFailureHistoryScorecardText } from "./heartbeat.js";
 import { describeSchedule, scriptCommandNames, SCRIPT_JOB_COMMANDS } from "./schedule.js";
 import { deliverySummary, outboxScorecardText, readDeliveries } from "./delivery-outbox.js";
@@ -337,6 +337,7 @@ const prefCmd=program.command("preferences").description("Preference memory and 
 prefCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.list(o.profile));}finally{store.close();}});
 prefCmd.command("add").argument("<profile>").argument("<statement>").action((profile:string,statement:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output(store.note(profile,statement,"rule","operator"));}finally{store.close();}});
 prefCmd.command("revoke").argument("<id>").action((id:string)=>{const store=new PreferenceStore(program.opts().workspace);try{output({revoked:store.revoke(id)});}finally{store.close();}});
+prefCmd.command("revoked-history").description("Law revocation history as plain text with no clock reading - verdict, the revocation count, the distinct-profile count as a number only, and the total (never a stamp, a profile, a statement, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a malformed line or a mix shift is the news (this is the sam-law-revoked-history script job's stdout; a pure read over the same activity ledger the dashboard revoke seam ledgers: creates nothing, revokes nothing; exits 0 always, the verdict lives in the text)").action(()=>output(lawRevokedHistoryScorecardText(program.opts().workspace)));
 const compCmd=program.command("compaction").description("Context compression (Plan Phase A item 2): long chats fold their older turns into a stored summary - a memory flush is written first, exchanges are never split, raw turns are never deleted");
 compCmd.command("list").description("Every chat that has compacted, newest first, with how many messages its summary covers").action(()=>output(listCompactions(program.opts().workspace)));
 compCmd.command("show").argument("<chat>").description("One chat's compaction record (covered count + summary), or compacted:false").action((chat:string)=>{const found=getCompaction(program.opts().workspace,chat);output(found??{chat_id:chat,compacted:false});});
