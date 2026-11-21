@@ -8,7 +8,7 @@ import { parseSamConfig } from "./config.js";
 import { modelEndpoint, modelApiKey, readSetupRecord, defaultCompleter, type Completer } from "./config-wizard.js";
 import { engineConnectStatus, type EngineConnection } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { listProviders, modelKeyEnvName, readProviderKey, resolveTurnConnection, type ConfiguredProvider } from "./providers.js";
 import { codexAuthState, type CodexAuthState } from "./codex-auth.js";
@@ -411,6 +411,94 @@ export async function probeAuth(root: string, env: NodeJS.ProcessEnv = process.e
   });
   saveProbeStore(root, { at, results });
   const bad = results.filter(r => r.bucket !== "ok");
-  recordActivity(root, "owner", "auth-probe", "Auth probe: " + (results.length - bad.length) + "/" + results.length + " targets ok (" + calls + " model call(s))" + (bad.length ? "; not ok: " + bad.map(r => r.target + "=" + r.bucket).join(", ") : ""));
+  recordActivity(root, "owner", "auth-probe", authProbeLedgerSummary(results.length - bad.length, results.length, calls, bad));
   return { at, results, ok: bad.length === 0, calls };
+}
+
+// The ONE writer for the auth probe's activity line, so the
+// history scorecard's parser below can never drift from the
+// seam it counts. The shape is byte-identical to what
+// probeAuth wrote inline before this writer existed.
+export function authProbeLedgerSummary(ok: number, total: number, calls: number, bad: ReadonlyArray<{ target: string; bucket: string }>): string {
+  return "Auth probe: " + String(ok) + "/" + String(total) + " targets ok (" + String(calls) + " model call(s))" + (bad.length ? "; not ok: " + bad.map(r => r.target + "=" + r.bucket).join(", ") : "");
+}
+
+// The auth probe history scorecard (2026-11-21, the
+// measured-proof series): every completed auth probe has
+// ledgered as an auth-probe line since the probe landed -
+// until now as inline concatenation at the seam, with no ONE
+// writer and no fold, so how many probe runs ever completed,
+// how their ok/total targets and model calls sum, and which
+// failure buckets have ever appeared was invisible as a
+// trend (the probe store is a singleton holding only the
+// LAST run's verdicts, overwritten on every probe, and the
+// auth status scorecard reads that current state, never the
+// history). A not-ok target is a route or pin that would die
+// in a turn, so the verdict is attention only when any
+// not-ok target was ever recorded or a line is unparseable,
+// else clear. This text folds the class to counts only, on
+// ONE line: runs, summed ok and total targets, summed model
+// calls, the latest run's ok/total, counts per fixed bucket,
+// and the total. No stamp, no actor, no target name, no
+// reason, and no verbatim summary enters the text. A pure
+// read: it creates nothing, probes nothing, and spends no
+// model call - the probe seam itself is untouched beyond
+// riding its ONE writer.
+export const AUTH_PROBE_BUCKETS = ["auth", "rate_limit", "billing", "timeout", "network", "empty", "missing", "error"] as const;
+
+export type AuthProbeSummary = { ok: number; total: number; calls: number; bad: Array<{ target: string; bucket: string }> };
+
+export function parseAuthProbeSummary(summary: string): AuthProbeSummary | null {
+  const m = /^Auth probe: (\d+)\/(\d+) targets ok \((\d+) model call\(s\)\)(?:; not ok: (.+))?$/.exec(summary);
+  if (!m) return null;
+  const ok = Number(m[1]);
+  const total = Number(m[2]);
+  const calls = Number(m[3]);
+  if (total < 1 || ok > total || calls > total) return null;
+  const bad: Array<{ target: string; bucket: string }> = [];
+  if (m[4] !== undefined) {
+    for (const part of m[4].split(", ")) {
+      const bm = /^([^,= ]+)=([a-z_]+)$/.exec(part);
+      if (!bm) return null;
+      if (!(AUTH_PROBE_BUCKETS as readonly string[]).includes(bm[2])) return null;
+      bad.push({ target: bm[1], bucket: bm[2] });
+    }
+  }
+  if (bad.length !== total - ok) return null;
+  return { ok, total, calls, bad };
+}
+
+export function authProbeHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "auth-probe" });
+  let runs = 0;
+  let okTargets = 0;
+  let totalTargets = 0;
+  let calls = 0;
+  let latestOk = 0;
+  let latestTotal = 0;
+  let unparseable = 0;
+  const buckets = new Map<string, number>(AUTH_PROBE_BUCKETS.map(b => [b, 0]));
+  for (const line of lines) {
+    const parsed = parseAuthProbeSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    runs += 1;
+    okTargets += parsed.ok;
+    totalTargets += parsed.total;
+    calls += parsed.calls;
+    latestOk = parsed.ok;
+    latestTotal = parsed.total;
+    for (const b of parsed.bad) buckets.set(b.bucket, (buckets.get(b.bucket) ?? 0) + 1);
+  }
+  const notOk = totalTargets - okTargets;
+  const parts: string[] = [];
+  parts.push("Auth probe history: " + (notOk > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(runs) + " runs");
+  parts.push(String(okTargets) + " ok targets");
+  parts.push(String(totalTargets) + " total targets");
+  parts.push(String(calls) + " model calls");
+  parts.push("latest " + String(latestOk) + "/" + String(latestTotal) + " targets ok");
+  for (const b of AUTH_PROBE_BUCKETS) parts.push(b + " " + String(buckets.get(b) ?? 0));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
