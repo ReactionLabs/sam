@@ -913,6 +913,56 @@ export function deliveryFailureHistoryScorecardText(root:string):string{
  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
  return parts.join(", ");
 }
+// The ONE writer for the heartbeat-retired activity line, so
+// the history scorecard's parser below can never drift from
+// the seam it counts. Its shape is byte-identical to what the
+// tick's retireIfOnce wrote inline before this writer existed.
+export function heartbeatRetiredLedgerSummary(jobName:string):string{
+ return "One-shot heartbeat '"+jobName+"' fired and retired";
+}
+// The heartbeat-retired history scorecard (2026-11-21, the
+// measured-proof series): a one-shot job that has had its run
+// is removed from the job store by the tick and ledgers
+// exactly one "heartbeat-retired" line - but the class was
+// never folded, so how many one-shot reminders ever fired
+// and retired, and across how many distinct jobs, was
+// invisible in aggregate; the job store by construction
+// holds nothing about a retired job, so the ledger line is
+// the only record the retirement ever happened. Retirement
+// is the one-shot lifecycle working as designed, not an
+// alarm, so the verdict is attention only when a line is
+// unparseable, else clear (the heartbeat-deliveries
+// precedent). This text folds the class to counts only, on
+// ONE line: the retired count, the distinct-job count as a
+// number only, and the total. No stamp, no actor, no job
+// name, and no verbatim summary enters the text. A pure
+// read: it creates nothing, spends no model call, runs no
+// job, and retires nothing - the tick seam itself is
+// untouched beyond riding the writer above.
+export function parseHeartbeatRetiredSummary(summary:string):{job:string}|null{
+ const m=/^One-shot heartbeat '([^']+)' fired and retired$/.exec(summary);
+ if(!m)return null;
+ return {job:m[1]??""};
+}
+export function heartbeatRetiredHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"heartbeat-retired"});
+ let retired=0;
+ let unparseable=0;
+ const jobs=new Set<string>();
+ for(const line of lines){
+  const parsed=parseHeartbeatRetiredSummary(line.summary);
+  if(!parsed){unparseable+=1;continue;}
+  retired+=1;
+  jobs.add(parsed.job);
+ }
+ const parts:string[]=[];
+ parts.push("Heartbeat retired history: "+(unparseable>0?"attention":"clear"));
+ parts.push(String(retired)+" retired");
+ parts.push(String(jobs.size)+" distinct jobs");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 // Consolidation sub-step failures ledger in the activity
 // record (gap found 2026-11-13, hourly run 10:04): inside
 // consolidatePreferences, two sub-steps swallowed their throws
@@ -1029,7 +1079,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
   if(!job.onceAt||retired.includes(job.id))return;
   retired.push(job.id);
   appendLog(root,{type:"job-retired",name:job.name,profile:job.profile,onceAt:job.onceAt});
-  recordActivity(root,job.profile,"heartbeat-retired","One-shot heartbeat '"+job.name+"' fired and retired");
+  recordActivity(root,job.profile,"heartbeat-retired",heartbeatRetiredLedgerSummary(job.name));
  };
  for(const job of jobs){
   if(!jobDue(job,now))continue;
