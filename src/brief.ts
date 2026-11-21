@@ -1,4 +1,4 @@
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { listActions } from "./actions.js";
 import { listBackgroundTasks } from "./background.js";
 import { channels } from "./channels.js";
@@ -199,8 +199,87 @@ export async function buildBrief(root: string, deps: BriefDeps = {}): Promise<Br
     text += "\n" + s.name + ":\n" + s.lines.map(l => "- " + l).join("\n") + "\n";
   }
   if (text.length > MAX_BRIEF_CHARS) text = text.slice(0, MAX_BRIEF_CHARS - 24).trimEnd() + "\n- (brief truncated)";
-  recordActivity(root, "sam", "brief", "Morning brief assembled: " + sections.map(s => s.name.toLowerCase() + "=" + s.state).join(", "));
+  recordActivity(root, "sam", "brief", briefLedgerSummary(sections));
   return { at: now.toISOString(), text: text.trimEnd(), sections };
+}
+
+/** The ONE writer for the brief activity line, so the
+ *  scorecard's parser below can never drift from the seam it
+ *  counts. Its shape is byte-identical to what buildBrief wrote
+ *  inline before this writer existed: the section names
+ *  lowercased, in the brief's fixed section order, each with
+ *  its state - never any section content, which is the owner's
+ *  private data. */
+export function briefLedgerSummary(sections: BriefSection[]): string {
+  return "Morning brief assembled: " + sections.map(s => s.name.toLowerCase() + "=" + s.state).join(", ");
+}
+
+const BRIEF_SECTION_NAMES = ["today", "mail", "needs you", "watches", "work queues"];
+const BRIEF_STATES = ["ok", "empty", "unavailable"];
+
+/** Parse one brief ledger summary. Only the fixed shape
+ *  parses: the five sections in their fixed order, each named
+ *  exactly as the writer names it, each state from the fixed
+ *  ok / empty / unavailable vocabulary. Anything else (a
+ *  missing or reordered section, an unknown state, trailing
+ *  text) returns null, so a drifted shape counts as
+ *  unparseable instead of being silently miscounted. */
+export function parseBriefSummary(summary: string): { sections: { name: string; state: string }[] } | null {
+  const m = /^Morning brief assembled: (.+)$/.exec(summary);
+  if (!m) return null;
+  const parts = (m[1] ?? "").split(", ");
+  if (parts.length !== BRIEF_SECTION_NAMES.length) return null;
+  const sections: { name: string; state: string }[] = [];
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i] ?? "";
+    const eq = part.lastIndexOf("=");
+    if (eq < 0) return null;
+    const name = part.slice(0, eq);
+    const state = part.slice(eq + 1);
+    if (name !== BRIEF_SECTION_NAMES[i]) return null;
+    if (!BRIEF_STATES.includes(state)) return null;
+    sections.push({ name, state });
+  }
+  return { sections };
+}
+
+/** The brief assembly scorecard (2026-11-20, the
+ *  measured-proof series): every assembled brief has ledgered
+ *  as a "brief" line since the brief landed, but the class was
+ *  never folded - it was written inline at its only seam, with
+ *  no ONE writer and no reader, so how often a brief has ever
+ *  been assembled, and whether its sections read ok, empty, or
+ *  unavailable in aggregate, was invisible even though the
+ *  section states are the brief's whole honesty signal. An
+ *  assembled brief is the brief working as designed, so the
+ *  verdict is attention only when a line is unparseable, else
+ *  clear. This text folds the class to counts only, on ONE
+ *  line: the parsed brief count, the summed per-state section
+ *  counts, and the total. No stamp, no actor, no section
+ *  content, and no verbatim summary enters the text. A pure
+ *  read: it creates nothing, spends no model call, and
+ *  assembles no brief - buildBrief itself is untouched apart
+ *  from riding the ONE writer. */
+export function briefScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "brief" });
+  let briefs = 0;
+  let unparseable = 0;
+  const states = new Map<string, number>();
+  for (const line of lines) {
+    const parsed = parseBriefSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    briefs += 1;
+    for (const s of parsed.sections) states.set(s.state, (states.get(s.state) ?? 0) + 1);
+  }
+  const parts: string[] = [];
+  parts.push("Brief assemblies: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(briefs) + " briefs");
+  parts.push(String(states.get("ok") ?? 0) + " ok sections");
+  parts.push(String(states.get("empty") ?? 0) + " empty sections");
+  parts.push(String(states.get("unavailable") ?? 0) + " unavailable sections");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The installed morning-brief job, if any: a script-mode
