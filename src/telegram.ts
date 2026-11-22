@@ -406,6 +406,45 @@ export function bridgePollScorecardText(root:string):string{
  out.push("Note: counts only, cumulative over the activity ledger, in coalesced bursts (one line per failure burst, not per attempt) - the scorecard never retries a poll or prints a channel name or reason; a new failed burst is the news");
  return out.join("\n");
 }
+// The bridge failed history scorecard (2026-11-22, the
+// measured-proof series): the bridge ledgers every thrown
+// update handler as a "bridge-failed" line through the ONE
+// writer bridgeFailureSummary above - the update stays
+// consumed, so the line is the only trace a lost owner
+// message leaves - but the class was never folded, so how
+// often an update died in the handler was invisible in
+// aggregate (its sibling class, bridge-poll-failed, already
+// has its poll scorecard). The parser learns only the fixed
+// shape the writer writes: a numeric update id, a non-empty
+// channel, and a non-empty reason, consumed and never
+// printed; a line from any other kind never parses. The
+// fold is counts only: no stamp, no actor, no channel name,
+// no update id, and no verbatim reason - distinct channels
+// surface as a number only. A pure read: it creates
+// nothing, retries no update, and touches no channel.
+export function parseBridgeFailedSummary(summary:string):{channel:string}|null{
+ const m=/^Telegram bridge failed on update (\d+) for channel ([\s\S]+?): ([\s\S]+)$/.exec(summary);
+ if(!m)return null;
+ const channel=m[2]??""; const reason=m[3]??"";
+ if(!channel.trim()||!reason.trim())return null;
+ return {channel};
+}
+export function bridgeFailedHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"bridge-failed"});
+ let failed=0; let unparseable=0; const channels=new Set<string>();
+ for(const line of lines){
+  const parsed=parseBridgeFailedSummary(line.summary);
+  if(parsed){failed+=1;channels.add(parsed.channel);continue;}
+  unparseable+=1;
+ }
+ const parts:string[]=[];
+ parts.push("Bridge failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+ parts.push(String(failed)+" failed");
+ parts.push(String(channels.size)+" distinct channels");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 export async function runTelegramBridge(opts:{root:string;channel:Channel;sam:SamClient;api:TelegramApi;pollTimeoutSec?:number;pollRetryDelayMs?:number;stop?:()=>boolean}):Promise<void>{
  const state=loadBridgeState(opts.root);
  const timeout=opts.pollTimeoutSec??30;
