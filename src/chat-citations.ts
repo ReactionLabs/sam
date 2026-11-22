@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { isManagedChat, type ChatSearchHit } from "./chat-manage.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -169,6 +169,51 @@ export function chatCitationFailureSummary(phase: string, error: unknown): strin
 
 function recordCitationFailure(root: string, actor: string, phase: string, error: unknown): void {
   try { recordActivity(root, actor, "chat-citation-failed", chatCitationFailureSummary(phase, error)); } catch { /* the ledger never breaks a turn */ }
+}
+
+// The chat citation failed history scorecard (2026-11-22, the
+// measured-proof series): the citation attach path ledgers every
+// failure as a "chat-citation-failed" line through the ONE writer
+// chatCitationFailureSummary above - but the class was never
+// folded, so how often a reply's citation failed to attach (the
+// reply carries on without its "Found in chat history" link) was
+// invisible in aggregate. The existing chat-citation scorecard
+// folds only the successful attaches, never the failure lines.
+// The parser learns only the one fixed phase the seam writes
+// ("attach": the sole recordCitationFailure call site is the
+// store write in attachCitation); a reason is consumed and never
+// printed, and a line from any other kind never parses. The fold
+// is counts only: no stamp, no actor, no phase name, no verbatim
+// reason.
+export function parseChatCitationFailedSummary(summary: string): { phase: string } | null {
+  const m = /^Chat citation (attach) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] ?? "" };
+}
+
+export function chatCitationFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "chat-citation-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseChatCitationFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Chat citation failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function attachCitation(root: string, input: { messageId: string; chatId: string; actor: string; hit: ChatSearchHit }): boolean {
