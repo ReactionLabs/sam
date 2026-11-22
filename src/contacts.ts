@@ -518,10 +518,60 @@ export function addressBookFailureReason(error: unknown): string {
   return errorReason(error);
 }
 
+/** The ONE writer for an address-book-failed line (2026-11-22):
+ * the quiet render's failure summary, extracted byte-identical
+ * from the inline shape renderAddressBookQuietly ledgered, so
+ * the seam and the scorecard's parser below can never drift.
+ * The line carries one fixed head and the reason, capped at
+ * 200 chars whole; there is no phase - the render is the only
+ * Address Book write that can fail quietly. */
+export function addressBookFailureSummary(reason: string): string {
+  return ("Address Book write failed: " + reason).slice(0, 200);
+}
+
+// The address book failed history scorecard (2026-11-22, the
+// measured-proof series): the quiet Address Book render ledgers
+// every failure as an "address-book-failed" line through the
+// ONE writer above - but the class was never folded, so how
+// often the people file's human-readable face failed to render
+// (leaving the directory stale against the store, which stays
+// the truth) was invisible in aggregate. The parser learns only
+// the one fixed head the seam writes; a reason is consumed and
+// never printed, and a line from any other kind never parses.
+// The fold is counts only: no stamp, no actor, no reason, and
+// no verbatim summary.
+export function parseAddressBookFailedSummary(summary: string): { matched: true } | null {
+  const m = /^Address Book write failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[1] ?? "";
+  if (!reason.trim()) return null;
+  return { matched: true };
+}
+
+export function addressBookFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "address-book-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseAddressBookFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Address Book failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function renderAddressBookQuietly(root: string): void {
   try { writeAddressBook(root); }
   catch (error) {
     const reason = addressBookFailureReason(error);
-    try { recordActivity(root, "sam", "address-book-failed", ("Address Book write failed: " + reason).slice(0, 200)); } catch { /* the ledger never breaks a write */ }
+    try { recordActivity(root, "sam", "address-book-failed", addressBookFailureSummary(reason)); } catch { /* the ledger never breaks a write */ }
   }
 }
