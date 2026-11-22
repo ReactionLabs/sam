@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
@@ -128,6 +128,61 @@ export function answerJudgeFailureReason(error: unknown): string {
 export function recordAnswerJudgeFailure(root: string, phase: "read" | "append", error: unknown): void {
   const reason = answerJudgeFailureReason(error);
   recordActivity(root, "sam", "answer-judge-failed", answerJudgeFailureSummary(phase, reason));
+}
+
+// The answer judge failed history scorecard (2026-11-22, the
+// measured-proof series): an answer judge records read or
+// append that throws ledgers as an answer-judge-failed line
+// through the ONE writer answerJudgeFailureSummary, and
+// self-work ranks the class as a defect keyed by phase - but
+// the class was never folded, so how often the judge's own
+// ledger died (and whether a judged turn's verdict ever
+// failed to persist, the fail-closed seam this kind exists
+// for) was invisible in aggregate. The existing answer judge
+// scorecard folds only the verdict records themselves, never
+// these failure lines. A recorded failure is itself the
+// signal, so the verdict is attention when any failure was
+// ever recorded or any line is unparseable, else clear (the
+// tick-failed precedent). This text folds the whole ledger's
+// answer-judge-failed lines to counts only, on ONE line: the
+// failed count, the distinct-phase count as a number only,
+// and the total. No stamp, no actor, no phase name, and no
+// verbatim reason enters the text: the phase is consumed by
+// the fold and never printed. The writer caps its own line
+// at 200 chars, so a capped reason still parses from its
+// fixed head. A summary matching neither fixed phase, or
+// with an empty reason, counts toward the total and the
+// unparseable count only, and is never printed. A pure read:
+// it creates nothing, sends nothing, retries nothing, and
+// runs no judge.
+export function parseAnswerJudgeFailedSummary(summary: string): { phase: string } | null {
+  const m = /^Answer judge (read|append) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] ?? "" };
+}
+export function answerJudgeFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "answer-judge-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseAnswerJudgeFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Answer judge failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function appendRecord(root: string, record: AnswerJudgeRecord): void {
