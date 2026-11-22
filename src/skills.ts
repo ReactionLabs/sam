@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { join, resolve, relative, isAbsolute } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 export interface SkillEntry {
@@ -301,6 +301,84 @@ function cleanAllowlistNames(workspace: string, names: string[]): string[] {
   if (unknown.length) throw new Error("Unknown skill(s): " + unknown.join(", ") + ". Installed skills: " + (known.length ? known.join(", ") : "(none)"));
   return clean;
 }
+// Skill allowlist history (gap found 2026-11-21, hourly run
+// 20:04 EST): setSkillAllowlist ledgers "skill-allowlist"
+// lines, but the shapes were inline strings with no writer, no
+// parser, and no fold, so how many profiles were ever fenced
+// or unfenced over an install's life was invisible in
+// aggregate; the allowlists store holds only CURRENT fences
+// (one row per profile, overwritten in place), so a cleared
+// fence leaves no surface but these lines (the
+// provider-registry precedent). These are the ONE writers for
+// both shapes (byte-identical to the inline shapes they
+// replace; the setSkillAllowlist seams ride them), the
+// parsers, and the history scorecard. Sets and clears are
+// owner acts, not failures, so the verdict is attention only
+// when a line is unparseable, else clear. The scorecard text
+// is a script job's stdout and is P3-diffed on its facts, so
+// it is ONE line carrying counts only: no stamp, no actor, no
+// profile name, no skill name, and no verbatim summary. The
+// scorecard path is a pure read - it creates nothing, sets
+// nothing, clears nothing, and opens no store.
+export function skillAllowlistSetLedgerSummary(profile: string, names: string[]): string {
+  return "Skill allowlist set for profile " + profile + ": " + (names.length ? names.join(", ") : "(none - no skills)");
+}
+
+export function skillAllowlistClearedLedgerSummary(profile: string): string {
+  return "Skill allowlist cleared for profile " + profile + " (unrestricted)";
+}
+
+export function parseSkillAllowlistSetSummary(summary: string): { profile: string; names: string[] } | null {
+  const m = /^Skill allowlist set for profile (\S+): (.+)$/.exec(summary);
+  if (!m) return null;
+  const tail = m[2] ?? "";
+  if (tail === "(none - no skills)") return { profile: m[1] ?? "", names: [] };
+  const names = tail.split(", ");
+  if (names.some(n => !/^[a-z0-9][a-z0-9_-]*$/i.test(n))) return null;
+  return { profile: m[1] ?? "", names };
+}
+
+export function parseSkillAllowlistClearedSummary(summary: string): { profile: string } | null {
+  const m = /^Skill allowlist cleared for profile (\S+) \(unrestricted\)$/.exec(summary);
+  if (!m) return null;
+  return { profile: m[1] ?? "" };
+}
+
+export function skillAllowlistHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-allowlist" });
+  let set = 0;
+  let setWithSkills = 0;
+  let setEmpty = 0;
+  let cleared = 0;
+  let unparseable = 0;
+  const profiles = new Set<string>();
+  for (const line of lines) {
+    const parsedSet = parseSkillAllowlistSetSummary(line.summary);
+    if (parsedSet) {
+      set += 1;
+      if (parsedSet.names.length) setWithSkills += 1; else setEmpty += 1;
+      profiles.add(parsedSet.profile);
+      continue;
+    }
+    const parsedCleared = parseSkillAllowlistClearedSummary(line.summary);
+    if (parsedCleared) {
+      cleared += 1;
+      profiles.add(parsedCleared.profile);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Skill allowlist history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(set) + " set");
+  parts.push("with skills " + String(setWithSkills) + " / empty " + String(setEmpty));
+  parts.push(String(cleared) + " cleared");
+  parts.push(String(profiles.size) + " distinct profiles");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 export function setSkillAllowlist(workspace: string, profile: string, names: string[] | null): string[] | null {
   if (!profilePattern.test(profile)) throw new Error("Invalid profile: " + profile);
   if (names === null) {
@@ -310,7 +388,7 @@ export function setSkillAllowlist(workspace: string, profile: string, names: str
       catch (error) { failSkillAllowlistsStore(workspace, "write", error); }
       finally { db.close(); }
     }
-    recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist cleared for profile " + profile + " (unrestricted)");
+    recordActivity(workspace, profile, "skill-allowlist", skillAllowlistClearedLedgerSummary(profile));
     return null;
   }
   const clean = cleanAllowlistNames(workspace, names);
@@ -318,7 +396,7 @@ export function setSkillAllowlist(workspace: string, profile: string, names: str
   try { db.prepare("INSERT INTO skill_allowlists (profile, data) VALUES (?, ?) ON CONFLICT(profile) DO UPDATE SET data = excluded.data").run(profile, JSON.stringify(clean)); }
   catch (error) { failSkillAllowlistsStore(workspace, "write", error); }
   finally { db.close(); }
-  recordActivity(workspace, profile, "skill-allowlist", "Skill allowlist set for profile " + profile + ": " + (clean.length ? clean.join(", ") : "(none - no skills)"));
+  recordActivity(workspace, profile, "skill-allowlist", skillAllowlistSetLedgerSummary(profile, clean));
   return [...clean];
 }
 // The store's update door (the contacts precedent): patch one
