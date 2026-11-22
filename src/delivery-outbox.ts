@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Durable delivery outbox (Phase C item 1): the delivery ledger the
@@ -240,4 +240,80 @@ export function outboxScorecardText(root: string): string {
   lines.push("Recovered: " + String(summary.recovered));
   lines.push("Note: counts only - the scorecard never sends, retries, or settles a delivery; redelivery rides the heartbeat tick");
   return lines.join("\n");
+}
+
+// The outbox failed history scorecard (2026-11-22, the
+// measured-proof series): every failed touch of the
+// delivery outbox ledgers one "outbox-failed" line through
+// the ONE writer outboxFailureSummary (recordOutboxFailure
+// rides it for both phases), and self-work ranks the class
+// as a defect - but the shape was never folded, so how
+// often the durable record every changed channel delivery
+// passes through failed to land or to read back was
+// invisible in aggregate. The outbox scorecard above folds
+// the outbox STORE's records, not these ledger lines (the
+// delivery-failed precedent: the channel failure class got
+// its own history fold beside the store's surfaces). The
+// outbox ledger is append-only, so a failed append leaves
+// no other surface, and a failed read fails closed with a
+// rethrow - these ledger lines are the only count either
+// failure ever gets. A recorded failure is itself the
+// signal, so the verdict is attention when any failure was
+// ever recorded or any line is unparseable, else clear
+// (the team-messages-failed precedent, the same phase /
+// label shape). This text folds the whole ledger's
+// outbox-failed lines to counts only, on ONE line: the
+// append count, the read count, the distinct-label count
+// as a number only, and the total. No stamp, no actor, no
+// label, no job name, no delivery id, and no verbatim
+// reason enters the text: the label and the reason are
+// consumed by the fold and never printed. The writer caps
+// its own line at 200 chars, so the stored shape is the
+// writer's shape alone (the ledger's 300-char cap never
+// binds past it); a label long enough to push the reason
+// separator past the cap folds as unparseable rather than
+// as a guessed count, and a capped reason still parses
+// from its head. A summary matching the fixed shape with
+// an empty or whitespace reason matches nothing: it counts
+// toward the total and the unparseable count only, and is
+// never printed. A pure read: it creates nothing, sends
+// nothing, retries nothing, and settles nothing - the
+// ledger and the outbox seams are untouched beyond riding
+// their writer.
+export function parseOutboxFailedSummary(summary: string): { phase: "append" | "read"; label: string } | null {
+  const m = /^Delivery outbox (append|read) failed for (.+?): (.+)$/.exec(summary);
+  if (!m) return null;
+  const phase = m[1] as "append" | "read";
+  const label = m[2] ?? "";
+  const reason = m[3] ?? "";
+  if (!reason.trim()) return null;
+  if (phase === "read") {
+    return label === "ledger" ? { phase, label } : null;
+  }
+  const labelShape = /^(?:queued delivery for heartbeat '.+'|attempt-failed event for heartbeat '.+'|(?:delivered|attempt-failed|suppressed) event for delivery [0-9a-f]{8})$/;
+  return labelShape.test(label) ? { phase, label } : null;
+}
+export function outboxFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "outbox-failed" });
+  let append = 0;
+  let read = 0;
+  let unparseable = 0;
+  const labels = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseOutboxFailedSummary(line.summary);
+    if (parsed) {
+      if (parsed.phase === "append") append += 1; else read += 1;
+      labels.add(parsed.label);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Outbox failed history: " + (append + read > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(append) + " append");
+  parts.push(String(read) + " read");
+  parts.push(String(labels.size) + " distinct labels");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
