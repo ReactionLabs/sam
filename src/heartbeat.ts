@@ -1210,6 +1210,75 @@ export function parseTickFailedSummary(summary:string):{stage:string}|null{
  if(!TICK_STAGES.has(stage))return null;
  return {stage};
 }
+// The consolidate failed history scorecard (2026-11-22,
+// the measured-proof series): a consolidation sub-step
+// that throws ledgers as a consolidate-failed line through
+// the ONE writer consolidationFailureSummary (the
+// corrections step aggregated, the curator step named),
+// and self-work ranks the class as a defect keyed by step
+// - but the class was never folded, so how often a
+// sub-step died (and how many correction messages were
+// lost with it) was invisible in aggregate. A recorded
+// failure is itself the signal, so the verdict is
+// attention when any failure was ever recorded or any
+// line is unparseable, else clear (the tick-failed
+// precedent). This text folds the whole ledger's
+// consolidate-failed lines to counts only, on ONE line:
+// the failed count, the distinct-step count as a number
+// only, the summed affected messages (corrections lines
+// only; a curator line carries no message count), and
+// the total. No stamp, no actor, no step name, and no
+// verbatim reason enters the text. The writer caps its
+// own line at 200 chars, so a capped reason still parses
+// from its fixed head. A summary matching neither fixed
+// shape, with an empty reason, a zero count, or a plural
+// that disagrees with its count, counts toward the total
+// and the unparseable count only, and is never printed.
+// A pure read: it creates nothing, sends nothing, retries
+// nothing, and runs no consolidation.
+export function parseConsolidateFailedSummary(summary:string):{step:string;messages:number}|null{
+ const curator=/^Consolidation skill curator failed: ([\s\S]+)$/.exec(summary);
+ if(curator){
+  if(!(curator[1]??"").trim())return null;
+  return {step:"curator",messages:0};
+ }
+ const corr=/^Consolidation correction routing failed for (\d+) (message|messages): ([\s\S]+)$/.exec(summary);
+ if(corr){
+  const count=Number(corr[1]??"0");
+  const word=corr[2]??"";
+  const reason=corr[3]??"";
+  if(!Number.isSafeInteger(count)||count<1)return null;
+  if((count===1)!==(word==="message"))return null;
+  if(!reason.trim())return null;
+  return {step:"corrections",messages:count};
+ }
+ return null;
+}
+export function consolidateFailedHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"consolidate-failed"});
+ let failed=0;
+ let unparseable=0;
+ let affected=0;
+ const steps=new Set<string>();
+ for(const line of lines){
+  const parsed=parseConsolidateFailedSummary(line.summary);
+  if(parsed){
+   failed+=1;
+   steps.add(parsed.step);
+   affected+=parsed.messages;
+   continue;
+  }
+  unparseable+=1;
+ }
+ const parts:string[]=[];
+ parts.push("Consolidate failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+ parts.push(String(failed)+" failed");
+ parts.push(String(steps.size)+" distinct steps");
+ parts.push(String(affected)+" affected messages");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 export function tickFailedHistoryScorecardText(root:string):string{
  const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"tick-failed"});
  let failed=0;
