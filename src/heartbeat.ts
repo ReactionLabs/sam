@@ -1157,10 +1157,80 @@ export function tickStageFailureReason(error: unknown): string {
   return errorReason(error);
 }
 
+/**
+ * The ONE writer for the tick-failed activity line, so the
+ * tick failed history scorecard's parser below can never
+ * drift from the seam it counts. Its shape is byte-identical
+ * to what tickStageFailure wrote inline before this writer
+ * existed (the stage name plus the verbatim reason, capped;
+ * never message content). */
+export function tickFailedLedgerSummary(stage:string,reason:string):string{
+ return ("Heartbeat tick stage '"+stage+"' failed: "+reason).slice(0,200);
+}
+
 export function tickStageFailure(root:string,stage:string,error:unknown):void{
  const reason=tickStageFailureReason(error);
  appendLog(root,{type:"tick-failed",stage,reason:reason.slice(0,300)});
- recordActivity(root,"sam","tick-failed",("Heartbeat tick stage '"+stage+"' failed: "+reason).slice(0,200));
+ recordActivity(root,"sam","tick-failed",tickFailedLedgerSummary(stage,reason));
+}
+// The tick failed history scorecard (2026-11-22, the
+// measured-proof series): a heartbeat tick stage that throws
+// ledgers as a tick-failed line through the ONE writer
+// tickFailedLedgerSummary, and self-work ranks the class as
+// a defect keyed by stage - but the class was never folded,
+// so how often a tick lost a stage (and whether the same
+// stage keeps dying every 15 minutes) was invisible in
+// aggregate. A recorded failure is itself the signal, so
+// the verdict is attention when any failure was ever
+// recorded or any line is unparseable, else clear (the
+// heartbeat-log-failed precedent, the same shape). This
+// text folds the whole ledger's tick-failed lines to
+// counts only, on ONE line: the failed count, the
+// distinct-stage count as a number only, and the total. No
+// stamp, no actor, no stage name, and no verbatim reason
+// enters the text: the stage is consumed by the fold and
+// never printed. The writer caps its own line at 200
+// chars, so the stored shape is the writer's shape alone;
+// a capped reason still parses from its head because the
+// stage prefix is fixed and short. A summary matching the
+// fixed shape with an empty or whitespace reason, or
+// naming a stage the guard never runs, matches nothing: it
+// counts toward the total and the unparseable count only,
+// and is never printed. A pure read: it creates nothing,
+// sends nothing, retries nothing, and runs no tick - the
+// ledger and the tick seams are untouched beyond riding
+// their writer.
+const TICK_STAGES=new Set(["consolidate","deliveries","jobs","background","coding","engine","parallel","loops"]);
+export function parseTickFailedSummary(summary:string):{stage:string}|null{
+ const m=/^Heartbeat tick stage '([a-z]+)' failed: ([\s\S]+)$/.exec(summary);
+ if(!m)return null;
+ const stage=m[1]??"";
+ const reason=m[2]??"";
+ if(!reason.trim())return null;
+ if(!TICK_STAGES.has(stage))return null;
+ return {stage};
+}
+export function tickFailedHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"tick-failed"});
+ let failed=0;
+ let unparseable=0;
+ const stages=new Set<string>();
+ for(const line of lines){
+  const parsed=parseTickFailedSummary(line.summary);
+  if(parsed){
+   failed+=1;
+   stages.add(parsed.stage);
+   continue;
+  }
+  unparseable+=1;
+ }
+ const parts:string[]=[];
+ parts.push("Tick failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+ parts.push(String(failed)+" failed");
+ parts.push(String(stages.size)+" distinct stages");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
 }
 async function guardTickStage<T>(root:string,stage:string,fallback:T,stageFailures:string[],run:()=>T|Promise<T>):Promise<T>{
  try{return await run();}
