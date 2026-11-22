@@ -6,7 +6,7 @@ import { lineDiff, unifiedDiff } from "./line-diff.js";
 import { loadPatternCatalog, type PatternCatalog } from "./pattern-catalog.js";
 import { listChanges, verificationGate, verificationStatus, type PendingChange } from "./verification.js";
 import { codeRoot } from "./code.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import type { EditModel } from "./model-edit.js";
 import { errorReason } from "./error-reason.js";
@@ -92,6 +92,71 @@ export function goldfishFailureReason(error: unknown): string {
 export function recordGoldfishFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
   const reason = goldfishFailureReason(error);
   recordActivity(root, "sam", "goldfish-failed", goldfishFailureSummary(phase, eventLabel, reason));
+}
+
+// The goldfish failed history scorecard (2026-11-22, the
+// measured-proof series): a goldfish records read or append
+// that throws ledgers as a goldfish-failed line through the
+// ONE writer goldfishFailureSummary, and self-work ranks the
+// class as a defect keyed by phase - but the class was never
+// folded, so how often the reviewer's own ledger died (and
+// whether a PASS ever failed to persist, the fail-closed seam
+// this kind exists for) was invisible in aggregate. A recorded
+// failure is itself the signal, so the verdict is attention
+// when any failure was ever recorded or any line is
+// unparseable, else clear (the tick-failed precedent). This
+// text folds the whole ledger's goldfish-failed lines to
+// counts only, on ONE line: the failed count, the
+// distinct-phase count as a number only, the summed reviewed
+// changes (review-label lines only; a ledger line carries no
+// change count), and the total. No stamp, no actor, no phase
+// name, no verdict, and no verbatim reason enters the text:
+// the phase and label are consumed by the fold and never
+// printed. The writer caps its own line at 200 chars, so a
+// capped reason still parses from its fixed head. A summary
+// matching neither fixed shape, with an unknown phase or
+// label, or with an empty reason, counts toward the total
+// and the unparseable count only, and is never printed. A
+// pure read: it creates nothing, sends nothing, retries
+// nothing, and runs no review.
+export function parseGoldfishFailedSummary(summary: string): { phase: string; changes: number } | null {
+  const m = /^Goldfish (read|append) failed for ([\s\S]+?): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const phase = m[1] ?? "";
+  const label = m[2] ?? "";
+  const reason = m[3] ?? "";
+  if (!reason.trim()) return null;
+  if (label === "ledger") return { phase, changes: 0 };
+  const review = /^review (PASS|BLOCK) over (\d+) change\(s\)$/.exec(label);
+  if (!review) return null;
+  const changes = Number(review[2] ?? "0");
+  if (!Number.isSafeInteger(changes) || changes < 0) return null;
+  return { phase, changes };
+}
+export function goldfishFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "goldfish-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let reviewed = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseGoldfishFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      reviewed += parsed.changes;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Goldfish failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(reviewed) + " reviewed changes");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function reviewLabel(record: GoldfishRecord): string {

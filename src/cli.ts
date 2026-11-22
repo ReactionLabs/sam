@@ -15,7 +15,7 @@ import { reviewEdit } from "./edit-review.js";
 import { reviewEditWithAi } from "./ai-edit-review.js";
 import { requestTestRun, executeApprovedTestRun } from "./approved-test-runner.js";
 import { verificationGate, verificationStatus } from "./verification.js";
-import { defaultCodingReviewer, defaultDiffReviewer, goldfishStatus, runGoldfishReview, sessionGate, verifyScorecardText, type GoldfishChangeInput } from "./goldfish.js";
+import { defaultCodingReviewer, defaultDiffReviewer, goldfishFailedHistoryScorecardText, goldfishStatus, runGoldfishReview, sessionGate, verifyScorecardText, type GoldfishChangeInput } from "./goldfish.js";
 import { sessionCaps, sessionUsageToday } from "./session-caps.js";
 import { serveDashboard, addSchedule, listSchedules } from "./dashboard.js";
 import { PreferenceStore, lawRevokedHistoryScorecardText } from "./preferences.js";
@@ -258,6 +258,7 @@ const capsCmd=program.command("caps").description("Session caps: per-chat per-da
 capsCmd.command("status").description("Show the cap configuration and today's per-chat usage against it").action(()=>{const root=program.opts().workspace;output({caps:sessionCaps(),sessions:sessionUsageToday(root)});});
 const goldfishCmd=program.command("goldfish").description("Goldfish verifier: fresh-context review (diff + spec + live source + Pattern Catalog, no conversation history) with the last word on 'done'");
 goldfishCmd.command("status").description("Show the latest goldfish verdict, its coverage, and the combined session gate").action(()=>{const root=program.opts().workspace;output({status:goldfishStatus(root),session:sessionGate(root)});});
+goldfishCmd.command("failed-history").description("Goldfish failed history as plain text with no clock reading - verdict, the failed count, the distinct-phase count as a number only, the summed reviewed changes, and the total (never a stamp, an actor, a phase name, a verdict, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded records-ledger failure is the news (this is the sam-goldfish-failed-history script job's stdout; a pure read over the same activity ledger the goldfish failure seam ledgers: creates nothing, sends nothing, retries nothing, runs no review; exits 0 always, the verdict lives in the text)").action(()=>output(goldfishFailedHistoryScorecardText(program.opts().workspace)));
 goldfishCmd.command("review").description("Run one fresh-context goldfish review over the changes no review has covered yet")
   .requiredOption("--live","Explicitly allow one model API request (may incur charges)")
   .requiredOption("--spec <text>","The task spec the change was made against")
