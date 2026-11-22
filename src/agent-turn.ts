@@ -176,6 +176,133 @@ export function turnFailureNoteScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writers for the turn guardrail ledger lines
+// (2026-11-22, the measured-proof series): a chat turn's
+// four protective responses to session and provider trouble
+// have always ledgered in agent-turn - the session cap
+// closing a capped chat with no model call, a malformed
+// completion rejected and redrawn with nothing executed,
+// the rate-limit episode opening / staying silent /
+// closing, and the provider-overload outage note - until
+// now as inline concatenation at each seam, with no named
+// writer, no parser, and no fold. Each writer below is
+// byte-identical to its seam's inline shape; the seams
+// ride them, so the lines can never drift from the
+// scorecard's parsers. The lines carry only the 8-char
+// chat prefix and fixed text (the malformed line also
+// carries the validation detail - the check that failed
+// and the sizes involved, never content) - never the
+// person's message, never a raw provider error.
+export function sessionCapLedgerSummary(chatId: string, turnsUsed: number, tokensUsed: number, reason: string): string {
+  return "Session cap reached in chat " + chatId.slice(0, 8) + ": " + String(turnsUsed) + " turns, " + String(tokensUsed) + " tokens today (" + reason + " cap)";
+}
+export function malformedCompletionLedgerSummary(chatId: string, detail: string, attempt: number, limit: number): string {
+  return "Malformed completion in chat " + chatId.slice(0, 8) + ": " + detail + " (attempt " + String(attempt) + " of " + String(limit) + "; nothing executed, the model redraws)";
+}
+export function rateLimitLedgerSummary(chatId: string, phase: "opened" | "already-open" | "closed"): string {
+  if (phase === "opened") return "Rate limited in chat " + chatId.slice(0, 8) + ": episode opened, grace message sent (the raw provider error never reaches the owner)";
+  if (phase === "already-open") return "Rate limited in chat " + chatId.slice(0, 8) + ": episode already open, staying silent";
+  return "Rate-limit episode closed in chat " + chatId.slice(0, 8) + ": a model call succeeded again";
+}
+export function providerOverloadLedgerSummary(chatId: string): string {
+  return "Provider overloaded in chat " + chatId.slice(0, 8) + ": in-turn retries exhausted, the plain outage note is in the chat and the message stays marked failed, not lost (the raw provider error never reaches the owner)";
+}
+// The turn guardrail history scorecard (2026-11-22, the
+// measured-proof series): the four seams above ledger a
+// session-cap, malformed-completion, rate-limit, or
+// provider-overload line whenever a turn's guardrails
+// answer trouble - but the family was never folded, so
+// how often SAM's turns hit a cap, redraw a malformed
+// completion, ride out a rate-limit episode, or take the
+// overload note was invisible in aggregate: the live
+// ledger's 87 kinds carry none of the four (no live turn
+// has tripped one on the box), and the classes existed
+// only as scattered lines nobody counted. A guardrail
+// trip is the protection working as designed, not an
+// alarm, so the verdict is attention only when a line
+// is unparseable (a writer's shape broken or the ledger
+// tampered), else clear. The scorecard text is a script
+// job's stdout and is P3-diffed on its facts, so it is
+// ONE line carrying counts only: no stamp, no actor, and
+// never a chat id or a malformed detail - the summaries
+// carry both, which the fold consumes into a distinct
+// count and never prints. The scorecard path is a pure
+// read - it creates nothing, spends no model call, and
+// trips nothing; every state is built through the
+// ledger's own public door (recordActivity) with the
+// writers above, never around either.
+export function parseTurnGuardrailSummary(
+  kind: string,
+  summary: string,
+): { chatId: string; bucket: string } | null {
+  if (kind === "session-cap") {
+    const m = /^Session cap reached in chat ([0-9a-f]{8}): (\d+) turns, (\d+) tokens today \((turns|tokens) cap\)$/.exec(summary);
+    return m ? { chatId: m[1], bucket: "session-cap-" + m[4] } : null;
+  }
+  if (kind === "malformed-completion") {
+    const m = /^Malformed completion in chat ([0-9a-f]{8}): (.+) \(attempt (\d+) of (\d+); nothing executed, the model redraws\)$/.exec(summary);
+    if (!m) return null;
+    if (m[2].trim().length === 0) return null;
+    return { chatId: m[1], bucket: "malformed" };
+  }
+  if (kind === "rate-limit") {
+    const opened = /^Rate limited in chat ([0-9a-f]{8}): episode opened, grace message sent \(the raw provider error never reaches the owner\)$/.exec(summary);
+    if (opened) return { chatId: opened[1], bucket: "rate-opened" };
+    const silent = /^Rate limited in chat ([0-9a-f]{8}): episode already open, staying silent$/.exec(summary);
+    if (silent) return { chatId: silent[1], bucket: "rate-silent" };
+    const closed = /^Rate-limit episode closed in chat ([0-9a-f]{8}): a model call succeeded again$/.exec(summary);
+    if (closed) return { chatId: closed[1], bucket: "rate-closed" };
+    return null;
+  }
+  if (kind === "provider-overload") {
+    const m = /^Provider overloaded in chat ([0-9a-f]{8}): in-turn retries exhausted, the plain outage note is in the chat and the message stays marked failed, not lost \(the raw provider error never reaches the owner\)$/.exec(summary);
+    return m ? { chatId: m[1], bucket: "overload" } : null;
+  }
+  return null;
+}
+
+export function turnGuardrailHistoryScorecardText(root: string): string {
+  const kinds: string[] = ["session-cap", "malformed-completion", "rate-limit", "provider-overload"];
+  let trips = 0;
+  let unparseable = 0;
+  let total = 0;
+  let capTurns = 0;
+  let capTokens = 0;
+  let malformed = 0;
+  let rateOpened = 0;
+  let rateSilent = 0;
+  let rateClosed = 0;
+  let overload = 0;
+  const distinct = new Set<string>();
+  for (const kind of kinds) {
+    const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind });
+    total += lines.length;
+    for (const line of lines) {
+      const parsed = parseTurnGuardrailSummary(kind, line.summary);
+      if (!parsed) { unparseable += 1; continue; }
+      trips += 1;
+      distinct.add(parsed.chatId);
+      if (parsed.bucket === "session-cap-turns") capTurns += 1;
+      else if (parsed.bucket === "session-cap-tokens") capTokens += 1;
+      else if (parsed.bucket === "malformed") malformed += 1;
+      else if (parsed.bucket === "rate-opened") rateOpened += 1;
+      else if (parsed.bucket === "rate-silent") rateSilent += 1;
+      else if (parsed.bucket === "rate-closed") rateClosed += 1;
+      else if (parsed.bucket === "overload") overload += 1;
+    }
+  }
+  const parts: string[] = [];
+  parts.push("Turn guardrail history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(trips) + " trips");
+  parts.push("session cap " + String(capTurns + capTokens) + " (turns " + String(capTurns) + " / tokens " + String(capTokens) + ")");
+  parts.push("malformed " + String(malformed));
+  parts.push("rate limited " + String(rateOpened + rateSilent + rateClosed) + " (opened " + String(rateOpened) + " / silent " + String(rateSilent) + " / closed " + String(rateClosed) + ")");
+  parts.push("provider overload " + String(overload));
+  parts.push(String(distinct.size) + " distinct chats");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 // The ONE writer for the chat-citation ledger line
 // (2026-11-20, the measured-proof series): the citation seam
 // above has always ledgered this exact shape, until now as
@@ -337,7 +464,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
     const capText=sessionCapReply(capStatus);
     try{const db=new ChatStore(root);try{db.add(chatId,"user",content,source);db.add(chatId,"assistant",capText);}finally{db.close();}}catch{/* the reply still returns */}
     if(noteCapTrip(root,chatId,route,capStatus.reason??"turns"))
-      recordActivity(root,profileName,"session-cap","Session cap reached in chat "+chatId.slice(0,8)+": "+capStatus.turnsUsed+" turns, "+capStatus.tokensUsed+" tokens today ("+(capStatus.reason??"turns")+" cap)");
+      recordActivity(root,profileName,"session-cap",sessionCapLedgerSummary(chatId,capStatus.turnsUsed,capStatus.tokensUsed,capStatus.reason??"turns"));
     return capText;
   }
   const db=new ChatStore(root);let history;
@@ -526,7 +653,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
       // line with the check that failed and the sizes involved
       // (never the content), so the class stays countable even
       // when the redraw saves the turn.
-      provider.onMalformedCompletion=(info)=>{try{recordActivity(root,profileName,"malformed-completion","Malformed completion in chat "+chatId.slice(0,8)+": "+info.detail+" (attempt "+info.attempt+" of "+info.limit+"; nothing executed, the model redraws)");}catch{/* the ledger never breaks a turn */}};
+      provider.onMalformedCompletion=(info)=>{try{recordActivity(root,profileName,"malformed-completion",malformedCompletionLedgerSummary(chatId,info.detail,info.attempt,info.limit));}catch{/* the ledger never breaks a turn */}};
       if(active?.connector_id){
         const pinned=connectors(root).find(c=>c.id===active.connector_id);
         if(!pinned||!pinned.enabled||!connectorCredentialPresent(root,pinned))throw Error("Profile connector unavailable");
@@ -569,13 +696,13 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
         let opened=false;
         try{opened=openRateLimitEpisode(root,chatId);}catch{opened=true;/* the store never breaks a turn: speak once-ish rather than raw - the failed open already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
         if(opened){
-          recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode opened, grace message sent (the raw provider error never reaches the owner)");
+          recordActivity(root,profileName,"rate-limit",rateLimitLedgerSummary(chatId,"opened"));
           reply=RATE_LIMIT_GRACE_MESSAGE;
           graceSpoke=true;
           answered=true;
           break;
         }
-        recordActivity(root,profileName,"rate-limit","Rate limited in chat "+chatId.slice(0,8)+": episode already open, staying silent");
+        recordActivity(root,profileName,"rate-limit",rateLimitLedgerSummary(chatId,"already-open"));
         if(reactable&&userMessageId)setReactionSafe(root,chatId,userMessageId,null);
         recordSessionTurn(root,{chatId,route,tokens:turnTokens});
         return "";
@@ -604,7 +731,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
             else store.add(chatId,"assistant",PROVIDER_OVERLOAD_MESSAGE);
           }finally{store.close();}
         }catch{/* the note never breaks the failure path: the throw below still marks the message failed */}
-        try{recordActivity(root,profileName,"provider-overload","Provider overloaded in chat "+chatId.slice(0,8)+": in-turn retries exhausted, the plain outage note is in the chat and the message stays marked failed, not lost (the raw provider error never reaches the owner)");}catch{/* the ledger never breaks a turn */}
+        try{recordActivity(root,profileName,"provider-overload",providerOverloadLedgerSummary(chatId));}catch{/* the ledger never breaks a turn */}
       }
       // Every other failure of an owner chat turn (chat trust
       // sprint, Dip live defect 2026-11-15): two of the owner's
@@ -666,7 +793,7 @@ async function runChatTurnInner(root:string,chatId:string,content:string,opts?:{
   // The grace reply itself is not a model success and never
   // closes the episode it just opened.
   if(!graceSpoke){
-    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit","Rate-limit episode closed in chat "+chatId.slice(0,8)+": a model call succeeded again");}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
+    try{if(closeRateLimitEpisode(root))recordActivity(root,profileName,"rate-limit",rateLimitLedgerSummary(chatId,"closed"));}catch{/* the episode store never breaks a turn - the failed close already ledgered one rate-limit-failed line in rate-limit.ts, so this catch records nothing more */}
   }
   let finalText=graceSpoke?reply:resuming?joinPartial(resuming.content,reply):reply;
   // Reply guard, save seam (the last net, behind the loops' own
