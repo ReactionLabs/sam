@@ -187,6 +187,48 @@ function recordStoreFailure(root: string, phase: "read" | "write", error: unknow
   const reason = orchestrationStoreFailureReason(error);
   try { recordActivity(root, "sam", "orchestration-failed", orchestrationFailureSummary(phase, reason)); } catch { /* the ledger must never mask the store error */ }
 }
+
+// The orchestration failed history scorecard (2026-11-22, the
+// measured-proof series): the orchestration store ledgers every
+// failed orchestration.db read or write as an
+// "orchestration-failed" line through the ONE writer above -
+// but the class was never folded, so how often the store's own
+// ledger died was invisible in aggregate (the existing
+// orchestration scorecard folds only lifecycle records). The
+// parser learns only the two fixed phases the seam writes; a
+// reason is consumed and never printed, and a line from any
+// other kind never parses. The fold is counts only: no stamp,
+// no actor, no phase name, no verbatim reason.
+export function parseOrchestrationFailedSummary(summary: string): { phase: string } | null {
+  const m = /^Orchestration store (write|read) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] ?? "" };
+}
+
+export function orchestrationFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "orchestration-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseOrchestrationFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Orchestration failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 function openStore(root: string): Database.Database {
   mkdirSync(join(resolve(root), ".sam"), { recursive: true });
   const db = openDatabase(dbFile(root));
