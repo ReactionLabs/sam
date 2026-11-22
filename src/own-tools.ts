@@ -6,7 +6,7 @@ import { linkExchange } from "./collab.js";
 import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions.js";
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
-import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
+import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, orchestrationContinuedHireLedgerSummary, orchestrationContinuedTeamLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
@@ -279,7 +279,7 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
         if(!isPoolRefusal(e))throw e;
         const ctx=currentSpawnPool();
         if(ctx&&advanceSpawnPoolTranche(ctx)){
-          try{recordActivity(root,actor,"orchestration-continued","Hiring continued into tranche "+ctx.tranche+" of this turn: the spawn pool refilled instead of refusing the hire");}catch{/* the ledger never breaks a turn */}
+          try{recordActivity(root,actor,"orchestration-continued",orchestrationContinuedHireLedgerSummary(ctx.tranche));}catch{/* the ledger never breaks a turn */}
           try{return await hire();}
           catch(e2){if(!isPoolRefusal(e2))throw e2;return poolRefusalResult(e2);}
         }
@@ -316,7 +316,7 @@ async function executeOwnToolAsyncInner(root:string,actor:string,name:string,arg
         if(!(e instanceof OrchestrationFitError)&&!isPoolRefusal(e))throw e;
         const ctx=currentSpawnPool();
         if(!ctx||!advanceSpawnPoolTranche(ctx))return poolRefusalResult(e as {remaining:{rounds:number;maxCalls:number};asks:{rounds:number;maxCalls:number}});
-        try{recordActivity(root,actor,"orchestration-continued","Team hiring continued into tranche "+ctx.tranche+" of this turn: the worker pool refilled instead of refusing the plan");}catch{/* the ledger never breaks a turn */}
+        try{recordActivity(root,actor,"orchestration-continued",orchestrationContinuedTeamLedgerSummary(ctx.tranche));}catch{/* the ledger never breaks a turn */}
         try{ ({ job } = await orchestrate(root, plan)); }
         catch(e2){
           if(!(e2 instanceof OrchestrationFitError)&&!isPoolRefusal(e2))throw e2;

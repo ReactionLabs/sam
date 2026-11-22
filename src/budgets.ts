@@ -393,3 +393,65 @@ export function budgetFallbackAnswer(executed: string[], skipped: string[], maxC
   if (reason === "steps") return "I ran out of steps for this turn (" + executed.length + " calls made" + (executed.length ? ": " + executed.join(", ") : "") + ") before I could finish, so this answer is incomplete. " + (skipped.length ? "These checks did not run: " + skipped.join(", ") + ". " : "") + "Ask me to continue, or hand the rest to the background, and I will pick it up from there.";
   return "I reached the tool budget for this turn (" + executed.length + " of " + maxCalls + " calls used" + (executed.length ? ": " + executed.join(", ") : "") + ") before I could finish, so this answer is incomplete. " + (skipped.length ? "These checks did not run: " + skipped.join(", ") + ". " : "") + "Ask me to continue, or hand the rest to the background, and I will pick it up from there.";
 }
+// Orchestration continuation history (gap found 2026-11-21,
+// hourly run 21:04 EST): when a hire or a team plan outgrows
+// a turn's spawn-pool tranche, own-tools advances the turn
+// into its next tranche and ledgers an
+// "orchestration-continued" line, in two shapes (a single
+// hire continuing, a team plan continuing), but the shapes
+// were inline strings with no writer, no parser, and no
+// fold, so how often turns had to refill their pool instead
+// of refusing work was invisible in aggregate. No store
+// holds these events - the tranche lives only in the turn's
+// in-memory spawn-pool context - so these ledger lines are
+// the only record a continuation ever happened. These are
+// the ONE writers for both shapes (byte-identical to the
+// inline shapes they replace; both own-tools seams ride
+// them), the parsers, and the history scorecard. They live
+// here, beside the other turn-budget ledger writers, because
+// own-tools already imports this module statically while a
+// static own-tools -> orchestration import would close a
+// cycle through subagents. A continuation is a recovery,
+// not a failure, so the verdict is attention only when a
+// line is unparseable, else clear. The scorecard text is a
+// script job's stdout and is P3-diffed on its facts, so it
+// is ONE line carrying counts only: no stamp, no actor, and
+// no verbatim summary. The scorecard path is a pure read -
+// it creates nothing, hires nothing, plans nothing, and
+// opens no store.
+export function orchestrationContinuedHireLedgerSummary(tranche: number): string {
+  return "Hiring continued into tranche " + tranche + " of this turn: the spawn pool refilled instead of refusing the hire";
+}
+export function orchestrationContinuedTeamLedgerSummary(tranche: number): string {
+  return "Team hiring continued into tranche " + tranche + " of this turn: the worker pool refilled instead of refusing the plan";
+}
+export function parseOrchestrationContinuedHireSummary(summary: string): { tranche: number } | null {
+  const m = /^Hiring continued into tranche (\d+) of this turn: the spawn pool refilled instead of refusing the hire$/.exec(summary);
+  return m ? { tranche: Number(m[1]) } : null;
+}
+export function parseOrchestrationContinuedTeamSummary(summary: string): { tranche: number } | null {
+  const m = /^Team hiring continued into tranche (\d+) of this turn: the worker pool refilled instead of refusing the plan$/.exec(summary);
+  return m ? { tranche: Number(m[1]) } : null;
+}
+export function orchestrationContinuedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "orchestration-continued" });
+  let hire = 0;
+  let team = 0;
+  let unparseable = 0;
+  const tranches = new Set<number>();
+  for (const line of lines) {
+    const parsedHire = parseOrchestrationContinuedHireSummary(line.summary);
+    if (parsedHire) { hire += 1; tranches.add(parsedHire.tranche); continue; }
+    const parsedTeam = parseOrchestrationContinuedTeamSummary(line.summary);
+    if (parsedTeam) { team += 1; tranches.add(parsedTeam.tranche); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Orchestration continued history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(hire) + " hire");
+  parts.push(String(team) + " team");
+  parts.push(String(tranches.size) + " distinct tranches");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
