@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 import { OperativeRegistry, OPERATIVE_HEARTBEAT_TTL_MS, type Operative } from "./operatives.js";
 
@@ -272,7 +272,7 @@ export function proposeDelegation(root: string, input: { actor?: string; adapter
     auth: { binEnv: launch.binEnv, keyEnv: launch.keyEnv, key: launch.key },
   };
   put(root, job);
-  recordActivity(root, job.actor, "delegate-proposed", "Delegation " + job.id + " cards the owner: " + spec.adapter + " " + spec.branch + " (nothing has run)");
+  recordActivity(root, job.actor, "delegate-proposed", delegateProposedLedgerSummary(job.id, spec.adapter, spec.branch));
   return job;
 }
 
@@ -398,6 +398,138 @@ export function delegateFailedSummary(status: string, error: unknown): string {
   return "Delegation " + status + ": " + delegateFailureReason(error);
 }
 
+// Delegation lifecycle history (gap found 2026-11-21, hourly
+// run 19:04 EST): the delegation lifecycle ledgers five
+// classes - "delegate-proposed", "delegate-output",
+// "delegate-done", "delegate-failed", and
+// "delegate-cancelled" (three shapes: the run terminal, the
+// catch-path reason form, and cancelDelegation's own line) -
+// but the shapes were inline strings in this module with no
+// writer, no parser, and no fold, so how many delegations
+// were ever proposed, completed, failed, or cancelled over
+// an install's life was invisible in aggregate; the
+// delegations store is rewritten in place and holds only
+// current jobs, so a finished delegation's history leaves
+// no surface but these lines (the failover-routes
+// precedent). These are the ONE writers for every shape
+// (byte-identical to the inline shapes they replace; the
+// five seams ride them), the parsers, and the history
+// scorecard. A failed delegation is the failure class, so
+// the verdict is attention when any failed was ever
+// recorded or any line is unparseable, else clear; a
+// cancellation is an owner act, not a failure. The
+// scorecard text is a script job's stdout and is
+// P3-diffed on its facts, so it is ONE line carrying
+// counts only: no stamp, no actor, no delegation id, no
+// adapter, no branch, no prompt, no output text, and no
+// verbatim summary. The scorecard path is a pure read -
+// it creates nothing, proposes nothing, and opens no
+// store.
+export function delegateProposedLedgerSummary(id: string, adapter: string, branch: string): string {
+  return "Delegation " + id + " cards the owner: " + adapter + " " + branch + " (nothing has run)";
+}
+
+export function delegateOutputLedgerSummary(adapter: string, id: string, cleanChunk: string): string {
+  return adapter + " " + id.slice(0, 8) + ": " + cleanChunk.replace(/\s+/g, " ").slice(0, 220);
+}
+
+export function delegateRunLedgerSummary(summary: string): string {
+  return summary.replace(/\s+/g, " ").slice(0, 280);
+}
+
+export function delegateFailureLedgerSummary(summary: string): string {
+  return summary.slice(0, 280);
+}
+
+export function delegateCancelledLedgerSummary(id: string, adapter: string, branch: string): string {
+  return "Cancelled delegation " + id + " (" + adapter + " " + branch + ")";
+}
+
+export function parseDelegateProposedSummary(summary: string): { id: string; adapter: string; branch: string } | null {
+  const m = /^Delegation (\S+) cards the owner: (\S+) (\S+) \(nothing has run\)$/.exec(summary);
+  if (!m) return null;
+  return { id: m[1] ?? "", adapter: m[2] ?? "", branch: m[3] ?? "" };
+}
+
+export function parseDelegateOutputSummary(summary: string): { adapter: string; idPrefix: string } | null {
+  const m = /^(\S+) ([0-9a-f]{8}): (.+)$/.exec(summary);
+  if (!m) return null;
+  return { adapter: m[1] ?? "", idPrefix: m[2] ?? "" };
+}
+
+export function parseDelegateDoneSummary(summary: string): { adapter: string; branch: string; exitCode: string } | null {
+  const m = /^Delegation done: (\S+) on branch (\S+) exit (\S+)/.exec(summary);
+  if (!m) return null;
+  return { adapter: m[1] ?? "", branch: m[2] ?? "", exitCode: m[3] ?? "" };
+}
+
+export function parseDelegateFailedSummary(summary: string): { adapter: string | null; branch: string | null } | null {
+  const m = /^Delegation failed: (.+)$/.exec(summary);
+  if (!m) return null;
+  const run = /^(\S+) on branch (\S+) exit \S+/.exec(m[1] ?? "");
+  return { adapter: run ? (run[1] ?? null) : null, branch: run ? (run[2] ?? null) : null };
+}
+
+export function parseDelegateCancelledSummary(summary: string): { id: string | null; adapter: string | null; branch: string | null } | null {
+  const own = /^Cancelled delegation (\S+) \((\S+) (\S+)\)$/.exec(summary);
+  if (own) return { id: own[1] ?? "", adapter: own[2] ?? "", branch: own[3] ?? "" };
+  const m = /^Delegation cancelled: (.+)$/.exec(summary);
+  if (!m) return null;
+  const run = /^(\S+) on branch (\S+) exit \S+/.exec(m[1] ?? "");
+  return { id: null, adapter: run ? (run[1] ?? null) : null, branch: run ? (run[2] ?? null) : null };
+}
+
+export function delegateHistoryScorecardText(root: string): string {
+  const proposedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "delegate-proposed" });
+  const outputLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "delegate-output" });
+  const doneLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "delegate-done" });
+  const failedLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "delegate-failed" });
+  const cancelledLines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "delegate-cancelled" });
+  let proposed = 0;
+  let output = 0;
+  let done = 0;
+  let failed = 0;
+  let cancelled = 0;
+  let unparseable = 0;
+  const delegations = new Set<string>();
+  for (const line of proposedLines) {
+    const parsed = parseDelegateProposedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    proposed += 1;
+    delegations.add(parsed.id);
+  }
+  for (const line of outputLines) {
+    if (!parseDelegateOutputSummary(line.summary)) { unparseable += 1; continue; }
+    output += 1;
+  }
+  for (const line of doneLines) {
+    if (!parseDelegateDoneSummary(line.summary)) { unparseable += 1; continue; }
+    done += 1;
+  }
+  for (const line of failedLines) {
+    if (!parseDelegateFailedSummary(line.summary)) { unparseable += 1; continue; }
+    failed += 1;
+  }
+  for (const line of cancelledLines) {
+    const parsed = parseDelegateCancelledSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    cancelled += 1;
+    if (parsed.id) delegations.add(parsed.id);
+  }
+  const total = proposedLines.length + outputLines.length + doneLines.length + failedLines.length + cancelledLines.length;
+  const parts: string[] = [];
+  parts.push("Delegate history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(proposed) + " proposed");
+  parts.push(String(done) + " done");
+  parts.push(String(failed) + " failed");
+  parts.push(String(cancelled) + " cancelled");
+  parts.push(String(output) + " output lines");
+  parts.push(String(delegations.size) + " distinct delegations");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 export async function runApprovedDelegation(root: string, action: { id: string; actor: string; chatId: string | null; detail: string }, env: NodeJS.ProcessEnv = process.env, spawnImpl: OperativeSpawn = defaultOperativeSpawn): Promise<Delegation> {
   const existing = readAll(root).find(d => d.actionId === action.id);
   if (existing?.status === "cancelled") throw new Error("Delegation was cancelled before it ran");
@@ -443,7 +575,7 @@ export async function runApprovedDelegation(root: string, action: { id: string; 
         appendLog(root, job.id, clean);
         if (chunks < 8 && clean.trim()) {
           chunks++;
-          recordActivity(root, job.actor, "delegate-output", spec.adapter + " " + job.id.slice(0, 8) + ": " + clean.replace(/\s+/g, " ").slice(0, 220));
+          recordActivity(root, job.actor, "delegate-output", delegateOutputLedgerSummary(spec.adapter, job.id, clean));
         }
       },
     });
@@ -464,7 +596,7 @@ export async function runApprovedDelegation(root: string, action: { id: string; 
       "Not pushed. No pull request was opened.",
     ].join("\n").slice(0, 4_000);
     put(root, job);
-    recordActivity(root, job.actor, "delegate-" + job.status, job.summary.replace(/\s+/g, " ").slice(0, 280));
+    recordActivity(root, job.actor, "delegate-" + job.status, delegateRunLedgerSummary(job.summary));
     postReport(root, job, job.summary);
     if (leased && job.leaseId) {
       const leases = new AssignmentLeases(registryPath(root));
@@ -476,7 +608,7 @@ export async function runApprovedDelegation(root: string, action: { id: string; 
     job.finishedAt = new Date().toISOString();
     job.summary = delegateFailedSummary(job.status, error);
     put(root, job);
-    recordActivity(root, job.actor, "delegate-" + job.status, job.summary.slice(0, 280));
+    recordActivity(root, job.actor, "delegate-" + job.status, delegateFailureLedgerSummary(job.summary));
     postReport(root, job, job.summary);
     throw error;
   } finally {
@@ -495,6 +627,6 @@ export function cancelDelegation(root: string, id: string): Delegation {
   job.finishedAt = new Date().toISOString();
   job.summary = "Delegation cancelled before it could finish. Nothing was pushed.";
   put(root, job);
-  recordActivity(root, job.actor, "delegate-cancelled", "Cancelled delegation " + job.id + " (" + job.adapter + " " + job.branch + ")");
+  recordActivity(root, job.actor, "delegate-cancelled", delegateCancelledLedgerSummary(job.id, job.adapter, job.branch));
   return job;
 }

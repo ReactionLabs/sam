@@ -83,7 +83,7 @@ import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, orchestrationScorecardText, planJob, remainingPool } from "./orchestration.js";
-import { cancelDelegation, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
+import { cancelDelegation, delegateHistoryScorecardText, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, detectSetup, readSetupRecord, runConfigWizard, setupHistoryScorecardText, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
@@ -1079,6 +1079,7 @@ delegateCmd.command("status").argument("[id]").description("One delegation, or e
   if(!id){output(listDelegations(root));return;}
   const job=getDelegation(root,id);if(!job)throw new Error("Unknown delegation: "+id);output(job);
 });
+delegateCmd.command("history").description("Delegate history as plain text with no clock reading - verdict, the proposed count, the done count, the failed count, the cancelled count, the output-line count, the distinct-delegation count as a number only, and the total (never a stamp, an actor, a delegation id, an adapter, a branch, a prompt, output text, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a failed delegation or a malformed line is the news (this is the sam-delegate-history script job's stdout; a pure read over the same activity ledger the delegation seams ledger: creates nothing, proposes nothing, runs nothing, opens no store; exits 0 always, the verdict lives in the text)").action(()=>output(delegateHistoryScorecardText(program.opts().workspace)));
 delegateCmd.command("cancel").argument("<id>").description("Cancel a pending card or kill a running operative. Nothing is pushed").action(async(id:string)=>{
   const root=program.opts().workspace as string;
   const current=getDelegation(root,id);if(!current)throw new Error("Unknown delegation: "+id);
