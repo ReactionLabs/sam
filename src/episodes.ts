@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 import { activeSuppressions, needleMatches, recordSuppressionBlock, MemorySuppressedError, type CaptureSuppression } from "./capture-guard.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Episodic memory (program P4): a dated summary record per profile of what
@@ -177,6 +177,48 @@ export function episodesFailureReason(error: unknown): string {
 export function recordEpisodesFailure(root: string, actor: string, phase: string, error: unknown): void {
   const reason = episodesFailureReason(error);
   recordActivity(root, actor, "episodes-failed", episodesFailureSummary(phase, reason));
+}
+
+// The episodes failed history scorecard (2026-11-22, the
+// measured-proof series): the episode write path ledgers every
+// corrupt evidence row it rebuilds as an "episodes-failed" line
+// through the ONE writer above - but the class was never folded,
+// so how often the evidence store's own read died was invisible
+// in aggregate. The parser learns only the one fixed phase the
+// seam writes ("read": the sole recordEpisodesFailure call site
+// is the corrupt-row detection in writeEpisode); a reason is
+// consumed and never printed, and a line from any other kind
+// never parses. The fold is counts only: no stamp, no actor, no
+// phase name, no verbatim reason.
+export function parseEpisodesFailedSummary(summary: string): { phase: string } | null {
+  const m = /^Episodes evidence (read) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] ?? "" };
+}
+
+export function episodesFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "episodes-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseEpisodesFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Episodes failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function writeEpisode(root: string, profile: string, date: string, chats: EpisodeChat[]): MemoryRecord | null {

@@ -1,0 +1,124 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { recordActivity } from "./activity.js";
+import { episodesFailedHistoryScorecardText, episodesFailureSummary, parseEpisodesFailedSummary } from "./episodes.js";
+import { heartbeatFactSignatureString, heartbeatOutputHash, heartbeatOutputsEquivalent } from "./heartbeat.js";
+import { scriptArgv, scriptCommandNames } from "./schedule.js";
+
+// The episodes failed history daily-measurement wiring
+// (2026-11-22, the measured-proof series): the episode write
+// path ledgers every corrupt evidence row it rebuilds as an
+// episodes-failed line through the ONE writer
+// episodesFailureSummary, and self-work ranks the class as a
+// defect keyed by phase - but the class was never folded, so
+// how often the evidence store's own read died was invisible
+// in aggregate. Every failure line is by construction an
+// evidence read that did not complete, so the verdict is
+// attention when any failure was ever recorded or any line
+// is unparseable, else clear. The scorecard text is a script
+// job's stdout and is P3-diffed on its facts, so it is ONE
+// line carrying counts only: no stamp, no actor, no phase
+// name, and no verbatim reason - the summaries carry phases
+// and reasons, which the fold consumes and never prints. The
+// scorecard path is a pure read - it creates nothing, sends
+// nothing, retries nothing, and writes no episode; every
+// state here is built through the ledger's own public door
+// (recordActivity) with the seam's own summary writer, never
+// around either.
+
+function scratch(): string {
+  return mkdtempSync(join(tmpdir(), "sam-episodes-failed-history-"));
+}
+
+const BARE = "Episodes failed history: clear, 0 failed, 0 distinct phases, 0 total";
+
+test("episodes failed history scorecard: a bare install is clear, stable, clock-free, P3-silent, and creates nothing", () => {
+  const dir = scratch();
+  try {
+    const text = episodesFailedHistoryScorecardText(dir);
+    assert.equal(text, BARE);
+    assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, "no stamp in the text");
+    assert.equal(text.includes("\n"), false, "the scorecard is one line");
+    assert.equal(existsSync(join(dir, ".sam")), false, "a pure read creates no store");
+    const again = episodesFailedHistoryScorecardText(dir);
+    assert.equal(again, text, "two reads of the same state produce identical text");
+    const prior = { hash: heartbeatOutputHash(text), sig: heartbeatFactSignatureString(text) };
+    assert.equal(
+      heartbeatOutputsEquivalent(prior, heartbeatOutputHash(again), heartbeatFactSignatureString(again)),
+      true,
+      "P3 judges a held episodes scorecard the same news",
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("episodes failed history scorecard: the writer's failures fold to counts, and no phase or reason surfaces", () => {
+  const dir = scratch();
+  try {
+    const clean = episodesFailedHistoryScorecardText(dir);
+    recordActivity(dir, "sam", "episodes-failed", episodesFailureSummary("read", "stored evidence for sam:2026-11-22 was not valid JSON; sekrit"));
+    recordActivity(dir, "sam", "episodes-failed", episodesFailureSummary("read", "stored evidence was not valid JSON"));
+    recordActivity(dir, "sam", "turn", "Answered in chat 6b222963");
+    const text = episodesFailedHistoryScorecardText(dir);
+    assert.equal(text, "Episodes failed history: attention, 2 failed, 1 distinct phases, 2 total");
+    assert.equal(text.includes("sekrit"), false, "no verbatim reason surfaces");
+    assert.equal(text.includes("read"), false, "no phase name surfaces");
+    assert.notEqual(text, clean, "the first recorded failure changes the scorecard");
+    const prior = { hash: heartbeatOutputHash(clean), sig: heartbeatFactSignatureString(clean) };
+    assert.equal(
+      heartbeatOutputsEquivalent(prior, heartbeatOutputHash(text), heartbeatFactSignatureString(text)),
+      false,
+      "P3 judges the grown scorecard as new news",
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("episodes failed history scorecard: the writer's own 200-char cap still folds from the fixed head", () => {
+  const dir = scratch();
+  try {
+    const capped = episodesFailureSummary("read", "x".repeat(500));
+    assert.equal(capped.length, 200, "the writer caps its line at 200");
+    recordActivity(dir, "sam", "episodes-failed", capped);
+    assert.deepEqual(parseEpisodesFailedSummary(capped), { phase: "read" });
+    const text = episodesFailedHistoryScorecardText(dir);
+    assert.equal(text, "Episodes failed history: attention, 1 failed, 1 distinct phases, 1 total");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("episodes failed history scorecard: an unmatched shape, an unknown phase, and an empty-reason shape count toward the total and the unparseable count and are never printed", () => {
+  const dir = scratch();
+  try {
+    recordActivity(dir, "sam", "episodes-failed", episodesFailureSummary("read", "stored evidence was not valid JSON"));
+    recordActivity(dir, "sam", "episodes-failed", "Some wholly novel episodes shape naming sekrit_evidence");
+    recordActivity(dir, "sam", "episodes-failed", "Episodes evidence write failed: boom sekrit");
+    recordActivity(dir, "sam", "episodes-failed", "Episodes evidence read failed:   ");
+    const text = episodesFailedHistoryScorecardText(dir);
+    assert.equal(text, "Episodes failed history: attention, 1 failed, 1 distinct phases, 4 total, 3 unparseable");
+    assert.equal(text.includes("novel episodes"), false, "an unmatched summary is never printed");
+    assert.equal(text.includes("sekrit"), false, "no verbatim summary surfaces");
+    assert.equal(text.includes("write"), false, "an unknown phase is never printed");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("episodes failed parse: the writer is byte-identical to the ledgered shape and parses, and only the fixed shapes parse", () => {
+  assert.equal(
+    episodesFailureSummary("read", "stored evidence was not valid JSON"),
+    "Episodes evidence read failed: stored evidence was not valid JSON",
+  );
+  assert.deepEqual(parseEpisodesFailedSummary(episodesFailureSummary("read", "boom")), { phase: "read" });
+  assert.equal(parseEpisodesFailedSummary(""), null);
+  assert.equal(parseEpisodesFailedSummary("Episodes evidence read failed:"), null, "a line with no reason does not parse");
+  assert.equal(parseEpisodesFailedSummary("Episodes evidence read failed: "), null, "a line with a blank reason does not parse");
+  assert.equal(parseEpisodesFailedSummary("Episodes evidence write failed: boom"), null, "a phase the seam never writes does not parse");
+  assert.equal(parseEpisodesFailedSummary("Context meter read failed: boom"), null, "a context-failed line never parses as an episodes line");
+  assert.deepEqual(parseEpisodesFailedSummary("Episodes evidence read failed: boom: with colon"), { phase: "read" }, "a reason carrying a colon still parses from the fixed head");
+});
+
+test("episodes failed history scorecard: the script allowlist rides the CLI scorecard", () => {
+  assert.ok(scriptCommandNames().includes("sam-episodes-failed-history"), "sam-episodes-failed-history is allowlisted");
+  const argv = scriptArgv("/some/root", "sam-episodes-failed-history");
+  assert.ok(argv.some(a => a.endsWith("cli.js")), "the argv runs the CLI");
+  assert.deepEqual(argv.slice(-2), ["episodes", "failed-history"], "the argv rides episodes failed-history");
+});

@@ -116,7 +116,7 @@ import { narrationScorecardText, reasoningLeakScorecardText } from "./reply-guar
 import { loopCheckScorecardText, scratchScorecardText, tripwireScorecardText } from "./loop-guards.js";
 import { turnDeadlineScorecardText } from "./turn-control.js";
 import { historyTrimScorecardText, loaderLoopScorecardText } from "./tool-tiers.js";
-import { listEpisodes } from "./episodes.js";
+import { episodesFailedHistoryScorecardText, listEpisodes } from "./episodes.js";
 import { closeLoop, listLoops, openLoop } from "./loops.js";
 import { loopRevisitHistoryScorecardText, revisitDueLoops } from "./loop-revisit.js";
 import { archiveManagedChat, branchManagedChat, listManagedChats, pinManagedChat, renameManagedChat, searchManagedChats, unarchiveManagedChat } from "./chat-manage.js";
@@ -353,6 +353,7 @@ noteCmd.command("classify").argument("<content>").option("--supersedes <id>","Re
 noteCmd.command("patch").description("Supersede one stored record by id with replacement text (Phase B item 2): always routed to the owner approval gate; on approval the new note saves and the old record is archived").argument("<id>").argument("<content>").option("--profile <name>","Acting profile (default sam = core scope)","sam").action((id:string,content:string,o:{profile:string})=>{const r=patchNote(program.opts().workspace,{actor:o.profile,id,content});output({status:r.status,tier:r.tier,reason:r.reason,proposalId:r.proposal.id,supersedes:r.supersedes});});
 const epCmd=program.command("episodes").description("Episodic memory: dated per-profile summaries of what happened in its chats, written by heartbeat consolidation (sam heartbeat)");
 epCmd.command("list").option("--profile <name>","Only this profile").action((o:{profile?:string})=>output(listEpisodes(program.opts().workspace,o.profile)));
+epCmd.command("failed-history").description("Episodes failed history as plain text with no clock reading - verdict, the failed count, the distinct-phase count as a number only, and the total (never a stamp, an actor, a phase name, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded evidence failure is the news (this is the sam-episodes-failed-history script job's stdout; a pure read over the same activity ledger the episode failure seam ledgers: creates nothing, sends nothing, retries nothing, writes no episode; exits 0 always, the verdict lives in the text)").action(()=>output(episodesFailedHistoryScorecardText(program.opts().workspace)));
 const loopCmd=program.command("loops").description("Open loops: questions whose answers may change, carried into the next session under 'Where things stand'");
 loopCmd.command("list").option("--profile <name>","Only this profile").option("--all","Include closed loops").action((o:{profile?:string;all?:boolean})=>output(listLoops(program.opts().workspace,{profile:o.profile,status:o.all?undefined:"open"})));
 loopCmd.command("open").argument("<profile>").argument("<question>").argument("<watchFor>").option("--answer <text>","The answer given").option("--hours <n>","Hours until the next look").action((profile:string,question:string,watchFor:string,o:{answer?:string;hours?:string})=>output(openLoop(program.opts().workspace,{profile,question,answer:o.answer??"",watchFor,dueInHours:o.hours?Number(o.hours):undefined})));
