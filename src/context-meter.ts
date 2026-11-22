@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Context metering (Program H, self-knowledge item D - filed
@@ -72,6 +72,47 @@ export function contextMeterFailureReason(error: unknown): string {
 export function recordContextMeterFailure(root: string, actor: string, phase: "write" | "read", error: unknown): void {
   const reason = contextMeterFailureReason(error);
   recordActivity(root, actor, "context-failed", contextMeterFailureSummary(phase, reason));
+}
+
+// The context failed history scorecard (2026-11-22, the
+// measured-proof series): the meter ledgers every failed
+// context.jsonl write or read as a "context-failed" line
+// through the ONE writer above, and self-work ranks the class
+// as a defect keyed by phase - but the class was never folded,
+// so how often the meter's own ledger died was invisible in
+// aggregate. The parser learns only the two fixed phases the
+// seam writes; a reason is consumed and never printed, and a
+// line from any other kind never parses. The fold is counts
+// only: no stamp, no actor, no phase name, no verbatim reason.
+export function parseContextFailedSummary(summary: string): { phase: string } | null {
+  const m = /^Context meter (write|read) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] ?? "" };
+}
+
+export function contextFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "context-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseContextFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Context failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function recordContextMeter(

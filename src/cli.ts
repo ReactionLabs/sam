@@ -135,7 +135,7 @@ import { modelRoutingTable } from "./model-routing.js";
 import { connectors } from "./connectors.js";
 import { recordActivity } from "./activity.js";
 import { usageSummary, readUsage } from "./usage.js";
-import { contextSummary, contextToday } from "./context-meter.js";
+import { contextFailedHistoryScorecardText, contextSummary, contextToday } from "./context-meter.js";
 import { CaptureGuardStore, addSuppression, suppressionScorecardText } from "./capture-guard.js";
 
 const program=new Command();
@@ -642,6 +642,7 @@ const usageCmd=program.command("usage").description("Token spend (P11): provider
 usageCmd.command("summary").option("--actor <name>","Only this profile").option("--route <route>","Only this route (chat, heartbeat, background)").option("--model <id>","Only this model").action((o:{actor?:string;route?:string;model?:string})=>output(usageSummary(program.opts().workspace,o)));
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
 usageCmd.command("context").option("--actor <name>","Only this profile").description("Injected-context size per turn (Program H): chars and words measured at assembly in .sam/context.jsonl, with the memory-derived tiers (law, recall, standing, summary, history) broken out - the size metric that rides beside token spend").action((o:{actor?:string})=>output({today:contextToday(program.opts().workspace),allTime:contextSummary(program.opts().workspace,o.actor?{actor:o.actor}:{})}));
+usageCmd.command("context-failed-history").description("Context failed history as plain text with no clock reading - verdict, the failed count, the distinct-phase count as a number only, and the total (never a stamp, an actor, a phase name, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded meter-ledger failure is the news (this is the sam-context-failed-history script job's stdout; a pure read over the same activity ledger the context meter failure seam ledgers: creates nothing, sends nothing, retries nothing, records no context; exits 0 always, the verdict lives in the text)").action(()=>output(contextFailedHistoryScorecardText(program.opts().workspace)));
 program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
   const root=program.opts().workspace as string;
   let targets;
