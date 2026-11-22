@@ -697,6 +697,15 @@ export function defaultRunScript(root:string):(name:string)=>Promise<{stdout:str
 // capped, the attempt count, the terminal settle named; never
 // the delivery text), so the owner console, the brief, and
 // self-work's defect queue can count the class.
+// The ONE writer for the heartbeat delivery-suppressed
+// activity line, so the suppressed-history scorecard's
+// parser below can never drift from the seam it counts. Its
+// shape is byte-identical to what the tick wrote inline
+// before this writer existed (the S5 worthiness hold: the
+// verbatim reason, never the delivery text).
+export function heartbeatSuppressedLedgerSummary(jobName:string,reason:string):string{
+ return "Heartbeat '"+jobName+"' update held: "+reason;
+}
 export function deliveryFailureSummary(jobName:string,reason:string,attempts:number,settled:boolean):string{
  const base="Delivery for heartbeat '"+jobName+"' failed (attempt "+attempts+" of 5): "+reason.replace(/\s+/g," ").trim();
  return (settled?base+" - gave up after 5 attempts; the update will not be retried":base).slice(0,200);
@@ -908,6 +917,61 @@ export function deliveryFailureHistoryScorecardText(root:string):string{
  parts.push("heartbeat "+String(heartbeatCount)+" / second answer "+String(secondAnswerCount));
  parts.push(String(settledCount)+" settled");
  parts.push(String(attemptsTotal)+" attempts");
+ parts.push(String(jobs.size)+" distinct jobs");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
+// The delivery-suppressed history scorecard (2026-11-22,
+// the measured-proof series): channel updates the S5
+// worthiness gate HOLD have ledgered as "delivery-suppressed"
+// lines from two seams shaped alike - this module's
+// heartbeatSuppressedLedgerSummary (the tick, when a changed
+// reply is held) and loop-revisit's loopSuppressedLedgerSummary
+// (the second-answer channel leg) - but no scorecard ever
+// folded the kind: the outbox scorecard folds the outbox
+// STORE's suppressed records, not these ledger lines (the
+// delivery-failed gap, closed for failures on 2026-11-21),
+// so how many updates the gate has ever held, from which
+// sender, and across how many jobs was invisible in
+// aggregate - the gate's own restraint was unmeasured. A
+// hold is the worthiness gate working as designed, not an
+// alarm, so the verdict is attention only when a line is
+// unparseable, else clear (the heartbeat-retired precedent).
+// This text folds the class to counts only, on ONE line:
+// the held count per fixed source (heartbeat / second
+// answer), the distinct-job count as a number only, and the
+// total. The reason each writer carries is consumed by the
+// parse and never printed, and no stamp, no actor, no job
+// name, and no verbatim summary enters the text. A pure
+// read: it creates nothing, spends no model call, sends
+// nothing, and holds nothing - both delivery seams are
+// untouched beyond riding their writers.
+export function parseDeliverySuppressedSummary(summary:string):{source:"heartbeat"|"second-answer";job:string|null}|null{
+ const hb=/^Heartbeat '([^']+)' update held: ([\s\S]+)$/.exec(summary);
+ if(hb)return {source:"heartbeat",job:hb[1]??""};
+ const loop=/^Second-answer channel update held: ([\s\S]+)$/.exec(summary);
+ if(loop)return {source:"second-answer",job:null};
+ return null;
+}
+export function deliverySuppressedHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"delivery-suppressed"});
+ let held=0;
+ let unparseable=0;
+ let heartbeatCount=0;
+ let secondAnswerCount=0;
+ const jobs=new Set<string>();
+ for(const line of lines){
+  const parsed=parseDeliverySuppressedSummary(line.summary);
+  if(!parsed){unparseable+=1;continue;}
+  held+=1;
+  if(parsed.source==="heartbeat"){heartbeatCount+=1;if(parsed.job)jobs.add(parsed.job);}
+  else secondAnswerCount+=1;
+ }
+ const parts:string[]=[];
+ parts.push("Delivery suppressed history: "+(unparseable>0?"attention":"clear"));
+ parts.push(String(held)+" held");
+ parts.push("heartbeat "+String(heartbeatCount)+" / second answer "+String(secondAnswerCount));
  parts.push(String(jobs.size)+" distinct jobs");
  parts.push(String(lines.length)+" total");
  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
@@ -1164,7 +1228,7 @@ export async function runHeartbeat(root:string,deps:HeartbeatDeps):Promise<{cons
    if(!verdict.deliver){
     markSuppressed(root,queued.id,verdict.reason);
     appendLog(root,{type:"delivery-suppressed",name:job.name,profile:job.profile,reason:verdict.reason});
-    recordActivity(root,job.profile,"delivery-suppressed","Heartbeat '"+job.name+"' update held: "+verdict.reason);
+    recordActivity(root,job.profile,"delivery-suppressed",heartbeatSuppressedLedgerSummary(job.name,verdict.reason));
    }else if(deps.deliver){
     try{await deps.deliver(job.channelId,queued.text);markDelivered(root,queued.id,false);deliveryResult.delivered.push(job.name);}
     catch(e){const failure=markAttemptFailed(root,queued.id,errorReason(e));appendLog(root,{type:"delivery-failed",name:job.name,reason:errorReason(e).slice(0,300)});recordDeliveryFailure(root,job.profile,job.name,e,failure);}

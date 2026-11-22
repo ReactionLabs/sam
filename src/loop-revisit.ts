@@ -137,6 +137,17 @@ function postToChat(root: string, chatId: string, text: string): boolean {
 // the terminal settle named at the cap, the verbatim reason
 // capped; never the delivery text or the question), under the
 // same kind, so self-work's delivery-failed class counts it.
+// The ONE writer for the second-answer delivery-suppressed
+// activity line, so the suppressed-history scorecard's
+// parser (heartbeat.ts) can never drift from the seam it
+// counts. Its shape is byte-identical to what the channel
+// leg wrote inline before this writer existed (the S5
+// worthiness hold: the verbatim reason, never the update
+// text or the question).
+export function loopSuppressedLedgerSummary(reason: string): string {
+  return "Second-answer channel update held: " + reason;
+}
+
 export function loopDeliveryFailureSummary(reason: string, attempts: number, settled: boolean): string {
   const base = "Delivery for second answer failed (attempt " + attempts + " of 5): " + reason.replace(/\s+/g, " ").trim();
   return (settled ? base + " - gave up after 5 attempts; the update will not be retried" : base).slice(0, 200);
@@ -259,7 +270,7 @@ export async function revisitDueLoops(root: string, deps: LoopRevisitDeps): Prom
         if (!assessment.deliver) {
           markSuppressed(root, queued.id, assessment.reason);
           result.held.push(loop.id);
-          recordActivity(root, loop.profile, "delivery-suppressed", "Second-answer channel update held: " + assessment.reason);
+          recordActivity(root, loop.profile, "delivery-suppressed", loopSuppressedLedgerSummary(assessment.reason));
         } else if (deps.deliver) {
           try { await deps.deliver(channelId, queued.text); markDelivered(root, queued.id, false); }
           catch (e) { const failure = markAttemptFailed(root, queued.id, errorReason(e)); recordLoopDeliveryFailure(root, loop.profile, e, failure); }
