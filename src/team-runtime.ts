@@ -518,6 +518,79 @@ export function teamMessagesFailedHistoryScorecardText(root: string): string {
   return parts.join(", ");
 }
 
+// The team run history scorecard (2026-11-22, the
+// measured-proof series): a standing team run closes
+// exactly once, and its closing ledgers one line under a
+// kind built from the run's own status - "team-done",
+// "team-blocked", or "team-failed" - at the single terminal
+// seam of runStandingTeam, but the shape was an inline
+// string with no writer, no parser, and no fold, so how
+// many runs ever finished, were stopped unapproved, or
+// died - and how many review rounds they spent - was
+// invisible in aggregate. The run store holds the runs,
+// but teamStatus reads back only the last 10, so a closing
+// survives as a count nowhere except these ledger lines.
+// This is the ONE writer for the shape (byte-identical to
+// the inline shape it replaces; the terminal seam rides
+// it), the parser, and the history scorecard. A blocked or
+// failed closing is itself the signal, so the verdict is
+// attention when any run ever blocked or failed or any
+// line is unparseable, else clear (the engine-history
+// precedent) - a done run is counted, not alarmed. The
+// scorecard text is a script job's stdout and is
+// P3-diffed on its facts, so it is ONE line carrying
+// counts only: no stamp, no actor, no run id, no member
+// name, no reason, and no verbatim summary. The scorecard
+// path is a pure read - it creates nothing, runs no team,
+// and opens no store.
+export function teamRunLedgerSummary(id: string, status: "done" | "blocked" | "failed", rounds: number, worker: string, reviewer: string, result?: string | null): string {
+  return "Team run " + id.slice(0, 8) + " " + status + " after " + rounds + " review round(s) (" + worker + " -> " + reviewer + ")" + (status === "failed" ? ": " + (result ?? "Team run failed").replace(/\s+/g, " ").slice(0, 160) : "");
+}
+export function parseTeamRunSummary(kind: string, summary: string): { status: "done" | "blocked" | "failed"; run: string; rounds: number } | null {
+  if (kind === "team-done" || kind === "team-blocked") {
+    const status = kind === "team-done" ? "done" : "blocked";
+    const m = new RegExp("^Team run ([0-9a-f]{8}) " + status + " after (\\d+) review round\\(s\\) \\([a-z][a-z0-9._-]{0,63} -> [a-z][a-z0-9._-]{0,63}\\)$").exec(summary);
+    return m ? { status, run: m[1] ?? "", rounds: Number(m[2]) } : null;
+  }
+  if (kind === "team-failed") {
+    const m = /^Team run ([0-9a-f]{8}) failed after (\d+) review round\(s\) \([a-z][a-z0-9._-]{0,63} -> [a-z][a-z0-9._-]{0,63}\): (.{1,160})$/.exec(summary);
+    return m ? { status: "failed", run: m[1] ?? "", rounds: Number(m[2]) } : null;
+  }
+  return null;
+}
+export function teamRunHistoryScorecardText(root: string): string {
+  let done = 0;
+  let blocked = 0;
+  let failed = 0;
+  let rounds = 0;
+  let unparseable = 0;
+  let total = 0;
+  const runs = new Set<string>();
+  for (const kind of ["team-done", "team-blocked", "team-failed"]) {
+    const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind });
+    total += lines.length;
+    for (const line of lines) {
+      const parsed = parseTeamRunSummary(kind, line.summary);
+      if (!parsed) { unparseable += 1; continue; }
+      if (parsed.status === "done") done += 1;
+      if (parsed.status === "blocked") blocked += 1;
+      if (parsed.status === "failed") failed += 1;
+      rounds += parsed.rounds;
+      runs.add(parsed.run);
+    }
+  }
+  const parts: string[] = [];
+  parts.push("Team run history: " + (blocked > 0 || failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(done) + " done");
+  parts.push(String(blocked) + " blocked");
+  parts.push(String(failed) + " failed");
+  parts.push(String(rounds) + " review rounds");
+  parts.push(String(runs.size) + " distinct runs");
+  parts.push(String(total) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function modelFor(member: StandingMember, fallback: string): string { return member.model?.trim() || fallback; }
 
 async function defaultStandingComplete(env: NodeJS.ProcessEnv): Promise<StandingCompleter> {
@@ -653,6 +726,6 @@ export async function runStandingTeam(root: string, task: string, opts?: { lead?
   }
   run.finishedAt = new Date().toISOString();
   putRun(root, run);
-  recordActivity(root, lead, "team-" + run.status, "Team run " + run.id.slice(0, 8) + " " + run.status + " after " + run.rounds + " review round(s) (" + worker.name + " -> " + reviewer.name + ")" + (run.status === "failed" ? ": " + (run.result ?? "Team run failed").replace(/\s+/g, " ").slice(0, 160) : ""));
+  recordActivity(root, lead, "team-" + run.status, teamRunLedgerSummary(run.id, run.status, run.rounds, worker.name, reviewer.name, run.result));
   return run;
 }
