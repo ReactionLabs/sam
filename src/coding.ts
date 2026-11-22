@@ -209,10 +209,11 @@ export function codingReviewLedgerSummary(verdict: string, title: string, blocke
 }
 
 // The coding-task scorecard (2026-11-19, the measured-proof
-// series; the branch stage folded in 2026-11-20): the C3
+// series; the branch stage folded in 2026-11-20, the commit
+// stage in 2026-11-22): the C3
 // coding loop ledgers its whole lifecycle
-// across seven activity kinds - queued, started, branched,
-// done, blocked, failed, reviewed - carrying the task's title (the
+// across eight activity kinds - queued, started, branched,
+// committed, done, blocked, failed, reviewed - carrying the task's title (the
 // head of its spec) on every line and, on the failed and
 // review lines, free text (the failure reason, the
 // reviewer's blocker findings). No daily surface ever
@@ -221,7 +222,8 @@ export function codingReviewLedgerSummary(verdict: string, title: string, blocke
 // The text folds counts only: per-stage counts, the done
 // split (verified vs no-changes) with the summed verified
 // files and iterations, blocked counts per fixed reason
-// bucket, review counts per verdict bucket, and the
+// bucket, review counts per verdict bucket, the summed
+// committed files, and the
 // distinct-task count as a NUMBER only (counted from the
 // queued lines' titles, the one line each task writes
 // exactly once). A summary matching no fixed shape for its
@@ -241,6 +243,7 @@ export function codingReviewLedgerSummary(verdict: string, title: string, blocke
 export type CodingSummaryParse =
   | { stage: "queued" | "started"; title: string }
   | { stage: "branch"; branch: string }
+  | { stage: "commit"; branch: string; files: number; iteration: number }
   | { stage: "done"; title: string; outcome: "verified" | "no-changes"; files: number; iterations: number }
   | { stage: "blocked"; title: string; bucket: "git" | "review-block" | "review-unavailable" | "uncommitted" | "state" | "other" }
   | { stage: "failed"; title: string }
@@ -258,6 +261,10 @@ export function parseCodingSummary(kind: string, summary: string): CodingSummary
   if (kind === "coding-branch") {
     const m = /^Coding branch (\S+) ready at ([0-9a-f]{7,40})$/.exec(summary);
     return m ? { stage: "branch", branch: m[1] } : null;
+  }
+  if (kind === "coding-commit") {
+    const m = /^Committed (.+) on (\S+) \(([0-9a-f]{12}), iteration (\d+)\)$/.exec(summary);
+    return m ? { stage: "commit", branch: m[2], files: m[1].split(", ").length, iteration: Number(m[4]) } : null;
   }
   if (kind === "coding-done") {
     const v = /^Coding task done and verified: (.+) \((\d+) file\(s\), (\d+) iteration\(s\)\)$/.exec(summary);
@@ -295,6 +302,7 @@ export function codingScorecardText(root: string): string {
     ["coding-queued", "Queued"],
     ["coding-started", "Started"],
     ["coding-branch", "Branched"],
+    ["coding-commit", "Committed"],
     ["coding-done", "Done"],
     ["coding-blocked", "Blocked"],
     ["coding-failed", "Failed"],
@@ -309,6 +317,7 @@ export function codingScorecardText(root: string): string {
   let doneNoChanges = 0;
   let verifiedFiles = 0;
   let verifiedIterations = 0;
+  let committedFiles = 0;
   const blockedBuckets: Record<string, number> = { git: 0, "review-block": 0, "review-unavailable": 0, uncommitted: 0, state: 0, other: 0 };
   const reviewBuckets: Record<string, number> = { pass: 0, block: 0, other: 0 };
   const counts: string[] = [];
@@ -319,6 +328,7 @@ export function codingScorecardText(root: string): string {
       if (!parsed) { unparseable += 1; continue; }
       if (parsed.stage === "queued") tasks.add(parsed.title);
       if (parsed.stage === "branch") branches.add(parsed.branch);
+      if (parsed.stage === "commit") { branches.add(parsed.branch); committedFiles += parsed.files; }
       if (parsed.stage === "done" && parsed.outcome === "verified") { doneVerified += 1; verifiedFiles += parsed.files; verifiedIterations += parsed.iterations; }
       if (parsed.stage === "done" && parsed.outcome === "no-changes") doneNoChanges += 1;
       if (parsed.stage === "blocked") blockedBuckets[parsed.bucket] += 1;
@@ -335,6 +345,7 @@ export function codingScorecardText(root: string): string {
   out.push("Done no changes: " + String(doneNoChanges));
   out.push("Verified files: " + String(verifiedFiles));
   out.push("Verified iterations: " + String(verifiedIterations));
+  out.push("Committed files: " + String(committedFiles));
   out.push("Blocked git: " + String(blockedBuckets.git));
   out.push("Blocked review block: " + String(blockedBuckets["review-block"]));
   out.push("Blocked review unavailable: " + String(blockedBuckets["review-unavailable"]));
@@ -346,7 +357,7 @@ export function codingScorecardText(root: string): string {
   out.push("Reviews other: " + String(reviewBuckets.other));
   out.push("Distinct tasks: " + String(tasks.size));
   out.push("Distinct branches: " + String(branches.size));
-  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never queues or drains a task, never prints a title, a reason, a finding, a branch, or a head; a blocked or failed task, a malformed line, or a mix shift is the news");
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never queues or drains a task, never prints a title, a reason, a finding, a path, a branch, or a head; a blocked or failed task, a malformed line, or a mix shift is the news");
   return out.join("\n");
 }
 

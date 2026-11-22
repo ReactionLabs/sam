@@ -137,6 +137,16 @@ export function codingBranchLedgerSummary(branch: string, head: string): string 
   return "Coding branch " + branch + " ready at " + head;
 }
 
+/** The ONE writer for the coding-commit ledger line: the
+ *  staged paths, the task branch, the commit head (the caller
+ *  passes the head already trimmed to 12 chars, exactly as
+ *  the historical inline shape wrote it), and the iteration.
+ *  The paths, the branch, and the head are locator data: the
+ *  coding scorecard counts them and never prints any of them. */
+export function codingCommitLedgerSummary(paths: string[], branch: string, head: string, iteration: number): string {
+  return "Committed " + paths.join(", ") + " on " + branch + " (" + head + ", iteration " + iteration + ")";
+}
+
 /** Prepare the task's branch before its first iteration. Creating
  *  or resuming sam/<task> is the only mutation; a dirty tree or an
  *  unborn HEAD refuses (mode "refused", the reason in `error`), and
@@ -187,7 +197,7 @@ export function commitTaskPaths(root: string, state: CodingGitState, paths: stri
     const sha = gitSync(repo, ["rev-parse", "HEAD"]);
     record = { sha: sha.out.trim(), iteration, paths: stagedPaths, at: new Date().toISOString() };
     state.commits.push(record);
-    recordActivity(root, "sam", "coding-commit", "Committed " + stagedPaths.join(", ") + " on " + state.branch + " (" + record.sha.slice(0, 12) + ", iteration " + iteration + ")");
+    recordActivity(root, "sam", "coding-commit", codingCommitLedgerSummary(stagedPaths, state.branch, record.sha.slice(0, 12), iteration));
   }
   const done = new Set([...covered, ...stagedPaths]);
   state.pending = state.pending.filter(p => !done.has(p));
