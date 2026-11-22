@@ -57,7 +57,7 @@ import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
-import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamMemberHistoryScorecardText, teamStatus } from "./team-runtime.js";
+import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamMemberHistoryScorecardText, teamMessagesFailedHistoryScorecardText, teamStatus } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill, setSkillAllowlist, skillAllowlist, skillAllowlistHistoryScorecardText, skillsForProfile } from "./skills.js";
@@ -771,6 +771,7 @@ teams.command("run").argument("[task]").option("--chat <uuid>","Existing chat id
  if(!task)throw new Error("Usage: sam team run <task>");
  output(await runStandingTeam(program.opts().workspace,task,{lead:o.lead,maxRounds:Number(o.rounds)}));
 });
+teams.command("messages-failed-history").description("Team messages failed history as plain text with no clock reading - verdict, the append count, the read count, the distinct-label count as a number only, and the total (never a stamp, an actor, a label, a member name, message text, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded failure is the news (this is the sam-team-messages-failed-history script job's stdout; a pure read over the same activity ledger the message-ledger failure seam ledgers: creates nothing, appends and reads no team message, opens no store; exits 0 always, the verdict lives in the text)").action(()=>output(teamMessagesFailedHistoryScorecardText(program.opts().workspace)));
 teams.command("status").description("Standing members, recent runs, and agent-to-agent messages").action(()=>output(teamStatus(program.opts().workspace)));
 const reviewCmd=program.command("review").description("Reviewer verdicts from standing team runs");
 reviewCmd.command("list").description("Recent runs with their verdict").action(()=>output(listTeamRuns(program.opts().workspace).map(run=>({id:run.id,status:run.status,worker:run.worker,reviewer:run.reviewer,rounds:run.rounds,verdict:run.verdict,workerModel:run.workerModel,reviewerModel:run.reviewerModel}))));

@@ -460,6 +460,64 @@ export function teamMemberHistoryScorecardText(root: string): string {
   return parts.join(", ");
 }
 
+// The team-messages failed history scorecard (2026-11-21,
+// the measured-proof series): every failed touch of the
+// standing team's message ledger ledgers one
+// "team-messages-failed" line through the ONE existing
+// writer teamMessagesFailureSummary (recordTeamMessagesFailure
+// rides it for both phases), but the shape was never folded,
+// so how often the team's own record of its work failed to
+// land or to read back was invisible in aggregate. The
+// message ledger is append-only, so a failed append leaves
+// no other surface, and a failed read rethrows - these
+// ledger lines are the only count either failure ever gets.
+// This is the parser and the history scorecard beside that
+// writer. A recorded failure is itself the signal, so the
+// verdict is attention when any failure was ever recorded
+// or any line is unparseable, else clear (the door-history
+// precedent). The scorecard text is a script job's stdout
+// and is P3-diffed on its facts, so it is ONE line carrying
+// counts only: no stamp, no actor, no label, no member
+// name, no message text, no reason, and no verbatim
+// summary. The scorecard path is a pure read - it creates
+// nothing, appends and reads no team message, and opens
+// no store.
+export function parseTeamMessagesFailedSummary(summary: string): { phase: "read" | "append"; label: string; kind: string | null; from: string | null; to: string | null } | null {
+  const m = /^Team messages (append|read) failed for (.+?): (.+)$/.exec(summary);
+  if (!m) return null;
+  const phase = m[1] as "read" | "append";
+  const label = m[2] ?? "";
+  if (phase === "read") {
+    return label === "ledger" ? { phase, label, kind: null, from: null, to: null } : null;
+  }
+  const lm = /^(assignment|work|review|result) ([a-z][a-z0-9._-]{0,63}) -> ([a-z][a-z0-9._-]{0,63})$/.exec(label);
+  return lm ? { phase, label, kind: lm[1] ?? null, from: lm[2] ?? null, to: lm[3] ?? null } : null;
+}
+export function teamMessagesFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "team-messages-failed" });
+  let append = 0;
+  let read = 0;
+  let unparseable = 0;
+  const labels = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseTeamMessagesFailedSummary(line.summary);
+    if (parsed) {
+      if (parsed.phase === "append") append += 1; else read += 1;
+      labels.add(parsed.label);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Team messages failed history: " + (append + read > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(append) + " append");
+  parts.push(String(read) + " read");
+  parts.push(String(labels.size) + " distinct labels");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function modelFor(member: StandingMember, fallback: string): string { return member.model?.trim() || fallback; }
 
 async function defaultStandingComplete(env: NodeJS.ProcessEnv): Promise<StandingCompleter> {
