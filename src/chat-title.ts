@@ -2,7 +2,7 @@ import { ChatStore } from "./chats.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { modelEndpoint, modelApiKey } from "./config-wizard.js";
 import { modelRoutingTable } from "./model-routing.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 
 // Auto-titling for chats the dashboard creates on the owner's first send
@@ -89,6 +89,84 @@ export function autotitleFailedSummary(chatId: string, error: unknown): string {
 
 export function recordAutotitleFailure(root: string, actor: string, chatId: string, error: unknown): void {
   recordActivity(root, actor, "autotitle-failed", autotitleFailedSummary(chatId, error));
+}
+
+// The autotitle-failed history scorecard (2026-11-22, the
+// measured-proof series): autotitle failures have ledgered
+// as "autotitle-failed" lines in the one fixed shape above
+// since the failure-ledgering fix landed (2026-11-17), and
+// self-work ranks the class as a defect - but the class was
+// never folded, so how often the title route has ever died,
+// on how many chats, and whether the cause was transport,
+// an unsafe completion, an empty completion, or something
+// else was invisible in aggregate; a persistently dead
+// title route would silently leave every new chat
+// provisionally named forever, counted nowhere. Every
+// failure line is by construction a title attempt the
+// completer could not finish, so the verdict is attention
+// when any failure was ever recorded or any line is
+// unparseable, else clear (the turn-failure precedent).
+// This text folds the whole ledger's autotitle-failed
+// lines to counts only, on ONE line: the parsed failure
+// count, the split per fixed reason-head bucket
+// (transport / unsafe / empty / other, read from the
+// reason's head only - the turn-retry bucket precedent),
+// the distinct-chat count as a number only, and the
+// total. No stamp, no actor, no chat id, and no verbatim
+// reason enters the text: the reason is consumed by the
+// bucket and never printed. The writer caps its own line
+// at 200 chars, so the stored shape is the writer's shape
+// alone (the ledger's 300-char cap never binds past it),
+// and a truncated reason still buckets exactly -
+// transport, unsafe, and empty all name themselves at the
+// head. A summary matching the fixed shape with an empty
+// or whitespace reason matches nothing: it counts toward
+// the total and the unparseable count only, and is never
+// printed. A pure read: it creates nothing, spends no
+// model call, and titles nothing - the ledger and the
+// autotitle seam are untouched beyond riding their
+// writer.
+export type AutotitleFailureBucket = "transport" | "unsafe" | "empty" | "other";
+function autotitleFailureBucket(reasonHead: string): AutotitleFailureBucket {
+  if (reasonHead.startsWith("fetch failed")) return "transport";
+  if (reasonHead.startsWith("Unsafe model output")) return "unsafe";
+  if (reasonHead.startsWith("Empty model response")) return "empty";
+  return "other";
+}
+export function parseAutotitleFailedSummary(summary: string): { chat: string; bucket: AutotitleFailureBucket } | null {
+  const m = /^Autotitle failed in chat ([0-9a-f]{8}): (.+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { chat: m[1] ?? "", bucket: autotitleFailureBucket(reason) };
+}
+export function autotitleFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "autotitle-failed" });
+  let failures = 0;
+  let transport = 0;
+  let unsafe = 0;
+  let empty = 0;
+  let other = 0;
+  let unparseable = 0;
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseAutotitleFailedSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    failures += 1;
+    chats.add(parsed.chat);
+    if (parsed.bucket === "transport") transport += 1;
+    else if (parsed.bucket === "unsafe") unsafe += 1;
+    else if (parsed.bucket === "empty") empty += 1;
+    else other += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Autotitle failed history: " + (failures > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failures) + " failures");
+  parts.push("transport " + String(transport) + " / unsafe " + String(unsafe) + " / empty " + String(empty) + " / other " + String(other));
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export async function autotitleChat(
