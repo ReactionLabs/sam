@@ -393,7 +393,7 @@ export function listSubagents(root: string, profile?: string): Subagent[] {
     item.result = "Process ended before completion; inspect evidence before resuming";
     item.finishedAt = new Date().toISOString();
     put(root, item);
-    recordActivity(root, item.profile, "subagent-interrupted", "Sub-agent " + item.id.slice(0, 8) + " was still running when the process ended; checkpoint kept, tools not replayed");
+    recordActivity(root, item.profile, "subagent-interrupted", subagentInterruptedLedgerSummary(item.id));
   }
   return profile ? items.filter(s => s.profile === profile) : items;
 }
@@ -559,14 +559,20 @@ export function subagentFailedSummary(id: string, error: unknown): string {
   return "Sub-agent " + id.slice(0, 8) + " failed: " + subagentFailureReason(error).slice(0, 180);
 }
 
-// The ONE writers for the other three lifecycle lines, so
+// The ONE writers for the other five lifecycle lines, so
 // the scorecard's parsers below can never drift from the
 // seams they count. Each shape is byte-identical to what
 // its seam wrote inline before these writers existed: the
 // spawn (id prefix, depth, tool count, carved budget), the
 // done (id prefix, role, the result collapsed and capped),
-// and the folded (id prefix, chat prefix). The failed line
-// already rides subagentFailedSummary above.
+// the folded (id prefix, chat prefix), the cancelled (the
+// fixed prefix plus the id prefix, at the cancelSubagent
+// seam), and the interrupted (the full fixed sentence, at
+// the listSubagents orphan sweep). The cancelled and
+// interrupted writers landed 2026-11-22 (hourly run 00:04
+// EST): those two endings were the last lifecycle shapes
+// still written inline, unnamed by any parser or fold. The
+// failed line already rides subagentFailedSummary above.
 export function subagentSpawnLedgerSummary(id: string, depth: number, toolCount: number, budget: { rounds: number; maxCalls: number }): string {
   return "Sub-agent " + id.slice(0, 8) + " depth " + depth + " tools " + toolCount + " budget " + budget.rounds + "x" + budget.maxCalls;
 }
@@ -576,31 +582,50 @@ export function subagentDoneLedgerSummary(id: string, role: string, result: stri
 export function subagentFoldedLedgerSummary(id: string, chatId: string): string {
   return "Folded " + id.slice(0, 8) + " into chat " + chatId.slice(0, 8);
 }
+export function subagentCancelledLedgerSummary(id: string): string {
+  return "Cancelled sub-agent " + id.slice(0, 8);
+}
+export function subagentInterruptedLedgerSummary(id: string): string {
+  return "Sub-agent " + id.slice(0, 8) + " was still running when the process ended; checkpoint kept, tools not replayed";
+}
 
 // The sub-agent scorecard (2026-11-18, the measured-proof
-// series): every invisible helper SAM spawns ledgers its
-// lifecycle across four activity kinds - spawn, done,
-// failed, folded - carrying the child's id prefix and, on
-// the done and failed lines, free text (the result's head,
-// the failure reason). No daily surface ever counted them,
-// so delegation going silent, a rising child failure share,
-// or spawns that never close was invisible in aggregate.
-// The text folds counts only: per-stage counts and the
-// distinct-child count as a NUMBER only, parsed from the
-// fixed summaries. A summary matching no fixed shape for
-// its kind counts under that kind and contributes no child
-// count, and no stamp, actor, id, role, chat prefix, result
-// text, reason, or verbatim summary is ever printed - a
-// child's result and reason are its work product and its
-// failure's detail, and neither belongs in a trending
-// surface. The verdict is attention when any child failed
-// or any line is unparseable, else clear. No stamp and no
-// actor enters the text, so a quiet day is byte-identical
-// and P3-silent, and a failed child, a malformed line, or
-// a mix shift is the news. A pure read: it creates nothing,
-// spends no model call, and spawns nothing - the ledger and
-// the lifecycle seams are untouched, and spawning a helper
-// stays the turn's job.
+// series; extended to the full lifecycle 2026-11-22, hourly
+// run 00:04 EST): every invisible helper SAM spawns ledgers
+// its lifecycle across six activity kinds - spawn, done,
+// failed, folded, cancelled, interrupted - carrying the
+// child's id prefix and, on the done and failed lines, free
+// text (the result's head, the failure reason). The first
+// cut folded only the first four: a cancelled child (the
+// owner's deliberate stop) and an interrupted child (a
+// process death the orphan sweep fenced, checkpoint kept,
+// tools not replayed) showed as spawns that never closed,
+// and how many helpers ever ended either way was invisible
+// in aggregate - the registry store holds only each child's
+// current status, so these ledger lines are the only count
+// either ending ever gets. No daily surface ever counted
+// them, so delegation going silent, a rising child failure
+// share, or spawns that never close was invisible in
+// aggregate. The text folds counts only: per-stage counts
+// and the distinct-child count as a NUMBER only, parsed
+// from the fixed summaries. A summary matching no fixed
+// shape for its kind counts under that kind and contributes
+// no child count, and no stamp, actor, id, role, chat
+// prefix, result text, reason, or verbatim summary is ever
+// printed - a child's result and reason are its work
+// product and its failure's detail, and neither belongs in
+// a trending surface. The verdict is attention when any
+// child failed, any child was interrupted, or any line is
+// unparseable, else clear - a cancellation is the owner's
+// act and is counted, not alarmed (the team-member
+// precedent); an interruption is a process death and is
+// itself the signal (the door-history precedent). No stamp
+// and no actor enters the text, so a quiet day is
+// byte-identical and P3-silent, and a failed or interrupted
+// child, a malformed line, or a mix shift is the news. A
+// pure read: it creates nothing, spends no model call, and
+// spawns nothing - the ledger and the lifecycle seams are
+// untouched, and spawning a helper stays the turn's job.
 export function parseSubagentSummary(kind: string, summary: string): { child: string } | null {
   if (kind === "subagent-spawn") {
     const m = /^Sub-agent (\S+) depth \d+ tools \d+ budget \d+x\d+$/.exec(summary);
@@ -618,6 +643,14 @@ export function parseSubagentSummary(kind: string, summary: string): { child: st
     const m = /^Folded (\S+) into chat \S+$/.exec(summary);
     return m ? { child: m[1] } : null;
   }
+  if (kind === "subagent-cancelled") {
+    const m = /^Cancelled sub-agent (\S+)$/.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
+  if (kind === "subagent-interrupted") {
+    const m = /^Sub-agent (\S+) was still running when the process ended; checkpoint kept, tools not replayed$/.exec(summary);
+    return m ? { child: m[1] } : null;
+  }
   return null;
 }
 export function subagentScorecardText(root: string): string {
@@ -626,9 +659,12 @@ export function subagentScorecardText(root: string): string {
     ["subagent-done", "Done"],
     ["subagent-failed", "Failed"],
     ["subagent-folded", "Folded"],
+    ["subagent-cancelled", "Cancelled"],
+    ["subagent-interrupted", "Interrupted"],
   ];
   const children = new Set<string>();
   let failed = 0;
+  let interrupted = 0;
   let unparseable = 0;
   const out: string[] = [];
   const counts: string[] = [];
@@ -640,12 +676,13 @@ export function subagentScorecardText(root: string): string {
       children.add(parsed.child);
     }
     if (kind === "subagent-failed") failed = lines.length;
+    if (kind === "subagent-interrupted") interrupted = lines.length;
     counts.push(label + ": " + String(lines.length));
   }
-  out.push("Sub-agents: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  out.push("Sub-agents: " + (failed > 0 || interrupted > 0 || unparseable > 0 ? "attention" : "clear"));
   out.push(...counts);
   out.push("Distinct children: " + String(children.size));
-  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never spawns a helper, never prints a child id, a role, a result, or a reason; a failed child, a malformed line, or a mix shift is the news");
+  out.push("Note: counts only, cumulative over the activity ledger - the scorecard never spawns a helper, never prints a child id, a role, a result, or a reason; a failed or interrupted child, a malformed line, or a mix shift is the news");
   return out.join("\n");
 }
 
@@ -863,6 +900,6 @@ export function cancelSubagent(root: string, id: string): Subagent {
   item.finishedAt = new Date().toISOString();
   put(root, item);
   finishLoop(root, item.loopId, "failed", "Cancelled by the owner");
-  recordActivity(root, item.profile, "subagent-cancelled", "Cancelled sub-agent " + item.id.slice(0, 8));
+  recordActivity(root, item.profile, "subagent-cancelled", subagentCancelledLedgerSummary(item.id));
   return item;
 }
