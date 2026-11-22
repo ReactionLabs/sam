@@ -83,6 +83,104 @@ export function guardrailLedgerSummary(executed: string[], skipped: string[], ce
   if (reason === "steps") return "Owner turn hit the internal budget guardrail (rounds): " + ceiling.rounds + " rounds used with " + executed.length + " calls (" + (executed.join(", ") || "none") + ") - closed with a synthesis from gathered material" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
   return "Owner turn hit the internal budget guardrail (calls): " + executed.length + "/" + ceiling.maxCalls + " calls used (" + (executed.join(", ") || "none") + ") - closed with a synthesis from gathered material" + (skipped.length ? "; not executed: " + skipped.join(", ") : "");
 }
+// The budget-guardrail history scorecard (2026-11-22, the
+// measured-proof series): the owner-turn hard ceiling trips
+// ledger as "budget-guardrail" lines through the ONE writer
+// above (guardrailLedgerSummary, ridden by both chat loops),
+// and self-work ranks the class as a defect - but the class
+// was never folded, so how often a turn has ever hit the hard
+// ceiling, whether it tripped on calls or on rounds, how many
+// calls it burned, and how many calls were left unexecuted
+// was invisible in aggregate. Every trip line is by
+// construction a runaway turn the ceiling had to stop, so
+// the verdict is attention when any trip was ever recorded
+// or any line is unparseable, else clear (the tool-budget
+// precedent). This text folds the whole ledger's
+// budget-guardrail lines to counts only, on ONE line: the
+// parsed trip count, the split per fixed reason (calls /
+// rounds), the summed executed calls, the summed
+// not-executed calls, the distinct-tool count as a number
+// only, and the total. Tool names ride each line's list
+// internally and surface as a count only: no stamp, no actor,
+// no tool name, and no verbatim summary enters the text. The
+// stored shapes are TWO: the writer's full shape, and the
+// ledger's 300-char capped shape (a ceiling trip's executed
+// list is long by construction, so a live line is cut
+// mid-list with the closing suffix gone); a capped line's
+// header still parses exactly, and its list contributes only
+// its complete entries (each name followed by a separator),
+// the turn-cost precedent - the trailing fragment may be a
+// partial name and is never counted, and a capped line's
+// not-executed tail is past the cap, so it contributes no
+// skipped count. A capped shape is only a capped shape at
+// the cap length: a shorter line missing its suffix matches
+// neither shape, counts toward the total and the
+// unparseable count only, and is never printed. The full
+// shape validates its executed list count against its
+// header, so a hand-shaped line cannot inflate the sums. A
+// pure read: it creates nothing, spends no model call, and
+// stops nothing - the ledger and the guardrail seams are
+// untouched beyond riding their writer.
+export function parseBudgetGuardrailSummary(summary: string): { reason: "calls" | "rounds"; executed: number; ceiling: number; skipped: number; tools: string[]; complete: boolean } | null {
+  const callsFull = /^Owner turn hit the internal budget guardrail \(calls\): (\d+)\/(\d+) calls used \(([^)]*)\) - closed with a synthesis from gathered material(?:; not executed: (.+))?$/.exec(summary);
+  if (callsFull) {
+    const executed = Number(callsFull[1]);
+    const list = callsFull[3] === "none" ? [] : (callsFull[3] ?? "").split(", ");
+    if (list.length !== executed) return null;
+    const skippedList = callsFull[4] ? callsFull[4].split(", ") : [];
+    return { reason: "calls", executed, ceiling: Number(callsFull[2]), skipped: skippedList.length, tools: list, complete: true };
+  }
+  const roundsFull = /^Owner turn hit the internal budget guardrail \(rounds\): (\d+) rounds used with (\d+) calls \(([^)]*)\) - closed with a synthesis from gathered material(?:; not executed: (.+))?$/.exec(summary);
+  if (roundsFull) {
+    const executed = Number(roundsFull[2]);
+    const list = roundsFull[3] === "none" ? [] : (roundsFull[3] ?? "").split(", ");
+    if (list.length !== executed) return null;
+    const skippedList = roundsFull[4] ? roundsFull[4].split(", ") : [];
+    return { reason: "rounds", executed, ceiling: Number(roundsFull[1]), skipped: skippedList.length, tools: list, complete: true };
+  }
+  if (summary.length >= 300) {
+    const callsCapped = /^Owner turn hit the internal budget guardrail \(calls\): (\d+)\/(\d+) calls used \((.+)$/.exec(summary);
+    if (callsCapped) {
+      const segments = (callsCapped[3] ?? "").split(", ");
+      return { reason: "calls", executed: Number(callsCapped[1]), ceiling: Number(callsCapped[2]), skipped: 0, tools: segments.slice(0, -1), complete: false };
+    }
+    const roundsCapped = /^Owner turn hit the internal budget guardrail \(rounds\): (\d+) rounds used with (\d+) calls \((.+)$/.exec(summary);
+    if (roundsCapped) {
+      const segments = (roundsCapped[3] ?? "").split(", ");
+      return { reason: "rounds", executed: Number(roundsCapped[2]), ceiling: Number(roundsCapped[1]), skipped: 0, tools: segments.slice(0, -1), complete: false };
+    }
+  }
+  return null;
+}
+export function budgetGuardrailHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "budget-guardrail" });
+  let trips = 0;
+  let callsTrips = 0;
+  let roundsTrips = 0;
+  let executed = 0;
+  let skipped = 0;
+  let unparseable = 0;
+  const tools = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseBudgetGuardrailSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    trips += 1;
+    if (parsed.reason === "calls") callsTrips += 1; else roundsTrips += 1;
+    executed += parsed.executed;
+    skipped += parsed.skipped;
+    for (const tool of parsed.tools) tools.add(tool);
+  }
+  const parts: string[] = [];
+  parts.push("Budget guardrail history: " + (trips > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(trips) + " trips");
+  parts.push("calls " + String(callsTrips) + " / rounds " + String(roundsTrips));
+  parts.push(String(executed) + " calls used");
+  parts.push(String(skipped) + " not executed");
+  parts.push(String(tools.size) + " distinct tools");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function guardrailFallbackAnswer(executed: string[], skipped: string[], ceiling: ToolBudget): string {
   // The last-resort close when even the tool-free synthesis would
   // not compose an answer at the ceiling. It is a finished statement
