@@ -516,6 +516,78 @@ export function recordHeartbeatLogFailure(root:string,phase:string,entryType:str
  const reason=heartbeatLogFailureReason(error);
  recordActivity(root,"sam","heartbeat-log-failed",heartbeatLogFailureSummary(phase,entryType,name,reason));
 }
+// The heartbeat log failed history scorecard (2026-11-22,
+// the measured-proof series): a failed touch of the
+// heartbeat log ledgers as a heartbeat-log-failed line
+// through the ONE writer heartbeatLogFailureSummary, and
+// self-work ranks the class as a defect - but the class
+// was never folded, so how often the log that status and
+// the daily brief fold as truth failed to land or to read
+// back was invisible in aggregate; the log's append is
+// also the seam the tick guard's own tick-failed line
+// rides, so a dead log can erase a stage failure's trace.
+// A recorded failure is itself the signal, so the verdict
+// is attention when any failure was ever recorded or any
+// line is unparseable, else clear (the outbox-failed
+// precedent, the same phase / label shape). This text
+// folds the whole ledger's heartbeat-log-failed lines to
+// counts only, on ONE line: the append count, the read
+// count, the distinct-entry-type count as a number only,
+// and the total. No stamp, no actor, no entry type, no
+// job name, and no verbatim reason enters the text: the
+// entry type and the job name are consumed by the fold
+// and never printed. The writer caps its own line at 300
+// chars, so the stored shape is the writer's shape alone;
+// a job name long enough to push the reason separator
+// past the cap folds as unparseable rather than as a
+// guessed count, and a capped reason still parses from
+// its head. A summary matching the fixed shape with an
+// empty or whitespace reason matches nothing: it counts
+// toward the total and the unparseable count only, and
+// is never printed. A pure read: it creates nothing,
+// sends nothing, retries nothing, and runs no tick - the
+// ledger and the log seams are untouched beyond riding
+// their writer.
+const HEARTBEAT_LOG_NAMED_ENTRY_TYPES=new Set(["job","job-failed","job-unchanged","job-retired","delivery-failed","delivery-recovered","delivery-suppressed"]);
+const HEARTBEAT_LOG_UNNAMED_ENTRY_TYPES=new Set(["consolidate","tick-failed","background","coding","engine","parallel","loops"]);
+export function parseHeartbeatLogFailedSummary(summary:string):{phase:"append"|"read";entryType:string}|null{
+ const read=/^Heartbeat log read failed for ledger: ([\s\S]+)$/.exec(summary);
+ if(read)return (read[1]??"").trim()?{phase:"read",entryType:"ledger"}:null;
+ const m=/^Heartbeat log append failed for ([a-z][a-z0-9-]*)(?: job '([^']+)')?: ([\s\S]+)$/.exec(summary);
+ if(!m)return null;
+ const entryType=m[1]??"";
+ const name=m[2] as string|undefined;
+ const reason=m[3]??"";
+ if(!reason.trim())return null;
+ if(HEARTBEAT_LOG_NAMED_ENTRY_TYPES.has(entryType))return name?{phase:"append",entryType}:null;
+ if(HEARTBEAT_LOG_UNNAMED_ENTRY_TYPES.has(entryType))return name===undefined?{phase:"append",entryType}:null;
+ if(entryType==="entry")return {phase:"append",entryType};
+ return null;
+}
+export function heartbeatLogFailedHistoryScorecardText(root:string):string{
+ const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"heartbeat-log-failed"});
+ let append=0;
+ let read=0;
+ let unparseable=0;
+ const entryTypes=new Set<string>();
+ for(const line of lines){
+  const parsed=parseHeartbeatLogFailedSummary(line.summary);
+  if(parsed){
+   if(parsed.phase==="append")append+=1;else read+=1;
+   entryTypes.add(parsed.entryType);
+   continue;
+  }
+  unparseable+=1;
+ }
+ const parts:string[]=[];
+ parts.push("Heartbeat log failed history: "+(append+read>0||unparseable>0?"attention":"clear"));
+ parts.push(String(append)+" append");
+ parts.push(String(read)+" read");
+ parts.push(String(entryTypes.size)+" distinct entry types");
+ parts.push(String(lines.length)+" total");
+ if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+ return parts.join(", ");
+}
 export function heartbeatLog(root:string,limit=20):Array<Record<string,unknown>>{
  // Read seam (gap found 2026-11-13, hourly run 21:04): this log is
  // folded as truth by status and the daily brief (failed-job counts,
