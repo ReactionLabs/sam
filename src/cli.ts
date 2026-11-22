@@ -57,7 +57,7 @@ import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
-import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamStatus } from "./team-runtime.js";
+import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamMemberHistoryScorecardText, teamStatus } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
 import { discoverSkills, findSkill, searchSkills, readSkill, setSkillAllowlist, skillAllowlist, skillAllowlistHistoryScorecardText, skillsForProfile } from "./skills.js";
@@ -753,6 +753,7 @@ teamMembers.command("add").argument("<name>").argument("<role>","builder, resear
   output(addTeamMember(program.opts().workspace,{name,role,tools:o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):[],model:o.model??null,maxCalls:Number(o.calls)}));
 });
 teamMembers.command("list").action(()=>output(listTeamMembers(program.opts().workspace)));
+teamMembers.command("history").description("Team member history as plain text with no clock reading - verdict, the added count, the removed count, the distinct-member count as a number only, and the total (never a stamp, an actor, a member name, a role, a model, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a malformed line is the news (this is the sam-team-member-history script job's stdout; a pure read over the same activity ledger the add and remove seams ledger: creates nothing, adds and removes no member, opens no store; exits 0 always, the verdict lives in the text)").action(()=>output(teamMemberHistoryScorecardText(program.opts().workspace)));
 teamMembers.command("remove").argument("<name>").action((name:string)=>output({removed:removeTeamMember(program.opts().workspace,name)}));
 teams.command("run").argument("[task]").option("--chat <uuid>","Existing chat id for the legacy research exchange").option("--objective <text>","Mission objective for the legacy research exchange").option("--live","Explicitly authorize model calls for the legacy research exchange").option("--inspect-workspace","Read a bounded allowlist of local source files").option("--web","Search online with configured Brave Search API key").option("--agent-tools","Allow researcher to choose bounded read-only workspace tools").option("--lead <name>","Lead profile for a standing-team run","sam").option("--rounds <n>","Review rounds before the run stops unapproved","3").description("Standing team: sam team run <task>. Legacy research exchange: sam team run --chat --objective --live").action(async(task:string|undefined,o:{chat?:string;objective?:string;live?:boolean;inspectWorkspace?:boolean;web?:boolean;agentTools?:boolean;lead:string;rounds:string})=>{
  if(o.chat||o.objective||o.live){

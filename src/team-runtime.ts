@@ -11,7 +11,7 @@ import { randomUUID } from "node:crypto";
 import { OperativeRegistry } from "./operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { profileToolNames } from "./subagents.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 
@@ -386,7 +386,7 @@ export function addTeamMember(root: string, input: { name: string; role: string;
   } finally { reg.close(); }
   const member: StandingMember = { name: input.name, role, capabilities, tools, model: input.model ?? null, budget: { maxCalls } };
   putMember(root, member);
-  recordActivity(root, "sam", "team-member", "Added " + member.name + " as " + member.role + (member.model ? " on " + member.model : ""));
+  recordActivity(root, "sam", "team-member", teamMemberAddedLedgerSummary(member.name, member.role, member.model));
   return member;
 }
 
@@ -399,8 +399,65 @@ export function removeTeamMember(root: string, name: string): boolean {
     const found = reg.list().find(o => o.name === name);
     if (found) reg.setState(found.id, "offline");
   } finally { reg.close(); }
-  recordActivity(root, "sam", "team-member", "Removed team member " + name);
+  recordActivity(root, "sam", "team-member", teamMemberRemovedLedgerSummary(name));
   return true;
+}
+
+// The team member history scorecard (2026-11-21, the
+// measured-proof series): standing-team membership changes
+// ledger one "team-member" line each - an add through
+// addTeamMember, a removal through removeTeamMember - but
+// the shapes were inline strings with no writer, no parser,
+// and no fold, so how often the standing team gained or
+// lost a member was invisible in aggregate. The team store
+// holds only CURRENT members, so a removed member and every
+// past roster leave no surface but these ledger lines.
+// These are the ONE writers for both shapes (byte-identical
+// to the inline shapes they replace; both seams ride them),
+// the parsers, and the history scorecard. A membership
+// change is an owner's act, not a failure, so the verdict
+// is attention only when a line is unparseable, else clear.
+// The scorecard text is a script job's stdout and is
+// P3-diffed on its facts, so it is ONE line carrying counts
+// only: no stamp, no actor, no member name, no role, no
+// model, and no verbatim summary. The scorecard path is a
+// pure read - it creates nothing, adds and removes no
+// member, and opens no store.
+export function teamMemberAddedLedgerSummary(name: string, role: string, model: string | null): string {
+  return "Added " + name + " as " + role + (model ? " on " + model : "");
+}
+export function teamMemberRemovedLedgerSummary(name: string): string {
+  return "Removed team member " + name;
+}
+export function parseTeamMemberAddedSummary(summary: string): { name: string; role: string; model: string | null } | null {
+  const m = /^Added ([a-z][a-z0-9._-]{0,63}) as (builder|researcher|qa|reviewer)(?: on (\S+))?$/.exec(summary);
+  return m ? { name: m[1] ?? "", role: m[2] ?? "", model: m[3] ?? null } : null;
+}
+export function parseTeamMemberRemovedSummary(summary: string): { name: string } | null {
+  const m = /^Removed team member ([a-z][a-z0-9._-]{0,63})$/.exec(summary);
+  return m ? { name: m[1] ?? "" } : null;
+}
+export function teamMemberHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "team-member" });
+  let added = 0;
+  let removed = 0;
+  let unparseable = 0;
+  const members = new Set<string>();
+  for (const line of lines) {
+    const parsedAdded = parseTeamMemberAddedSummary(line.summary);
+    if (parsedAdded) { added += 1; members.add(parsedAdded.name); continue; }
+    const parsedRemoved = parseTeamMemberRemovedSummary(line.summary);
+    if (parsedRemoved) { removed += 1; members.add(parsedRemoved.name); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Team member history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(added) + " added");
+  parts.push(String(removed) + " removed");
+  parts.push(String(members.size) + " distinct members");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function modelFor(member: StandingMember, fallback: string): string { return member.model?.trim() || fallback; }
