@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -133,6 +133,62 @@ export function sessionCapsFailureSummary(what: string, chatId: string, reason: 
  * and no record content ever enters the line. */
 export function sessionCapsFailureReason(error: unknown): string {
   return errorReason(error);
+}
+
+export type SessionCapsWhat = "ledger read" | "turn record" | "cap trip";
+
+// The session caps failed history scorecard (2026-11-22, the
+// measured-proof series): the caps ledger ledgers every failed
+// touch as a "session-caps-failed" line through the ONE writer
+// sessionCapsFailureSummary above, ridden by the one seam
+// recordSessionCapsFailure - but the class was never folded,
+// so how often the spend bound's own ledger died was invisible
+// in aggregate; the caps status folds the successful events,
+// never these failure lines. The parser learns only the
+// writer's fixed shapes: one of the three whats (ledger read /
+// turn record / cap trip), the chat segment (the chat id's
+// first 8 chars; present always on the two writes, and on a
+// ledger read only when the reader knew the chat), and a
+// non-empty reason, consumed and never printed. A line from
+// any other kind never parses. The fold is counts only: no
+// stamp, no actor, no what name, no chat prefix, no reason,
+// no verbatim summary - distinct operations and distinct
+// chats surface as numbers only.
+export function parseSessionCapsFailedSummary(summary: string): { what: SessionCapsWhat; chat: string | null } | null {
+  const m = /^Session caps (ledger read|turn record|cap trip) failed(?: for chat (\S{1,8}))?: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const what = m[1] as SessionCapsWhat;
+  const chat = m[2] ?? null;
+  if (what !== "ledger read" && chat === null) return null;
+  const reason = m[3] ?? "";
+  if (!reason.trim()) return null;
+  return { what, chat };
+}
+
+export function sessionCapsFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "session-caps-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const whats = new Set<string>();
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseSessionCapsFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      whats.add(parsed.what);
+      if (parsed.chat !== null) chats.add(parsed.chat);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Session caps failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(whats.size) + " distinct operations");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function recordSessionCapsFailure(root: string, what: string, chatId: string, error: unknown): void {
