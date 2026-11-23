@@ -421,6 +421,62 @@ export function suppressionScorecardText(root: string): string {
   return parts.join(", ");
 }
 
+// The capture guard failed history scorecard (2026-11-23, the
+// measured-proof series): the capture guard store's touches
+// ledger every failure as a "capture-guard-failed" line
+// through the ONE writer above (captureGuardFailureSummary,
+// fixed shape "Capture guard store <phase> failed: <reason>",
+// capped 200; phases read / write, ridden by
+// recordCaptureGuardFailure from the store's touches, actor
+// sam) - and while the suppression scorecard folds the guard's
+// other two kinds (memory-suppression / memory-suppressed), it
+// never touches this kind, so a dead store - the store that
+// holds the owner's do-not-store instructions - could fail
+// every touch with nothing counting the class in aggregate.
+// Every failure line is by construction a guard touch that did
+// not complete its store work, so the verdict is attention
+// when any failure was ever recorded or any line is
+// unparseable, else clear. This parser is strict: only the two
+// phases the store's touches write parse, and a non-empty
+// reason is required and consumed, never printed - suppression
+// needles are the owner's secret words and never enter the
+// writer's line or this fold. A line from any other kind never
+// parses. A pure read: it creates nothing, updates nothing,
+// and reads no suppression record - the guard seams themselves
+// are untouched.
+export function parseCaptureGuardFailedSummary(summary: string): { phase: CaptureGuardPhase } | null {
+  const m = /^Capture guard store (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as CaptureGuardPhase };
+}
+
+export function captureGuardFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "capture-guard-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let write = 0;
+  for (const line of lines) {
+    const parsed = parseCaptureGuardFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else write += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Capture guard failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function countExistingMatches(root: string, profile: string, needle: string): number {
   try {
     // Lazy import shape avoided: missions.db is read directly so
