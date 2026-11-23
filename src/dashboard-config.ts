@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // The dashboard config store: which profile the dashboard (and
@@ -144,6 +144,51 @@ export function dashboardConfigFailureReason(error: unknown): string {
 export function recordDashboardConfigFailure(root: string, phase: DashboardConfigPhase, error: unknown): void {
   const reason = dashboardConfigFailureReason(error);
   recordActivity(root, "sam", "dashboard-config-failed", dashboardConfigFailureSummary(phase, reason));
+}
+
+// The dashboard config failed history scorecard (2026-11-23, the
+// measured-proof series): the dashboard config store ledgers every
+// failed store touch as a "dashboard-config-failed" line through the
+// ONE writer above (dashboardConfigFailureSummary, one fixed shape:
+// "Dashboard config <phase> failed: <reason>", phases read / resolve /
+// write, ledger actor sam always) - but the class was never
+// folded, so how often the default-agent resolution itself died was
+// invisible in aggregate. The parser learns only the writer's fixed
+// shape: one of the three phases and a non-empty reason, the reason
+// consumed and never printed. A line from any other kind never parses.
+// The fold is counts only: no stamp, no phase name beyond the
+// fixed per-phase counts, no reason, no verbatim summary, and
+// no config content (the default agent and team-events flag are
+// routing data, never failure data).
+export function parseDashboardConfigFailedSummary(summary: string): { phase: DashboardConfigPhase } | null {
+  const m = /^Dashboard config (read|resolve|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] as DashboardConfigPhase };
+}
+
+export function dashboardConfigFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "dashboard-config-failed" });
+  let failed = 0;
+  let read = 0;
+  let resolve = 0;
+  let write = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseDashboardConfigFailedSummary(line.summary);
+    if (parsed) { failed += 1; if (parsed.phase === "read") read += 1; else if (parsed.phase === "resolve") resolve += 1; else write += 1; continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Dashboard config failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(resolve) + " resolve");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagDashboardConfigLedgered(error: unknown): void {
