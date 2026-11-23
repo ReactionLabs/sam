@@ -192,6 +192,68 @@ function failPairing(root: string, phase: PairingPhase, error: unknown): never {
   throw error;
 }
 
+// The pairing failed history scorecard (2026-11-23, the
+// measured-proof series): the pairing store's touches ledger
+// every failure as a "pairing-failed" line through the ONE
+// writer above (pairingFailureSummary, fixed shape "Pairing
+// <phase> failed: <reason>", phases read / redeem / issue,
+// ridden by recordPairingFailure from the store's read door,
+// the redeem path, and the issue path, actor sam) - but the
+// class was never folded, so how often the store that holds
+// the pairing codes and the 5-failure lockout guards failed
+// a touch was invisible in aggregate. The pairing history
+// scorecard folds only the lifecycle lines (issued /
+// redeemed / lockout), never these failure lines. Every
+// failure line is by construction a pairing touch that did
+// not complete its store work, and here the losses are
+// security-shaped (the guards in this store ARE the lockout
+// record), so the verdict is attention when any failure was
+// ever recorded or any line is unparseable, else clear. The
+// parser learns only the writer's fixed shape: one of the
+// three phases and a non-empty reason, consumed and never
+// printed. A line from any other kind never parses. The
+// fold is counts only: no stamp, no reason, no verbatim
+// summary, and no pairing record ever surfaces (code hashes
+// and guard counts are security data and never enter the
+// writer's line either). A pure read: it creates nothing,
+// issues nothing, and redeems nothing - the pairing seams
+// themselves are untouched.
+export function parsePairingFailedSummary(summary: string): { phase: PairingPhase } | null {
+  const m = /^Pairing (read|redeem|issue) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as PairingPhase };
+}
+
+export function pairingFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "pairing-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let redeem = 0;
+  let issue = 0;
+  for (const line of lines) {
+    const parsed = parsePairingFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else if (parsed.phase === "redeem") redeem += 1;
+      else issue += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Pairing failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(redeem) + " redeem");
+  parts.push(String(issue) + " issue");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // The store's read door (the heartbeatState / episodeEvidence
 // precedent): the full pairing snapshot read through the store's own
 // shape. A pure read on an install with neither file creates nothing.
