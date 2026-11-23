@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Channels are how the outside world talks to SAM: a messaging surface (Telegram
@@ -129,6 +129,63 @@ export function channelFailureReason(error: unknown): string {
 export function recordChannelFailure(root: string, phase: ChannelPhase, error: unknown): void {
   const reason = channelFailureReason(error);
   recordActivity(root, "sam", "channel-failed", channelFailureSummary(phase, reason));
+}
+
+// The channel failed history scorecard (2026-11-23, the
+// measured-proof series): the channel registry's read doors
+// ledger every failure as a "channel-failed" line through the
+// ONE writer above (channelFailureSummary, fixed shapes
+// "Channel read failed: <reason>" / "Channel lookup failed:
+// <reason>", capped 200; phases read / lookup, ridden by
+// recordChannelFailure from channels() and getChannel(), actor
+// sam) - and while self-work's classifyDefect labels single
+// lines and the bridge folds count the bridge's own kinds, no
+// surface folds this kind, so a dead channels.db - the registry
+// the Telegram bridge resolves through on every poll, pairing
+// and bindings read, and heartbeat delivery finds its target
+// through - could fail every touch with nothing counting the
+// class in aggregate. Every failure line is by construction a
+// registry touch that did not complete, so the verdict is
+// attention when any failure was ever recorded or any line is
+// unparseable, else clear. This parser is strict: only the two
+// shapes the writer writes parse, and a non-empty reason is
+// required and consumed, never printed - a reason can carry a
+// store path or a redacted token segment and never surfaces
+// here, and no channel record ever enters the fold. A line from
+// any other kind never parses. A pure read: it creates nothing,
+// updates nothing, and reads no channel record - the registry
+// seams themselves are untouched.
+export function parseChannelFailedSummary(summary: string): { phase: ChannelPhase } | null {
+  const m = /^Channel (read|lookup) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as ChannelPhase };
+}
+
+export function channelFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "channel-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let lookup = 0;
+  for (const line of lines) {
+    const parsed = parseChannelFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else lookup += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Channel failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(lookup) + " lookup");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagChannelLedgered(error: unknown): void {
