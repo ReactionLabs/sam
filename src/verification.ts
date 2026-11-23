@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -84,6 +84,63 @@ export function verificationFailureReason(error: unknown): string {
 export function recordVerificationFailure(root: string, phase: "read" | "append", eventLabel: string, error: unknown): void {
   const reason = verificationFailureReason(error);
   recordActivity(root, "sam", "verification-failed", verificationFailureSummary(phase, eventLabel, reason));
+}
+
+// The verification failed history scorecard (2026-11-23, the
+// measured-proof series): the verify-on-stop ledger ledgers
+// every failed touch of itself as a "verification-failed" line
+// through the ONE writer above (verificationFailureSummary,
+// naming the phase and the event label), ridden by
+// recordVerificationFailure from both seams (the append catch,
+// which never throws, and the read catch, which ledgers and
+// rethrows fail-closed) - but the class was never folded, so
+// how often the ledger that decides "done" itself died was
+// invisible in aggregate; a dead append can lose a landed
+// change or a known verdict with no trace anywhere else, and
+// a dead read fails every gate check closed, indistinguishable
+// from a quiet day on every surface except this ledger line.
+// The parser learns only the writer's fixed shapes: read for
+// the ledger label, append for a change event (the path and
+// the source consumed and never printed) or a verification
+// event (build / test, passed / failed, the run segment
+// consumed and never counted - callers pass run ids from "r1"
+// to full UUIDs, so no fixed-width run shape is assumed), and
+// a non-empty reason, the reason consumed and never printed.
+// A line from any other kind never parses. The fold is counts
+// only: no stamp, no phase name, no event name, no path, no
+// source, no run prefix, no reason, no verbatim summary -
+// distinct events surface as a number only.
+export function parseVerificationFailedSummary(summary: string): { phase: "read" | "append"; event: string } | null {
+  const read = /^Verification read failed for ledger: ([\s\S]+)$/.exec(summary);
+  if (read) return (read[1] ?? "").trim() ? { phase: "read" as const, event: "ledger" } : null;
+  const change = /^Verification append failed for change ([\s\S]+) \(source ([^)]+)\): ([\s\S]+)$/.exec(summary);
+  if (change) return (change[3] ?? "").trim() ? { phase: "append" as const, event: "change" } : null;
+  const verdict = /^Verification append failed for verification (build|test) (passed|failed) \(run ([^)]+)\): ([\s\S]+)$/.exec(summary);
+  if (verdict) return (verdict[4] ?? "").trim() ? { phase: "append" as const, event: "verification " + (verdict[1] ?? "") + " " + (verdict[2] ?? "") } : null;
+  return null;
+}
+
+export function verificationFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "verification-failed" });
+  let failed = 0;
+  let append = 0;
+  let read = 0;
+  let unparseable = 0;
+  const events = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseVerificationFailedSummary(line.summary);
+    if (parsed) { failed += 1; if (parsed.phase === "append") append += 1; else read += 1; events.add(parsed.event); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Verification failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(append) + " append");
+  parts.push(String(read) + " read");
+  parts.push(String(events.size) + " distinct events");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function eventLabel(event: LedgerEvent): string {
