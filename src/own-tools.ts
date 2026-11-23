@@ -8,7 +8,7 @@ import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, orchestrationContinuedHireLedgerSummary, orchestrationContinuedTeamLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
 import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
-import { recordActivity } from "./activity.js";
+import { recordActivity, readActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
 import type { SpawnPoolContext } from "./subagents.js";
@@ -101,6 +101,48 @@ export function skillCatalogFailureReason(error:unknown):string{
 }
 export function recordSkillCatalogFailure(root:string,actor:string,error:unknown):void{
   recordActivity(root,actor,"skill-catalog-failed",skillCatalogFailureSummary(actor,skillCatalogFailureReason(error)));
+}
+// The skill catalog failed history scorecard (2026-11-23, the
+// measured-proof series): the catalog assembly ledgers every
+// failed discovery touch as a "skill-catalog-failed" line
+// through the ONE writer above (skillCatalogFailureSummary,
+// naming the actor whose catalog failed to assemble), ridden
+// by recordSkillCatalogFailure - but the class was never
+// folded, so how often a catalog assembly failed, and for how
+// many distinct profiles, was invisible in aggregate; a dead
+// discovery strips the entire catalog from a profile's turns,
+// indistinguishable from an empty library on every surface
+// except this ledger line. The parser learns only the writer's
+// fixed shape: the fixed prefix, a single-token actor, and a
+// non-empty reason, the reason consumed and never printed. A
+// line from any other kind never parses. The fold is counts
+// only: no stamp, no actor, no reason, no verbatim summary -
+// distinct actors surface as a number only.
+export function parseSkillCatalogFailedSummary(summary:string):{actor:string}|null{
+  const m=/^Skill catalog assemble failed for (\S+): ([\s\S]+)$/.exec(summary);
+  if(!m)return null;
+  const actor=(m[1]??"").trim();
+  const reason=m[2]??"";
+  if(!actor||!reason.trim())return null;
+  return {actor};
+}
+export function skillCatalogFailedHistoryScorecardText(root:string):string{
+  const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"skill-catalog-failed"});
+  let failed=0;
+  let unparseable=0;
+  const actors=new Set<string>();
+  for(const line of lines){
+    const parsed=parseSkillCatalogFailedSummary(line.summary);
+    if(parsed){failed+=1;actors.add(parsed.actor);continue;}
+    unparseable+=1;
+  }
+  const parts:string[]=[];
+  parts.push("Skill catalog failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+  parts.push(String(failed)+" failed");
+  parts.push(String(actors.size)+" distinct actors");
+  parts.push(String(lines.length)+" total");
+  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+  return parts.join(", ");
 }
 // The installed-skill catalog line for a chat system prompt: names and
 // descriptions only, never instructions. SAM cannot use a skill it does not
