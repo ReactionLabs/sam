@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { PreferenceStore, type Preference } from "./preferences.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 
 // Fence integrity (Program H, self-knowledge item C - filed
 // requirement 4): fences get first claim on the budget and must
@@ -107,6 +107,95 @@ export function fenceIntegrityFailureSummary(profile: string, check: FenceCheck)
 
 export function recordFenceIntegrityFailure(root: string, actor: string, profile: string, check: FenceCheck): void {
   recordActivity(root, actor, "fence-integrity-failed", fenceIntegrityFailureSummary(profile, check));
+}
+
+// The fence integrity failed history scorecard (2026-11-22, the
+// measured-proof series): the compaction fold ledgers every
+// standing-law movement as a "fence-integrity-failed" line
+// through the ONE writer fenceIntegrityFailureSummary above,
+// ridden by the one seam recordFenceIntegrityFailure - but the
+// class was never folded, so how often a profile's law moved
+// across a fold was invisible in aggregate. The parser learns
+// only the writer's fixed shapes: the digest fallback; a
+// changed part whose explicit count precedes its list of
+// 8-char record-id slices (the listed ids must agree with the
+// count, unless the writer's 300-char cap truncated the list,
+// which only a line at the cap can claim); and a lost part of
+// at most 4 comma-separated identifiers (identifiers never
+// carry a comma or a semicolon; the list is consumed and
+// never counted or printed). A line from any other kind never
+// parses. The fold is counts only: no stamp, no actor, no
+// profile name, no record id, no identifier, no verbatim
+// summary - the changed-record counts are summed from the
+// explicit counts at the head of each changed part, which the
+// cap can never reach.
+export function parseFenceIntegrityFailedSummary(summary: string): { profile: string; changed: number } | null {
+  const m = /^Fence integrity check failed for profile ([^:]+): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const profile = m[1] ?? "";
+  if (!profile || profile !== profile.trim()) return null;
+  const tail = m[2] ?? "";
+  if (tail === "law snapshot digest changed") return { profile, changed: 0 };
+  let changedPart: string | null = tail;
+  let lostPart: string | null = null;
+  const lostSep = "; identifier(s) lost: ";
+  const lostIdx = tail.indexOf(lostSep);
+  if (lostIdx >= 0) {
+    changedPart = tail.slice(0, lostIdx);
+    lostPart = tail.slice(lostIdx + lostSep.length);
+  } else if (tail.startsWith("identifier(s) lost: ")) {
+    changedPart = null;
+    lostPart = tail.slice("identifier(s) lost: ".length);
+  }
+  if (lostPart !== null) {
+    if (!lostPart) return null;
+    const identifiers = lostPart.split(", ");
+    if (identifiers.length > 4) return null;
+    for (const identifier of identifiers) {
+      if (!identifier || identifier !== identifier.trim() || /[,;]/.test(identifier)) return null;
+    }
+  }
+  let changed = 0;
+  if (changedPart !== null) {
+    const cm = /^(\d+) law record\(s\) changed: ([\s\S]+)$/.exec(changedPart);
+    if (!cm) return null;
+    const n = Number(cm[1]);
+    if (!Number.isSafeInteger(n) || n < 1) return null;
+    const ids = (cm[2] ?? "").split(", ");
+    for (const id of ids) {
+      if (!/^[^\s,;]{1,8}$/.test(id)) return null;
+    }
+    if (ids.length > n) return null;
+    if (ids.length < n && summary.length < 300) return null;
+    changed = n;
+  }
+  return { profile, changed };
+}
+
+export function fenceIntegrityFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "fence-integrity-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let changedRecords = 0;
+  const profiles = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseFenceIntegrityFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      profiles.add(parsed.profile);
+      changedRecords += parsed.changed;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Fence integrity failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(profiles.size) + " distinct profiles");
+  parts.push(String(changedRecords) + " changed records");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The paired check compaction runs around a fold: snapshot,
