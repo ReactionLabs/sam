@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -137,6 +137,57 @@ export function rateLimitFailureReason(error: unknown): string {
 export function recordRateLimitFailure(root: string, phase: RateLimitPhase, error: unknown, chatId?: string): void {
   const reason = rateLimitFailureReason(error);
   recordActivity(root, "sam", "rate-limit-failed", rateLimitFailureSummary(phase, reason, chatId));
+}
+
+// The rate-limit failed history scorecard (2026-11-22, the
+// measured-proof series): the episode store ledgers every
+// failed touch as a "rate-limit-failed" line through the ONE
+// writer rateLimitFailureSummary above, ridden by the one
+// seam recordRateLimitFailure - but the class was never
+// folded, so how often the grace mechanism's own store failed
+// (the failure that inverts the speak-once contract) was
+// invisible in aggregate; the guardrail history folds the
+// episode lines themselves, never these failure lines. The
+// parser learns only the writer's fixed shapes: one of the
+// three phases (read / open / close), the optional chat
+// segment (the chat id's first 8 chars, present only when
+// the touch knew the chat), and a non-empty reason, consumed
+// and never printed. A line from any other kind never
+// parses. The fold is counts only: no stamp, no actor, no
+// chat prefix, no reason, no verbatim summary - distinct
+// phases and distinct chats surface as numbers only.
+export function parseRateLimitFailedSummary(summary: string): { phase: RateLimitPhase; chat: string | null } | null {
+  const m = /^Rate limit (read|open|close) failed(?: for chat (\S{1,8}))?: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[3] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] as RateLimitPhase, chat: m[2] ?? null };
+}
+
+export function rateLimitFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "rate-limit-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseRateLimitFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      phases.add(parsed.phase);
+      if (parsed.chat !== null) chats.add(parsed.chat);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Rate limit failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagRateLimitLedgered(error: unknown): void {
