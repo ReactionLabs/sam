@@ -130,6 +130,49 @@ export function recordDraftFailure(root: string, phase: DraftPhase, error: unkno
   recordActivity(root, "sam", "draft-failed", draftFailureSummary(phase, reason));
 }
 
+// The draft failed history scorecard (2026-11-23, the
+// measured-proof series): the draft store ledgers every failed
+// store touch as a "draft-failed" line through the ONE writer
+// above (draftFailureSummary, one fixed shape: "Draft <phase>
+// failed: <reason>", phases read / write, ledger actor sam
+// always) - but the class was never folded, so how often the
+// outbound drafting surface itself died was invisible in
+// aggregate. The parser learns only the writer's fixed shape:
+// one of the two phases and a non-empty reason, the reason
+// consumed and never printed. A line from any other kind never
+// parses. The fold is counts only: no stamp, no phase name
+// beyond the fixed per-phase counts, no reason, no verbatim
+// summary, and no draft content (a draft's recipient, subject,
+// and body are the owner's outbound words, never failure data).
+export function parseDraftFailedSummary(summary: string): { phase: DraftPhase } | null {
+  const m = /^Draft (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] as DraftPhase };
+}
+
+export function draftFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "draft-failed" });
+  let failed = 0;
+  let read = 0;
+  let write = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseDraftFailedSummary(line.summary);
+    if (parsed) { failed += 1; if (parsed.phase === "read") read += 1; else write += 1; continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Draft failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function tagDraftLedgered(error: unknown): void {
   if (error !== null && (typeof error === "object" || typeof error === "function")) {
     (error as { draftLedgered?: boolean }).draftLedgered = true;
