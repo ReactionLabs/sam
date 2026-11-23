@@ -196,6 +196,56 @@ export function recordCorrectionFailure(root: string, actor: string, error: unkn
   const reason = correctionFailureReason(error);
   recordActivity(root, actor, "correction-failed", correctionFailureSummary(actor, reason));
 }
+// The correction failed history scorecard (2026-11-23, the
+// measured-proof series): the live turn's correction routing
+// ledgers every failed routing as a "correction-failed" line
+// through the ONE writer above (correctionFailureSummary, one
+// fixed shape: "Correction propose failed for <actor>:
+// <reason>", the one fixed phase propose, capped 200), ridden
+// by recordCorrectionFailure from the ONE seam
+// tryRouteCorrection - but the class was never folded, so how
+// often an owner's correction died at the routing (the turn
+// continued without following it and without acknowledging a
+// proposal, the P6 contract failing in the turn where it
+// mattered) was invisible in aggregate. The correction
+// scorecard folds only the successful proposed-law lines,
+// never these failure lines. The parser learns only the
+// writer's fixed shape: the fixed propose head, a single-token
+// actor, and a non-empty reason; the actor is consumed for the
+// distinct count and never printed, and the reason is consumed
+// and never printed. A line from any other kind never parses.
+// The fold is counts only: no stamp, no actor, no reason, no
+// verbatim summary, and never the owner's message text or the
+// correction statement (neither ever enters the writer's line
+// either). A pure read: it creates nothing, spends no model
+// call, and routes nothing - the routing seam is untouched.
+export function parseCorrectionFailedSummary(summary: string): { actor: string } | null {
+  const m = /^Correction propose failed for (\S+): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const actor = m[1] ?? "";
+  const reason = m[2] ?? "";
+  if (!actor || !reason.trim()) return null;
+  return { actor };
+}
+
+export function correctionFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "correction-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const actors = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseCorrectionFailedSummary(line.summary);
+    if (parsed) { failed += 1; actors.add(parsed.actor); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Correction failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(actors.size) + " distinct actors");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function tryRouteCorrection(root: string, input: { actor: string; chatId?: string | null; text: string }): { proposal: ActionProposal; created: boolean } | null {
   try { return proposeCorrection(root, input); }
   catch (error) { recordCorrectionFailure(root, input.actor, error); return null; }
