@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 import { MemoryStore, type MemoryRecord } from "./memory.js";
 import { visibleScopes } from "./links.js";
 import { listLoops } from "./loops.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 /**
@@ -246,6 +246,53 @@ export function recallFailureReason(error: unknown): string {
 export function recordRecallFailure(root: string, actor: string, phase: RecallPhase, error: unknown): void {
   const reason = recallFailureReason(error);
   recordActivity(root, actor, "recall-failed", recallFailureSummary(actor, phase, reason));
+}
+
+// The recall failed history scorecard (2026-11-23, the
+// measured-proof series): the recall assembly ledgers every
+// failed seam as a "recall-failed" line through the ONE writer
+// above (recallFailureSummary, naming the phase and the actor),
+// ridden by recordRecallFailure from every seam (assemble,
+// list, loops, search, semantic) - but the class was never
+// folded, so how often SAM answered with no memory at all was
+// invisible in aggregate; a failed seam drops only its own
+// section and a total failure reads exactly as empty memory,
+// indistinguishable from SAM simply knowing nothing on every
+// surface except this ledger line. The parser learns only the
+// writer's fixed shape: one of the five typed phases, a
+// single-token actor, and a non-empty reason, the actor and
+// the reason consumed and never printed. A line from any other
+// kind never parses. The fold is counts only: no stamp, no
+// phase name, no actor, no reason, no verbatim summary -
+// distinct phases and distinct actors surface as numbers only.
+export function parseRecallFailedSummary(summary: string): { phase: RecallPhase; actor: string } | null {
+  const m = /^Recall (assemble|list|loops|search|semantic) failed for (\S+): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const actor = (m[2] ?? "").trim();
+  const reason = m[3] ?? "";
+  if (!actor || !reason.trim()) return null;
+  return { phase: m[1] as RecallPhase, actor };
+}
+
+export function recallFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "recall-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const phases = new Set<string>();
+  const actors = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseRecallFailedSummary(line.summary);
+    if (parsed) { failed += 1; phases.add(parsed.phase); actors.add(parsed.actor); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Recall failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(phases.size) + " distinct phases");
+  parts.push(String(actors.size) + " distinct actors");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The message-relevant search, guarded: a dead FTS search
