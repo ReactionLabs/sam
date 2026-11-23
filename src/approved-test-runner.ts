@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { recordVerification } from "./verification.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, writeFileSync, unlinkSync, openSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { errorReason } from "./error-reason.js";
@@ -56,6 +56,60 @@ export function executionAuditFailureReason(error:unknown):string{
 export function recordExecutionAuditFailure(root:string,phase:"read"|"append",eventLabel:string,error:unknown):void{
   const reason=executionAuditFailureReason(error);
   recordActivity(root,"sam","execution-audit-failed",executionAuditFailureSummary(phase,eventLabel,reason));
+}
+// The execution-audit failed history scorecard (2026-11-23, the
+// measured-proof series): the approved runner ledgers every
+// failed audit touch as an "execution-audit-failed" line
+// through the ONE writer above (executionAuditFailureSummary,
+// naming the phase and the event label), ridden by
+// recordExecutionAuditFailure from both seams (the append
+// catch, which never throws, and the read catch, which
+// ledgers and rethrows) - but the class was never folded, so
+// how often the runner's own audit ledger died, and whether
+// a requested / started / finished event ever failed to land,
+// was invisible in aggregate; a dead append can spend a
+// consumed one-use authorization or discard a finished run's
+// result, indistinguishable from a quiet day on every surface
+// except this ledger line. The parser learns only the
+// writer's fixed shapes: read for the ledger label, append
+// for a requested / started / finished build-or-test event
+// with an optional 8-char run prefix (the prefix consumed and
+// never counted as an event), and a non-empty reason, the
+// reason consumed and never printed. A line from any other
+// kind never parses. The fold is counts only: no stamp, no
+// phase name, no event name, no run prefix, no reason, no
+// verbatim summary - distinct events surface as a number
+// only.
+export function parseExecutionAuditFailedSummary(summary:string):{phase:"read"|"append";event:string}|null{
+  const read=/^Execution audit read failed for ledger: ([\s\S]+)$/.exec(summary);
+  if(read)return (read[1]??"").trim()?{phase:"read" as const,event:"ledger"}:null;
+  const m=/^Execution audit append failed for (requested|started|finished) (build|test)(?: \(run [0-9a-f]{8}\))?: ([\s\S]+)$/.exec(summary);
+  if(!m)return null;
+  const reason=m[3]??"";
+  if(!reason.trim())return null;
+  return {phase:"append" as const,event:(m[1]??"")+" "+(m[2]??"")};
+}
+export function executionAuditFailedHistoryScorecardText(root:string):string{
+  const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"execution-audit-failed"});
+  let failed=0;
+  let append=0;
+  let read=0;
+  let unparseable=0;
+  const events=new Set<string>();
+  for(const line of lines){
+    const parsed=parseExecutionAuditFailedSummary(line.summary);
+    if(parsed){failed+=1;if(parsed.phase==="append")append+=1;else read+=1;events.add(parsed.event);continue;}
+    unparseable+=1;
+  }
+  const parts:string[]=[];
+  parts.push("Execution audit failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+  parts.push(String(failed)+" failed");
+  parts.push(String(append)+" append");
+  parts.push(String(read)+" read");
+  parts.push(String(events.size)+" distinct events");
+  parts.push(String(lines.length)+" total");
+  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+  return parts.join(", ");
 }
 function auditEventLabel(entry:Record<string,unknown>):string{
   const event=typeof entry.event==="string"?entry.event:"event";
