@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { TurnRoute } from "./budgets.js";
 import type { ModelTier } from "./model-routing.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Token spend accounting (program P11): every model response that carries
@@ -97,6 +97,64 @@ export function usageReadFailureReason(error: unknown): string {
 export function recordUsageReadFailure(root: string, error: unknown): void {
   const reason = usageReadFailureReason(error);
   recordActivity(root, "sam", "usage-failed", usageReadFailureSummary(reason));
+}
+
+export type UsageWhat = "record" | "ledger read";
+
+// The usage failed history scorecard (2026-11-23, the
+// measured-proof series): the usage ledger ledgers every failed
+// touch as a "usage-failed" line through the TWO writers above
+// (usageFailureSummary for a failed record, naming the model;
+// usageReadFailureSummary for a failed ledger read, no model),
+// ridden by recordUsageFailure / recordUsageReadFailure - but
+// the class was never folded, so how often the spend ledger's
+// own touches died was invisible in aggregate; the usage
+// summary folds the successful entries, never these failure
+// lines. The parser learns only the writers' fixed shapes: a
+// record line (a model and a non-empty reason) or a ledger
+// read line (a non-empty reason), the reason consumed and
+// never printed. A line from any other kind never parses. The
+// fold is counts only: no stamp, no actor, no operation name,
+// no model name, no reason, no verbatim summary - distinct
+// operations and distinct models surface as numbers only.
+export function parseUsageFailedSummary(summary: string): { what: UsageWhat; model: string | null } | null {
+  const read = /^Usage ledger read failed: ([\s\S]+)$/.exec(summary);
+  if (read) {
+    if (!(read[1] ?? "").trim()) return null;
+    return { what: "ledger read", model: null };
+  }
+  const rec = /^Usage record failed for model (.+?): ([\s\S]+)$/.exec(summary);
+  if (!rec) return null;
+  const model = (rec[1] ?? "").trim();
+  const reason = rec[2] ?? "";
+  if (!model || !reason.trim()) return null;
+  return { what: "record", model };
+}
+
+export function usageFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "usage-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const whats = new Set<string>();
+  const models = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseUsageFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      whats.add(parsed.what);
+      if (parsed.model !== null) models.add(parsed.model);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Usage failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(whats.size) + " distinct operations");
+  parts.push(String(models.size) + " distinct models");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export function recordUsage(
