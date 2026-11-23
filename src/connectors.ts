@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { getVaultCredentialValue, listVaultCredentials, VAULT_NAME_RE, vaultConnectorUseLedgerSummary } from "./vault.js";
 import { errorReason } from "./telegram.js";
 
@@ -140,6 +140,52 @@ export function connectorFailureReason(error: unknown): string {
 export function recordConnectorFailure(root: string, phase: ConnectorPhase, error: unknown): void {
   const reason = connectorFailureReason(error);
   recordActivity(root, "sam", "connector-failed", connectorFailureSummary(phase, reason));
+}
+
+// The connector failed history scorecard (2026-11-23, the
+// measured-proof series): the connector registry ledgers every
+// failed store touch as a "connector-failed" line through the
+// ONE writer above (connectorFailureSummary, one fixed shape:
+// "Connector <phase> failed: <reason>", phases read / lookup /
+// write, ledger actor sam always) - but the class was never
+// folded, so how often the registry every turn loop authorizes
+// from itself died was invisible in aggregate. The parser
+// learns only the writer's fixed shape: one of the three
+// phases and a non-empty reason, the reason consumed and
+// never printed. A line from any other kind never parses.
+// The fold is counts only: no stamp, no phase name beyond the
+// fixed per-phase counts, no reason, no verbatim summary, and
+// no connector record (URLs, credential names, and
+// allowedTools are authorization data, never failure data).
+export function parseConnectorFailedSummary(summary: string): { phase: ConnectorPhase } | null {
+  const m = /^Connector (read|lookup|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[2] ?? "";
+  if (!reason.trim()) return null;
+  return { phase: m[1] as ConnectorPhase };
+}
+
+export function connectorFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "connector-failed" });
+  let failed = 0;
+  let read = 0;
+  let lookup = 0;
+  let write = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseConnectorFailedSummary(line.summary);
+    if (parsed) { failed += 1; if (parsed.phase === "read") read += 1; else if (parsed.phase === "lookup") lookup += 1; else write += 1; continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Connector failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(lookup) + " lookup");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagConnectorLedgered(error: unknown): void {
