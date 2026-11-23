@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Approvals engine (Plan Phase D item 1 - lands BEFORE coder hands;
@@ -172,6 +172,63 @@ export function approvalPolicyFailureReason(error: unknown): string {
 export function recordApprovalPolicyFailure(root: string, phase: ApprovalPolicyPhase, error: unknown): void {
   const reason = approvalPolicyFailureReason(error);
   recordActivity(root, "sam", "approval-policy-failed", approvalPolicyFailureSummary(phase, reason));
+}
+
+// The approval policy failed history scorecard (2026-11-23, the
+// measured-proof series): the approval policy store's touches
+// ledger every failure as an "approval-policy-failed" line
+// through the ONE writer above (approvalPolicyFailureSummary,
+// fixed shape "Approval policy <phase> failed: <reason>",
+// phases read / write, ridden by recordApprovalPolicyFailure
+// from the store's read door and the save UPSERT, actor sam) -
+// but the class was never folded, so how often the store that
+// decides HOW every proposal on the ONE gate is decided failed
+// a touch was invisible in aggregate. A dead policy store
+// fails closed to manual by design, which is safe but silent:
+// a torn or locked approval-policy.db could quietly revert an
+// owner's chosen smart/off posture to manual on every read
+// with nothing counting it. Every failure line is by
+// construction a policy touch that did not complete its store
+// work, so the verdict is attention when any failure was ever
+// recorded or any line is unparseable, else clear. The parser
+// learns only the writer's fixed shape: one of the two phases
+// and a non-empty reason, consumed and never printed - the
+// policy content itself (mode, auto list) never enters the
+// writer's line and never enters this fold. A line from any
+// other kind never parses. A pure read: it creates nothing,
+// saves nothing, and decides nothing - the policy seams
+// themselves are untouched.
+export function parseApprovalPolicyFailedSummary(summary: string): { phase: ApprovalPolicyPhase } | null {
+  const m = /^Approval policy (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as ApprovalPolicyPhase };
+}
+
+export function approvalPolicyFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "approval-policy-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let write = 0;
+  for (const line of lines) {
+    const parsed = parseApprovalPolicyFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else write += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Approval policy failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagApprovalPolicyLedgered(error: unknown): void {
