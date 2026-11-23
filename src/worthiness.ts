@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, mkdirSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { PreferenceStore } from "./preferences.js";
 import { errorReason } from "./error-reason.js";
 
@@ -195,6 +195,81 @@ export function worthinessReadFailureReason(error: unknown): string {
 export function recordWorthinessReadFailure(root: string, error: unknown): void {
   const reason = worthinessReadFailureReason(error);
   recordActivity(root, "sam", "worthiness-failed", worthinessReadFailureSummary(reason));
+}
+
+// The worthiness failed history scorecard (2026-11-23, the
+// measured-proof series): the gate's ledger touches ledger
+// every failure as a "worthiness-failed" line through the
+// TWO writers above (worthinessFailureSummary, fixed shape
+// "Worthiness <phase> failed for profile <profile> (<kind>[,
+// verdict deliver|held]): <reason>", phases read / append,
+// ridden by recordWorthinessFailure from the assessed read
+// (fail-closed) and the append (the verdict still returns);
+// worthinessReadFailureSummary, fixed shape "Worthiness read
+// failed: <reason>", ridden by recordWorthinessReadFailure
+// from a direct read with no assessment in hand) - but the
+// class was never folded, so how often the gate judged with
+// a dead memory was invisible in aggregate. The deliveries
+// scorecard folds only the successful assessments, never
+// these failure lines. The parser learns only the writers'
+// fixed shapes: the assessed shape with a single-token
+// profile and kind and the writer's optional verdict
+// segment, and the generic read shape; the profile and kind
+// are consumed for the distinct counts and never printed,
+// and the reason is consumed and never printed. A line from
+// any other kind never parses. The fold is counts only: no
+// stamp, no profile, no kind, no verdict, no reason, no
+// verbatim summary. A pure read: it creates nothing, spends
+// no model call, and writes nothing - the gate's seams are
+// untouched.
+export function parseWorthinessFailedSummary(summary: string): { phase: "read" | "append"; profile: string | null; kind: string | null; verdict: "deliver" | "held" | null } | null {
+  const generic = /^Worthiness read failed: ([\s\S]+)$/.exec(summary);
+  if (generic) {
+    if (!(generic[1] ?? "").trim()) return null;
+    return { phase: "read", profile: null, kind: null, verdict: null };
+  }
+  const withVerdict = /^Worthiness (read|append) failed for profile (\S+) \((\S+), verdict (deliver|held)\): ([\s\S]+)$/.exec(summary);
+  if (withVerdict) {
+    if (!(withVerdict[5] ?? "").trim()) return null;
+    return { phase: withVerdict[1] as "read" | "append", profile: withVerdict[2] ?? null, kind: withVerdict[3] ?? null, verdict: withVerdict[4] as "deliver" | "held" };
+  }
+  const plain = /^Worthiness (read|append) failed for profile (\S+) \((\S+)\): ([\s\S]+)$/.exec(summary);
+  if (plain) {
+    if (!(plain[4] ?? "").trim()) return null;
+    return { phase: plain[1] as "read" | "append", profile: plain[2] ?? null, kind: plain[3] ?? null, verdict: null };
+  }
+  return null;
+}
+
+export function worthinessFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "worthiness-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let append = 0;
+  const profiles = new Set<string>();
+  const kinds = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseWorthinessFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1; else append += 1;
+      if (parsed.profile) profiles.add(parsed.profile);
+      if (parsed.kind) kinds.add(parsed.kind);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Worthiness failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(append) + " append");
+  parts.push(String(profiles.size) + " distinct profiles");
+  parts.push(String(kinds.size) + " distinct kinds");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 export const DELIVERY_SCORECARD_SCRIPT = "sam-deliveries-scorecard";
