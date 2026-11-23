@@ -437,6 +437,67 @@ export function artifactScorecardText(root: string): string {
   return parts.join(", ");
 }
 
+// The artifact failed history scorecard (2026-11-23, the
+// measured-proof series): the artifact store's touches ledger
+// every failure as an "artifact-failed" line through the ONE
+// writer above (artifactFailureSummary, fixed shape "Artifact
+// <phase> failed: <reason>", capped 300; phases create / update
+// / read, ridden by failArtifact from the store's create, update,
+// and read doors, the actor the owning profile) - and while the
+// lifecycle scorecard above folds those lines into its failed
+// count, it parses them loosely (any phase word) and never splits
+// them, so which door of the store that holds SAM's durable
+// deliverables failed, and whether a line even carries a phase
+// the store can write, was invisible in aggregate. Every failure
+// line is by construction an artifact touch that did not
+// complete its store work, so the verdict is attention when any
+// failure was ever recorded or any line is unparseable, else
+// clear. This parser is strict where the lifecycle parser is
+// loose by design: only the three phases the store's doors
+// write parse, and a non-empty reason is required and consumed,
+// never printed - artifact titles and content never enter the
+// writer's line and never enter this fold. A line from any
+// other kind never parses. A pure read: it creates nothing,
+// updates nothing, and reads no artifact content - the artifact
+// seams themselves are untouched.
+export type ArtifactPhase = "create" | "update" | "read";
+
+export function parseArtifactFailedHistorySummary(summary: string): { phase: ArtifactPhase } | null {
+  const m = /^Artifact (create|update|read) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as ArtifactPhase };
+}
+
+export function artifactFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "artifact-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let create = 0;
+  let update = 0;
+  let read = 0;
+  for (const line of lines) {
+    const parsed = parseArtifactFailedHistorySummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "create") create += 1;
+      else if (parsed.phase === "update") update += 1;
+      else read += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Artifact failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(create) + " create");
+  parts.push(String(update) + " update");
+  parts.push(String(read) + " read");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 /** Summaries for one profile (or every profile when none is named -
  *  the operator/CLI door), newest update first. A pure read on an
  *  install with no store returns [] and creates nothing. */
