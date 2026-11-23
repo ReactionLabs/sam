@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { ChatStore } from "./chats.js";
 import { errorReason } from "./error-reason.js";
 
@@ -128,6 +128,58 @@ export function linkFailureReason(error: unknown): string {
 export function recordLinkFailure(root: string, phase: LinkPhase, actor: string, error: unknown): void {
   const reason = linkFailureReason(error);
   recordActivity(root, phase === "resolve" ? actor : "sam", "link-failed", linkFailureSummary(phase, actor, reason));
+}
+
+// The link failed history scorecard (2026-11-23, the
+// measured-proof series): the link registry ledgers every
+// failed read door touch as a "link-failed" line through the
+// ONE writer above (linkFailureSummary, two fixed shapes:
+// read, whose ledger actor is sam by the writer's own rule,
+// and resolve, naming the requesting actor) - but the class
+// was never folded, so how often the scope decision itself
+// died was invisible in aggregate; visibleScopes rides this
+// door on every memory read, so a dead resolve degrades
+// recall and memory surfaces while their own failure lines
+// never name the links seam. The parser learns only the
+// writer's fixed shapes: a read line with a non-empty reason,
+// and a resolve line with a single-token actor and a
+// non-empty reason, the actor and the reason consumed and
+// never printed. A line from any other kind never parses.
+// The fold is counts only: no stamp, no actor, no reason, no
+// verbatim summary - distinct actors surface as a number only
+// (a read line's actor is sam, exactly as the writer ledgers it).
+export function parseLinkFailedSummary(summary: string): { phase: LinkPhase; actor: string } | null {
+  const read = /^Link read failed: ([\s\S]+)$/.exec(summary);
+  if (read) return (read[1] ?? "").trim() ? { phase: "read" as const, actor: "sam" } : null;
+  const m = /^Link resolve failed for (\S+): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const actor = (m[1] ?? "").trim();
+  const reason = m[2] ?? "";
+  if (!actor || !reason.trim()) return null;
+  return { phase: "resolve" as const, actor };
+}
+
+export function linkFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "link-failed" });
+  let failed = 0;
+  let read = 0;
+  let resolve = 0;
+  let unparseable = 0;
+  const actors = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseLinkFailedSummary(line.summary);
+    if (parsed) { failed += 1; if (parsed.phase === "read") read += 1; else resolve += 1; actors.add(parsed.actor); continue; }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Link failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(resolve) + " resolve");
+  parts.push(String(actors.size) + " distinct actors");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagLinkLedgered(error: unknown): void {

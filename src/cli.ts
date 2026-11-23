@@ -54,7 +54,7 @@ import { serveWebhookChannel } from "./webhook.js";
 import { acceptEvent, bindEvent, eventBindings, eventBindLedgerSummary, eventHistoryScorecardText, serveEvents, signEvent, unbindEvent } from "./events.js";
 import { postDiscord } from "./discord.js";
 import { minis, spawnMini, removeMini } from "./minis.js";
-import { links, createLink, addLinkMember, removeLinkMember, deleteLink } from "./links.js";
+import { links, createLink, addLinkMember, removeLinkMember, deleteLink, linkFailedHistoryScorecardText } from "./links.js";
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
 import { ChatStore } from "./chats.js";
@@ -519,6 +519,7 @@ miniCmd.command("remove").argument("<name>").action((name:string)=>output({remov
 const linkCmd=program.command("links").description("Link groups: the only bridge between profiles. Linked profiles share one memory level");
 linkCmd.command("create").argument("<name>").argument("<members...>","Profile names, at least two (sam is the core)").action((name:string,members:string[])=>output(createLink(program.opts().workspace,name,members)));
 linkCmd.command("list").action(()=>output(links(program.opts().workspace)));
+linkCmd.command("failed-history").description("Link failed history as plain text with no clock reading - verdict, the failed count, the read and resolve counts, the distinct-actor count as a number only, and the total (never a stamp, an actor, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded link registry failure is the news (this is the sam-link-failed-history script job's stdout; a pure read over the same activity ledger the link read door ledgers: creates nothing, sends nothing, retries nothing, reads no link record; exits 0 always, the verdict lives in the text)").action(()=>output(linkFailedHistoryScorecardText(program.opts().workspace)));
 linkCmd.command("add").argument("<id>").argument("<member>").action((id:string,member:string)=>output(addLinkMember(program.opts().workspace,id,member)));
 linkCmd.command("remove").argument("<id>").argument("<member>").action((id:string,member:string)=>output(removeLinkMember(program.opts().workspace,id,member)));
 linkCmd.command("talk").argument("<id>").argument("<from>").argument("<to>").argument("<message>").description("Run one linked exchange: from speaks, to answers as itself").action(async(id:string,from:string,to:string,message:string)=>{const root=program.opts().workspace as string;output({reply:await linkExchange(root,id,from,to,message,{runTurn:(chatId,content)=>runChatTurn(root,chatId,content)})});});
