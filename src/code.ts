@@ -397,6 +397,72 @@ export function recordCodeWriteFailure(root: string, phase: "read" | "append", e
   const reason = codeWriteFailureReason(error);
   recordActivity(root, "sam", "code-write-failed", codeWriteFailureSummary(phase, eventLabel, reason));
 }
+// The code write failed history scorecard (2026-11-23, the
+// measured-proof series): the writes ledger's touches ledger
+// every failure as a "code-write-failed" line through the ONE
+// writer above (codeWriteFailureSummary, fixed shape "Code
+// write <phase> failed for <event>: <reason>", capped 200,
+// phases read / append; the read event is the fixed label
+// "ledger", the append event is the write label "write <path>
+// (<created|edited>, +<n>/-<m> lines)"), ridden by
+// recordCodeWriteFailure from the append (never eats a landed
+// write) and the read (fails closed) - but the class was never
+// folded, so how often the writes ledger itself died was
+// invisible in aggregate. The code-write scorecard folds only
+// the successful "code-write" lines, never these failure
+// lines. The parser learns only the writer's fixed shapes:
+// phase read with the exact "ledger" event, phase append with
+// the exact write-label shape; the event label is consumed
+// for the distinct count and never printed (it carries a file
+// path), and the reason is consumed and never printed. A line
+// from any other kind never parses. The fold is counts only:
+// no stamp, no path, no event label, no reason, no verbatim
+// summary. A pure read: it creates nothing, spends no model
+// call, and writes nothing - the writes seams are untouched.
+export function parseCodeWriteFailedSummary(summary: string): { phase: "read" | "append"; event: string } | null {
+  const read = /^Code write read failed for ledger: ([\s\S]+)$/.exec(summary);
+  if (read) {
+    const reason = read[1] ?? "";
+    if (!reason.trim()) return null;
+    return { phase: "read", event: "ledger" };
+  }
+  const append = /^Code write append failed for (write [\s\S]+ \((?:created|edited), \+\d+\/-\d+ lines\)): ([\s\S]+)$/.exec(summary);
+  if (append) {
+    const event = append[1] ?? "";
+    const reason = append[2] ?? "";
+    if (!event || !reason.trim()) return null;
+    return { phase: "append", event };
+  }
+  return null;
+}
+
+export function codeWriteFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "code-write-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let append = 0;
+  const events = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseCodeWriteFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1; else append += 1;
+      events.add(parsed.event);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Code write failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(append) + " append");
+  parts.push(String(events.size) + " distinct events");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 
 function writeLabel(record: CodeWriteRecord): string {
   return "write " + record.path + " (" + (record.created ? "created" : "edited") + ", +" + record.addedLines + "/-" + record.removedLines + " lines)";
