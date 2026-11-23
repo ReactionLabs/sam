@@ -51,6 +51,47 @@ export function recordActivityFailure(root: string, error: unknown): void {
   recordActivity(root, "sam", "activity-failed", activityFailureSummary(activityFailureReason(error)));
 }
 
+// The activity failed history scorecard (2026-11-22, the
+// measured-proof series): the ledger's own read seam ledgers
+// every dead read as an "activity-failed" line through the ONE
+// writer activityFailureSummary above, ridden by the one seam
+// recordActivityFailure - but the class was never folded, so
+// how often the ledger itself failed to read was invisible in
+// aggregate: a blind instrument reports perfect health, and
+// self-work's defect queue counts the lines one by one with no
+// trend surface. The parser learns only the writer's one fixed
+// shape (the fixed head plus a non-empty reason, consumed and
+// never printed - the reason can name paths and surfaces). A
+// line from any other kind never parses. The fold is counts
+// only: no stamp, no actor, no reason, no verbatim summary.
+export function parseActivityFailedSummary(summary: string): { matched: true } | null {
+  const m = /^Activity read failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  const reason = m[1] ?? "";
+  if (!reason.trim()) return null;
+  return { matched: true };
+}
+
+export function activityFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "activity-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  for (const line of lines) {
+    const parsed = parseActivityFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Activity failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 export interface ActivityFilter { actor?: string; kind?: string }
 export function readActivity(root: string, limit = 30, filter: ActivityFilter = {}): ActivityLine[] {
   const file = ledgerPath(root);
