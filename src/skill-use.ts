@@ -80,6 +80,73 @@ export function recordSkillUseReadFailure(root: string, error: unknown): void {
   recordActivity(root, "sam", "skill-use-failed", skillUseReadFailureSummary(reason));
 }
 
+export type SkillUseWhat = "record" | "read";
+
+// The skill-use failed history scorecard (2026-11-23, the
+// measured-proof series): the skill-use ledger ledgers every
+// failed touch as a "skill-use-failed" line through the TWO
+// writers above (skillUseFailureSummary for a failed record,
+// naming the skill and the optional chat prefix;
+// skillUseReadFailureSummary for a failed ledger read, no
+// skill), ridden by recordSkillUseFailure /
+// recordSkillUseReadFailure - but the class was never folded,
+// so how often a skill read went unrecorded, or the ledger
+// read died and froze the rail, header, and status as truth,
+// was invisible in aggregate; the skill-use scorecard folds
+// the successful "skill-use" lines, never these failure
+// lines. The parser learns only the writers' fixed shapes: a
+// record line (a skill, the writer's optional chat segment of
+// at most 8 chars, and a non-empty reason) or a read line (a
+// non-empty reason), the reason consumed and never printed. A
+// line from any other kind never parses. The fold is counts
+// only: no stamp, no actor, no operation name, no skill name,
+// no chat prefix, no reason, no verbatim summary - distinct
+// operations, skills, and chats surface as numbers only.
+export function parseSkillUseFailedSummary(summary: string): { what: SkillUseWhat; skill: string | null; chat: string | null } | null {
+  const read = /^Skill use read failed: ([\s\S]+)$/.exec(summary);
+  if (read) {
+    if (!(read[1] ?? "").trim()) return null;
+    return { what: "read", skill: null, chat: null };
+  }
+  const rec = /^Skill use record failed for skill (\S+)(?: in chat (\S+))?: ([\s\S]+)$/.exec(summary);
+  if (!rec) return null;
+  const skill = (rec[1] ?? "").trim();
+  const chat = rec[2] ?? null;
+  const reason = rec[3] ?? "";
+  if (!skill || !reason.trim()) return null;
+  if (chat !== null && chat.length > 8) return null;
+  return { what: "record", skill, chat };
+}
+
+export function skillUseFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-use-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const whats = new Set<string>();
+  const skills = new Set<string>();
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseSkillUseFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      whats.add(parsed.what);
+      if (parsed.skill !== null) skills.add(parsed.skill);
+      if (parsed.chat !== null) chats.add(parsed.chat);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Skill use failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(whats.size) + " distinct operations");
+  parts.push(String(skills.size) + " distinct skills");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 export function recordSkillUse(root: string, entry: { actor: string; chatId?: string | null; skill: string }): boolean {
   const line: SkillUse = { at: new Date().toISOString(), actor: entry.actor, chatId: entry.chatId ?? null, skill: entry.skill };
   try {
