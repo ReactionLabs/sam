@@ -365,11 +365,24 @@ const SURVEY_FILE_CAP = 500;
  *  the package scripts that define build/test. Read from git, so
  *  it describes committed content exactly - the same content every
  *  slice worktree will hold. */
+/** The ONE source of the unborn-HEAD refusal for parallel jobs:
+ *  a repo with no commits yet has no HEAD for the survey to read
+ *  and no base for any slice worktree to branch from, so the
+ *  drain's survey refuses it deterministically - and the queue
+ *  reads the same precondition before minting a job whose only
+ *  possible outcome is that block. (A dirty tree is NOT a
+ *  parallel precondition: slices branch from HEAD into their own
+ *  worktrees, so the owner's uncommitted work never blocks a
+ *  parallel job the way it blocks the coding and engine loops.) */
+export function parallelNoCommitsReason(): string {
+  return "The code root's git repository has no commits yet - make the first commit outside SAM, then queue the job.";
+}
+
 export function surveyRepo(root: string): RepoSurvey {
   const repo = gitRepoRoot(root);
   if (!repo) throw new Error("The designated code root is not a git repository rooted at itself - a parallel job surveys and branches a git tree.");
   const head = gitIn(repo, ["rev-parse", "HEAD"]);
-  if (!head.ok) throw new Error("The code root's git repository has no commits yet - make the first commit outside SAM, then queue the job.");
+  if (!head.ok) throw new Error(parallelNoCommitsReason());
   const baseSha = head.out.trim();
   const branchProbe = gitIn(repo, ["branch", "--show-current"]);
   const tree = gitIn(repo, ["ls-tree", "-r", "--name-only", "HEAD"]);
@@ -651,7 +664,14 @@ export function queueParallelJob(root: string, input: QueueParallelInput, env: N
   if (!spec || spec.length > 4000) throw new Error("Invalid parallel job spec");
   if (!input.chatId) throw new Error("A chat is required");
   if (!codeRoot(root)) throw new Error("No code root is designated on this install, so there is nowhere for a parallel job to work. The operator designates one with: sam code set-root <path>.");
-  if (!gitRepoRoot(root)) throw new Error("The designated code root is not a git repository rooted at itself - parallel jobs branch and merge a git tree (the C4 sandbox story). Initialize or designate a git tree first.");
+  const repo = gitRepoRoot(root);
+  if (!repo) throw new Error("The designated code root is not a git repository rooted at itself - parallel jobs branch and merge a git tree (the C4 sandbox story). Initialize or designate a git tree first.");
+  // The drain's survey refuses an unborn HEAD deterministically
+  // (no base to branch slices from), so queueing into that state
+  // mints a job whose only possible outcome is the identical
+  // block. Read the precondition here, before creating anything:
+  // the refusal is the survey's own text, the ONE source above.
+  if (!gitIn(repo, ["rev-parse", "HEAD"]).ok) throw new Error(parallelNoCommitsReason());
   if (!Array.isArray(input.slices) || input.slices.length < 1 || input.slices.length > MAX_SLICES) throw new Error("A parallel job needs 1 to " + MAX_SLICES + " slices");
   const seen = new Set<string>();
   for (const slice of input.slices) {
