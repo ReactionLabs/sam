@@ -219,6 +219,27 @@ export function heartbeatCreationBlocker(root:string,name:string):string|null{
  if(items.length>=HEARTBEAT_JOB_LIMIT)return "The heartbeat store already holds "+HEARTBEAT_JOB_LIMIT+" jobs, the limit - retire a job before adding another, or the operator raises the limit.";
  return null;
 }
+/** The ONE source for why a heartbeat job cannot name this
+ *  delivery channel: the id is not in the channel registry, so
+ *  a job created with it would queue every changed output in
+ *  the delivery outbox and fail at deliverToChannel ("Delivery
+ *  channel not found") across ticks until the outbox settles
+ *  it failed - created on paper, delivered nowhere. The ONE
+ *  gate's heartbeat validation throws this text at proposal
+ *  time and both CLI doors (heartbeats add / schedule) throw
+ *  it before creating anything. The store itself stays
+ *  permissive by design: a channel can be removed AFTER a job
+ *  names it, and that job's deliveries must queue and fail in
+ *  the outbox, never silently - creation doors are where the
+ *  check belongs (the brief and self-work installers validate
+ *  their channels at their doors the same way). Null means
+ *  the channel can be named (or none was). */
+export function heartbeatChannelBlocker(root:string,channelId:string|null|undefined):string|null{
+ if(channelId===null||channelId===undefined||channelId==="")return null;
+ const known=channels(root);
+ if(known.some(c=>c.id===channelId))return null;
+ return "Unknown channel \""+channelId+"\" in heartbeat detail. Valid channels: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered");
+}
 function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null;onceAt?:string|null}):HeartbeatJob{
  const blocker=heartbeatCreationBlocker(root,input.name); if(blocker)throw Error(blocker);
  const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};

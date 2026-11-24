@@ -5,9 +5,8 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore, notePatchBlocker } from "./memory.js";
 import { PreferenceStore, preferenceStatementBlocker } from "./preferences.js";
-import { addHeartbeatJob, addScheduledJob, heartbeatCreationBlocker } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatChannelBlocker, heartbeatCreationBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
-import { channels } from "./channels.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
@@ -729,8 +728,8 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   // as the profile check above.
   if (s.channelId !== undefined && s.channelId !== null && s.channelId !== "") {
     if (typeof s.channelId !== "string") throw new Error("Invalid channelId in heartbeat detail");
-    const known = channels(root);
-    if (!known.some(c => c.id === s.channelId)) throw new Error("Unknown channel \"" + s.channelId + "\" in heartbeat detail. Valid channels: " + (known.length ? known.map(c => c.name + " (" + c.id + ")").join(", ") : "none registered"));
+    const channelBlocker = heartbeatChannelBlocker(root, s.channelId);
+    if (channelBlocker) throw new Error(channelBlocker);
   }
   // Real cron (Phase C item 1): a detail may carry a schedule
   // phrase (interval, wall-clock, 5-field cron, natural language,
