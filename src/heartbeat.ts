@@ -240,6 +240,34 @@ export function heartbeatChannelBlocker(root:string,channelId:string|null|undefi
  if(known.some(c=>c.id===channelId))return null;
  return "Unknown channel \""+channelId+"\" in heartbeat detail. Valid channels: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered");
 }
+function normalizeHeartbeatProfileName(name:string):string{
+ return name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+}
+/** The ONE source for why a heartbeat job cannot name this
+ *  profile: the name is not in the profile registry ("sam",
+ *  the implicit core profile, plus every registered agent),
+ *  so a job created with it would run every tick under a
+ *  profile that does not exist. The ONE gate's heartbeat
+ *  validation throws this text at proposal time and both CLI
+ *  doors (heartbeats add / schedule) throw it before creating
+ *  anything. The store itself stays permissive by design,
+ *  exactly as for the channel check above: a profile can be
+ *  removed AFTER a job names it, and the tick's failure
+ *  isolation records that - creation doors are where the
+ *  check belongs. When exactly one registered profile matches
+ *  the bad name folded for case and separators, the refusal
+ *  names it ("Second Shift" -> "second-shift"). Null means
+ *  the profile can be named. */
+export function heartbeatProfileBlocker(root:string,profile:string):string|null{
+ const db=new ChatStore(root);
+ let names:string[];
+ try{names=["sam",...db.agents().map(a=>a.name).filter(n=>n!=="sam")];}finally{db.close();}
+ if(names.includes(profile))return null;
+ const target=normalizeHeartbeatProfileName(profile??"");
+ const matches=target?names.filter(n=>normalizeHeartbeatProfileName(n)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Unknown profile \""+profile+"\" in heartbeat detail. Valid profiles: "+names.join(", ")+(fix?". Did you mean \""+fix+"\"?":"");
+}
 function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null;onceAt?:string|null}):HeartbeatJob{
  const blocker=heartbeatCreationBlocker(root,input.name); if(blocker)throw Error(blocker);
  const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};

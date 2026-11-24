@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore, notePatchBlocker } from "./memory.js";
 import { PreferenceStore, preferenceStatementBlocker } from "./preferences.js";
-import { addHeartbeatJob, addScheduledJob, heartbeatChannelBlocker, heartbeatCreationBlocker } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatChannelBlocker, heartbeatCreationBlocker, heartbeatProfileBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
@@ -705,11 +705,8 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid heartbeat detail: expected JSON {name, minutes, profile, prompt}");
   const s = spec as { name?: unknown; minutes?: unknown; profile?: unknown; prompt?: unknown; schedule?: unknown; timezone?: unknown; script?: unknown; channelId?: unknown };
   const profile = typeof s.profile === "string" ? s.profile : "";
-  const names = knownProfileNames(root);
-  if (!names.includes(profile)) {
-    const fix = correctedProfileName(root, profile);
-    throw new Error("Unknown profile \"" + profile + "\" in heartbeat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : ""));
-  }
+  const profileBlocker = heartbeatProfileBlocker(root, profile);
+  if (profileBlocker) throw new Error(profileBlocker);
   if (typeof s.name !== "string" || !/^[a-zA-Z0-9 _-]{1,80}$/.test(s.name)) throw new Error("Invalid heartbeat name in detail");
   // The creation precondition, at proposal time: the store's job
   // limit and the name's freshness are deterministic the moment
