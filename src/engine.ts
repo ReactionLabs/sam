@@ -8,7 +8,7 @@ import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type
 import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { codeRoot, recordExternalChange, runCodeCommand, type CodeRunner } from "./code.js";
-import { commitTaskPaths, gitRepoRoot, headFileContent, prepareTaskBranch, worktreeChanges, type CodingGitState } from "./git-work.js";
+import { codeRootGitBlocker, commitTaskPaths, gitRepoRoot, headFileContent, prepareTaskBranch, worktreeChanges, type CodingGitState } from "./git-work.js";
 import { verificationStatus } from "./verification.js";
 import { isEngineConnectionStoreLedgered, recordEngineConnectionStoreFailure } from "./engine-connection-failure.js";
 import type { GoldfishRecord } from "./goldfish.js";
@@ -424,6 +424,15 @@ export function validateEngineDetail(root: string, detail: string, env: NodeJS.P
   const chatId = typeof s.chatId === "string" && s.chatId ? s.chatId : null;
   if (!codeRoot(root)) throw new Error("No code root is designated on this install, so an engine run has nowhere to work. The operator designates one with: sam code set-root <path>.");
   if (!gitRepoRoot(root)) throw new Error("The designated code root is not a git repository rooted at itself - engine runs work inside the C4 branch sandbox (a sam/<task> branch in that repo), never in an unbranched tree. Initialize or designate a git tree first.");
+  // The branch sandbox refuses a dirty tree (or an unborn HEAD)
+  // before the engine ever runs, deterministically - so a card
+  // shown for that tree can only queue a run whose only outcome
+  // is blocked. This validation is the proposal-time bar ("a
+  // card that cannot execute is never shown"), so the refusal
+  // belongs here too, in the probe's own words (the ONE source
+  // the drain's block reason also rides).
+  const gitBlocker = codeRootGitBlocker(root);
+  if (gitBlocker) throw new Error(gitBlocker);
   const provider = selectedEngineProvider(root);
   if (!engineRunBinary(provider, env)) throw new Error(notInstalledMessage(provider));
   return { task, chatId, provider };

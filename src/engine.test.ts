@@ -198,8 +198,12 @@ test("a failing engine closes failed with its output; a dirty tree blocks before
 
   const g = fixture();
   try {
-    writeFileSync(join(g.proj, "owner-draft.txt"), "the owner's uncommitted work\n");
+    // Queueing itself now refuses a dirty tree (queue-git-gate),
+    // so the drain-side block is exercised the way it can still
+    // happen live: queue clean, then the owner dirties the tree
+    // before the drain picks the run up.
     const task = queueEngineTask(g.sam, { actor: "trading", chatId: g.chatId, spec: "Anything" });
+    writeFileSync(join(g.proj, "owner-draft.txt"), "the owner's uncommitted work\n");
     const result = await drainEngineTasks(g.sam, { runEngine: async () => { throw new Error("the engine must never run on a dirty tree"); } });
     assert.deepEqual(result.blocked, [task.id]);
     assert.match(listEngineTasks(g.sam)[0].result ?? "", /Git discipline refused/);

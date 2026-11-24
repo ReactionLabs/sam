@@ -180,12 +180,16 @@ test("the loop: verified work closes done ON its sam/<task> branch with the iter
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 
-test("the loop: a tree dirty before the task starts blocks it - no turn runs, nothing is committed or swept", async () => {
+test("the loop: a tree dirtied after queueing but before the task starts blocks it - no turn runs, nothing is committed or swept", async () => {
   const { base, sam, proj, chatId } = fixture(true);
   try {
+    // Queueing itself now refuses a dirty tree (queue-git-gate), so
+    // this drain-side re-check is exercised the way it can still
+    // happen live: the task queues on a clean tree and the owner
+    // dirties the tree before the drain picks it up.
+    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Create src/hello.ts" });
     writeFileSync(join(proj, "owner-wip.txt"), "the owner's half-done work\n");
     const branchBefore = git(proj, "branch", "--show-current");
-    const task = queueCodingTask(sam, { actor: "trading", chatId, spec: "Create src/hello.ts" });
     let turns = 0;
     const out = await drainCodingTasks(sam, { runTurn: async () => { turns += 1; return "x"; } });
     assert.equal(turns, 0);

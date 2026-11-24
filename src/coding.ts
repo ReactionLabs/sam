@@ -6,7 +6,7 @@ import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { codeRoot, codeWrites, type CodeWriteRecord } from "./code.js";
-import { commitTaskPaths, prepareTaskBranch, type CodingGitState } from "./git-work.js";
+import { codeRootGitBlocker, commitTaskPaths, prepareTaskBranch, type CodingGitState } from "./git-work.js";
 import { listChanges, verificationStatus } from "./verification.js";
 import { errorReason } from "./telegram.js";
 import type { GoldfishRecord } from "./goldfish.js";
@@ -502,6 +502,16 @@ export function queueCodingTask(root: string, input: { actor: string; chatId: st
   if (!spec || spec.length > 4000) throw new Error("Invalid coding spec");
   if (!input.chatId) throw new Error("A chat is required");
   if (!codeRoot(root)) throw new Error("No code root is designated on this install, so there is nowhere for a coding task to work. The operator designates one with: sam code set-root <path>.");
+  // The drain refuses a git code root whose tree is dirty (or has
+  // no commits yet) at task start, deterministically - so queueing
+  // into that state mints a task whose only possible outcome is
+  // the identical block. Read the precondition here, before
+  // creating anything (the self-work gate's lesson, applied to
+  // every queue door): the refusal is the probe's own text, the
+  // ONE source the drain's block reason also rides. A non-git
+  // root reads no blocker and queues exactly as before.
+  const gitBlocker = codeRootGitBlocker(root);
+  if (gitBlocker) throw new Error(gitBlocker);
   const db = new ChatStore(root);
   try { db.messages(input.chatId); } finally { db.close(); }
   const items = listCodingTasks(root);
