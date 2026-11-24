@@ -130,15 +130,80 @@ export interface ProcessedReply {
  * ledgers one citation-rejected line (never the reply text, never
  * the claimed id's target, which may not exist at all).
  */
+/** The ONE writer for the citation-rejected line, so the
+ * scorecard's parser below can never drift from the seam it
+ * counts. Its shape is byte-identical to what the citation
+ * pass wrote inline before this writer existed: the chat's
+ * 8-char prefix and the count of hits the run had recorded -
+ * never the reply text, never the claimed id. */
+export function citationRejectedLedgerSummary(chatId: string, hits: number): string {
+  return "Citation rejected in chat " + chatId.slice(0, 8) + ": the reply's marker named a source outside this run's chat-search results (" + hits + " hit(s) recorded); no citation attached";
+}
+
 export function processReplyCitations(root: string, input: { chatId: string; userMessageId: string | null; actor: string; text: string }): ProcessedReply {
   const hits = input.userMessageId ? consumeSearchHits(input.chatId, input.userMessageId) : [];
   const { text, messageIds } = extractCitationMarkers(input.text);
   if (!messageIds.length) return { text, hit: null, rejected: false };
   const hit = validateCitation(hits, messageIds[0]);
   if (hit) return { text, hit, rejected: false };
-  recordActivity(root, input.actor, "citation-rejected",
-    "Citation rejected in chat " + input.chatId.slice(0, 8) + ": the reply's marker named a source outside this run's chat-search results (" + hits.length + " hit(s) recorded); no citation attached");
+  recordActivity(root, input.actor, "citation-rejected", citationRejectedLedgerSummary(input.chatId, hits.length));
   return { text, hit: null, rejected: true };
+}
+
+// The citation rejected history scorecard (2026-11-24, the
+// measured-proof series): the citation pass ledgers every
+// fabricated chat citation as a "citation-rejected" line
+// through the ONE writer above (citationRejectedLedgerSummary,
+// fixed shape "Citation rejected in chat <8-char prefix>: the
+// reply's marker named a source outside this run's chat-search
+// results (<N> hit(s) recorded); no citation attached") - and
+// while self-work's classifyDefect labels single lines, the
+// chat citation scorecard folds only the successful attaches,
+// the chat-citation-failed fold counts the attach store's
+// failures, and the citation-rejection scorecard folds the
+// DIFFERENT "source-citation-rejected" kind (the reach path's
+// number citations), so no surface folds this kind: a model
+// that starts fabricating chat-history citations - markers
+// naming sources its own search never returned, the exact
+// fabrication shape the pass exists to strip - ships clean
+// replies with nothing counting the class in aggregate. Every
+// rejection line is by construction a fabricated marker that
+// was stripped, so the verdict is attention when any
+// rejection was ever recorded or any line is unparseable,
+// else clear. This parser is strict: only the writer's fixed
+// shape parses (an 8-char lowercase-hex chat prefix, the
+// writer's own slice of a chat id; a non-negative hit count,
+// consumed and never printed), and a line from any other kind
+// never parses. A pure read: it creates nothing, spends no
+// model call, and cites nothing - the citation pass itself is
+// untouched.
+export function parseCitationRejectedSummary(summary: string): { chat: string; hits: number } | null {
+  const m = /^Citation rejected in chat ([0-9a-f]{8}): the reply's marker named a source outside this run's chat-search results \((\d+) hit\(s\) recorded\); no citation attached$/.exec(summary);
+  if (!m) return null;
+  return { chat: m[1] ?? "", hits: Number(m[2]) };
+}
+
+export function citationRejectedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "citation-rejected" });
+  let rejected = 0;
+  let unparseable = 0;
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseCitationRejectedSummary(line.summary);
+    if (parsed) {
+      rejected += 1;
+      chats.add(parsed.chat);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Citation rejected history: " + (rejected > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(rejected) + " rejected");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 // ----------------------------------------------------------------
