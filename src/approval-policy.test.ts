@@ -131,7 +131,13 @@ test("gate: a superseding note is consequential and never smart-settles", async 
   const root = fresh();
   try {
     saveApprovalPolicy(root, { mode: "smart", autoKinds: ["note"] });
-    const a = proposeAction(root, { actor: "sam", kind: "note", title: "Patch", detail: "Call the owner dip", supersedes: "rec-1" });
+    // The gate refuses a patch target that cannot execute
+    // (2026-11-24 13:04), so the classification proof names a
+    // real record in the core scope.
+    const mem = new MemoryStore(join(root, ".sam", "missions.db"));
+    let recId = "";
+    try { recId = mem.add({ kind: "observation", content: "Call the owner Dip", source: "test", scope: "core" }).id; } finally { mem.close(); }
+    const a = proposeAction(root, { actor: "sam", kind: "note", title: "Patch", detail: "Call the owner dip", supersedes: recId });
     assert.equal(a.risk, "consequential");
     assert.deepEqual(await settleAutoApprovals(root), []);
     assert.equal(listActions(root)[0].status, "pending");

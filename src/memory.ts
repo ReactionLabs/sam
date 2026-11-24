@@ -286,3 +286,26 @@ export class MemoryStore {
   }
   close():void {this.db.close();}
 }
+// The note-patch target checks as the ONE source (hourly run
+// 2026-11-24 13:04 EST, the gate sweep's supersedes tail): a
+// note proposal naming a record it supersedes can execute only
+// when that record exists, is still live, and sits at the
+// proposer's own scope. Until this run the checks lived as
+// three separately worded copies - the proposal gate performed
+// none of them (the note doors pre-validated, the gate itself
+// did not, so a proposal written straight through the gate
+// carded a target that could only fail on approval), the
+// executor threw its own texts, and notes.ts validatePatchTarget
+// threw a third wording. Every seam now rides this blocker,
+// carrying the execution seam's exact texts: the gate throws
+// it before any card exists, validatePatchTarget throws it at
+// the note doors, and execution throws it when the target's
+// state changed after a valid card (archived between proposal
+// and approval is a state change, not a card that could never
+// execute).
+export function notePatchBlocker(rec: MemoryRecord | null, id: string, scope: string): string | null {
+  if (!rec) return "Cannot patch: record " + id + " no longer exists";
+  if (rec.archived_at) return "Cannot patch: record " + id + " is already archived";
+  if (rec.scope !== scope) return "Cannot patch: record " + id + " is not in this profile's scope";
+  return null;
+}

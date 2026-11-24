@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { MemoryStore, type MemoryKind, type MemoryRecord } from "./memory.js";
+import { MemoryStore, notePatchBlocker, type MemoryKind, type MemoryRecord } from "./memory.js";
 import { ChatStore } from "./chats.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
 import { readActivity, recordActivity } from "./activity.js";
@@ -88,10 +88,13 @@ export function validatePatchTarget(root: string, actor: string, id: string): Me
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
     const rec = store.get(id);
-    if (!rec) throw new Error("Cannot patch: no memory record with id " + id);
-    if (rec.archived_at) throw new Error("Cannot patch: record " + id + " is already archived");
-    if (rec.scope !== actorScope(actor)) throw new Error("Cannot patch: record " + id + " belongs to scope " + rec.scope + ", not this profile's scope (" + actorScope(actor) + ")");
-    return rec;
+    // The ONE source (memory.ts notePatchBlocker): the gate and
+    // the executor throw the identical texts, so a refusal reads
+    // the same at every seam (this function's older, longer
+    // wordings retired 2026-11-24, hourly run 13:04 EST).
+    const blocker = notePatchBlocker(rec, id, actorScope(actor));
+    if (blocker) throw new Error(blocker);
+    return rec as MemoryRecord;
   } finally { store.close(); }
 }
 

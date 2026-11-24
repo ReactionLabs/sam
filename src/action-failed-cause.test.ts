@@ -7,6 +7,7 @@ import { createServer } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { proposeAction, decideAction, listActions, actionFailureReason } from "./actions.js";
+import { MemoryStore } from "./memory.js";
 import { readActivity } from "./activity.js";
 
 // Action execution failures carry their cause (gap found
@@ -107,10 +108,22 @@ test("a skill install dying on an HTTP error ledgers exactly its plain message, 
 test("a causeless execution failure through the gate keeps its plain message in both records", async () => {
   const root = scratch();
   try {
-    const a = proposeAction(root, { actor: "sam", kind: "note", title: "Patch a note", detail: "replacement text", supersedes: "00000000-0000-0000-0000-000000000000" });
+    // The gate now refuses a patch target that cannot execute
+    // (2026-11-24 13:04), so the causeless-failure proof proposes
+    // against a live record and archives it before approval: the
+    // execution seam still fails, with the ONE source's text.
+    const store = new MemoryStore(join(root, ".sam", "missions.db"));
+    let targetId = "";
+    try {
+      const rec = store.add({ kind: "observation", content: "the old text", source: "test", scope: "core" });
+      targetId = rec.id;
+    } finally { store.close(); }
+    const a = proposeAction(root, { actor: "sam", kind: "note", title: "Patch a note", detail: "replacement text", supersedes: targetId });
+    const store2 = new MemoryStore(join(root, ".sam", "missions.db"));
+    try { assert.equal(store2.archive(targetId), true); } finally { store2.close(); }
     const done = await decideAction(root, a.id, true);
     assert.equal(done.status, "failed");
-    assert.equal(done.result, "Cannot patch: record 00000000-0000-0000-0000-000000000000 no longer exists");
+    assert.equal(done.result, "Cannot patch: record " + targetId + " is already archived");
     const lines = readActivity(root, 50).filter(x => x.kind === "failed");
     assert.equal(lines.length, 1);
     assert.equal(lines[0].summary, "note: Patch a note - " + done.result);

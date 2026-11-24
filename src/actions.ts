@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { MemoryStore } from "./memory.js";
+import { MemoryStore, notePatchBlocker } from "./memory.js";
 import { PreferenceStore, preferenceStatementBlocker } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob, heartbeatCreationBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
@@ -793,6 +793,28 @@ function validateSayDetail(root: string, detail: string): { chatId: string; text
   finally { db.close(); }
   return { chatId: s.chatId, text: s.text };
 }
+// The note kind's supersedes precondition, at proposal time
+// (hourly run 2026-11-24 13:04 EST): the gate sweep audited
+// kind details, but a note proposal's supersedes target was
+// checked only by the note doors (patchNote / saveNote
+// pre-validate through validatePatchTarget) and again at
+// execution - proposeAction itself checked nothing, so a
+// proposal written straight through the gate naming a
+// missing, archived, or other-scope record carded cleanly
+// and could only fail on approval. The gate now reads the
+// target back through MemoryStore and throws notePatchBlocker,
+// the ONE source in memory.ts that execution and
+// validatePatchTarget also throw, before any card or proposal
+// ledger line exists. A note naming no supersedes target has
+// no target precondition and is not read against the store.
+function validateNotePatch(root: string, actor: string, supersedes: string): void {
+  const scope = actor === "sam" ? "core" : "profile:" + actor;
+  const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
+  try {
+    const blocker = notePatchBlocker(store.get(supersedes), supersedes, scope);
+    if (blocker) throw new Error(blocker);
+  } finally { store.close(); }
+}
 function validateDraftDetail(detail: string): void {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid draft detail: expected JSON {to, channel, subject, body}"); }
@@ -807,6 +829,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (!title || title.length > 200) throw new Error("Invalid action title");
   if (!detail || detail.length > 4000) throw new Error("Invalid action detail");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
+  if (input.kind === "note" && input.supersedes) validateNotePatch(root, input.actor, input.supersedes);
   if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
   if (input.kind === "law") validateLawDetail(detail);
   if (input.kind === "say") validateSayDetail(root, detail);
@@ -894,9 +917,8 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
       let old: ReturnType<MemoryStore["get"]> = null;
       if (a.supersedes) {
         old = store.get(a.supersedes);
-        if (!old) throw new Error("Cannot patch: record " + a.supersedes + " no longer exists");
-        if (old.archived_at) throw new Error("Cannot patch: record " + a.supersedes + " is already archived");
-        if (old.scope !== scope) throw new Error("Cannot patch: record " + a.supersedes + " is not in this profile's scope");
+        const blocker = notePatchBlocker(old, a.supersedes, scope);
+        if (blocker) throw new Error(blocker);
       }
       const rec = store.add({ kind: "observation", content: a.detail, source: "owner-approved action " + a.id, scope });
       if (a.supersedes && old) {
