@@ -433,6 +433,75 @@ export function setupHistoryScorecardText(root: string): string {
   return parts.join(", ");
 }
 
+// The ONE writer for the config-wizard activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. Its shape is byte-identical to what the wizard's
+// channels section wrote inline before this writer existed:
+// "Channel added via config wizard: <name> -> <profile>",
+// where the name passed the channel registry's own name
+// validation in addChannel and the profile its profile
+// validation - a refused add writes nothing.
+export function configWizardChannelLedgerSummary(name: string, profile: string): string {
+  return "Channel added via config wizard: " + name + " -> " + profile;
+}
+
+// The config wizard history scorecard (2026-11-24, the
+// measured-proof series): the wizard ledgers exactly one
+// act - a channel added through the guided flow - as a
+// "config-wizard" line, and the config-acts fold covers the
+// other seven configuration kinds but not this one, so how
+// often the guided first-run door has ever completed its
+// one save was invisible in aggregate. The channel registry
+// witnesses that a channel exists, not that it arrived
+// through the wizard, nor how many distinct channels or
+// profiles that door has bound. Adding a channel through
+// the wizard is the operator working as designed, so the
+// verdict is attention only when a line is unparseable (the
+// config-acts rule), else clear. The parser validates the
+// fixed shape exactly: the channel name against the
+// registry's own name alphabet (consumed, counted as a
+// distinct number only, never printed) and the profile
+// against the registry's profile alphabet (likewise);
+// cross-kind lines never parse. This text folds the kind
+// to counts only, on ONE line: the added count, the
+// distinct-channel and distinct-profile counts as numbers
+// only, and the total - and it names its scope honestly:
+// it counts wizard channel adds only, never all channel
+// adds (CLI channel adds ledger nothing). No stamp, no
+// actor, no channel name, no profile name, and no verbatim
+// summary enters the text. A pure read: it creates nothing,
+// spends no model call, and adds, configures, and verifies
+// nothing - the wizard seam itself is untouched beyond
+// naming its writer.
+export function parseConfigWizardSummary(summary: string): { channel: string; profile: string } | null {
+  const m = /^Channel added via config wizard: (.+) -> ([a-z][a-z0-9._-]*)$/.exec(summary);
+  if (!m) return null;
+  if (!/^[A-Za-z0-9 _.-]{1,64}$/.test(m[1] as string)) return null;
+  return { channel: m[1] as string, profile: m[2] as string };
+}
+export function configWizardHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "config-wizard" });
+  let added = 0;
+  let unparseable = 0;
+  const channelSet = new Set<string>();
+  const profileSet = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseConfigWizardSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    added += 1;
+    channelSet.add(parsed.channel);
+    profileSet.add(parsed.profile);
+  }
+  const parts: string[] = [];
+  parts.push("Config wizard history: " + (unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(added) + " added");
+  parts.push(String(channelSet.size) + " distinct channels");
+  parts.push(String(profileSet.size) + " distinct profiles");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // --- the interactive wizard ---------------------------------------------
 
 export interface WizardIo {
@@ -505,7 +574,7 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
     if (!name || !profile || !tokenEnv) { io.print("A channel needs a name, a profile, and a token env name; nothing was added."); return; }
     try {
       const created: Channel = addChannel(root, "telegram", name, profile, tokenEnv);
-      recordActivity(root, "owner", "config-wizard", "Channel added via config wizard: " + created.name + " -> " + created.profile);
+      recordActivity(root, "owner", "config-wizard", configWizardChannelLedgerSummary(created.name, created.profile));
       io.print("Saved: channel " + created.name + " -> profile " + created.profile + " (credential read from env " + created.tokenEnv + " at runtime).");
     } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); }
     return;
