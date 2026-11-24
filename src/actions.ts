@@ -11,7 +11,7 @@ import { channels } from "./channels.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
-import { installSkill, scanSkillRef, SkillScanHold, skillScanHitIds } from "./skill-registry.js";
+import { installSkill, parseSkillRef, scanSkillRef, SkillScanHold, skillScanHitIds } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft, draftShapeBlocker } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, neverListSummary, scanNeverList, type ProposalRisk } from "./approval-policy.js";
@@ -815,6 +815,27 @@ function validateNotePatch(root: string, actor: string, supersedes: string): voi
     if (blocker) throw new Error(blocker);
   } finally { store.close(); }
 }
+// The skill kind's execution precondition, at proposal time
+// (hourly run 2026-11-24 14:04 EST): kind skill was the ONLY
+// kind with no proposal-time validation at all - its detail
+// is a registry skill reference, parsed only at execution,
+// where installSkill rides fetchSkillCandidates into
+// parseSkillRef, which refuses deterministically and locally
+// (no network) on a malformed ref and on a dotted owner (a
+// skill hosted outside GitHub, the exact shape whose
+// sam_search_skills installRef is null). A malformed or
+// non-GitHub ref was therefore a dead card: shown,
+// approvable, guaranteed to fail on approval. The gate now
+// throws parseSkillRef, the ONE source the install fetch
+// also throws, before any card or proposal ledger line
+// exists. Everything past the ref shape in an install (the
+// repo exists, it carries a SKILL.md, the tree fits) is
+// network truth, not a deterministic precondition, and is
+// deliberately NOT gated; execution re-checks the shape
+// through fetchSkillCandidates as before.
+function validateSkillDetail(detail: string): void {
+  parseSkillRef(detail);
+}
 function validateDraftDetail(detail: string): void {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid draft detail: expected JSON {to, channel, subject, body}"); }
@@ -834,6 +855,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (input.kind === "law") validateLawDetail(detail);
   if (input.kind === "say") validateSayDetail(root, detail);
   if (input.kind === "draft") validateDraftDetail(detail);
+  if (input.kind === "skill") validateSkillDetail(detail);
   // Channel inheritance (Telegram reminder gaps, 2026-11-10): a
   // heartbeat proposed from inside a channel-bound chat (the
   // owner asked on Telegram) inherits that channel as the job's
