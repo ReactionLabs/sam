@@ -185,7 +185,7 @@ export function heartbeatJobs(root:string):HeartbeatJob[]{
  try{
   const rows=db.prepare("SELECT data FROM heartbeat_jobs ORDER BY rowid").all() as Array<{data:string}>;
   const items=rows.map(r=>JSON.parse(r.data) as HeartbeatJob);
-  if(items.length>32)throw Error("Invalid heartbeat jobs file");
+  if(items.length>HEARTBEAT_JOB_LIMIT)throw Error("Invalid heartbeat jobs file");
   return items;
  }catch(error){failHeartbeatJobsStore(root,"read",error);}
  finally{db.close();}
@@ -204,15 +204,30 @@ export function updateHeartbeatJob(root:string,id:string,patch:Partial<Heartbeat
  updateJobRow(root,next);
  return next;
 }
+export const HEARTBEAT_JOB_LIMIT = 32;
+/** The ONE source for why a new heartbeat job cannot be created:
+ *  the store is at its job limit, or the name is already taken.
+ *  createJob throws it at creation time, and the ONE gate's
+ *  heartbeat validation throws the identical text at proposal
+ *  time - the live store sits at the limit, so without the
+ *  proposal-time check every heartbeat card was a dead card
+ *  whose approval could only fail in createJob. Null means a
+ *  job with this name can be created. */
+export function heartbeatCreationBlocker(root:string,name:string):string|null{
+ const items=heartbeatJobs(root);
+ if(items.some(j=>j.name===name))return "A heartbeat job named \""+name+"\" already exists - a new job needs a fresh name, or the existing job retired first.";
+ if(items.length>=HEARTBEAT_JOB_LIMIT)return "The heartbeat store already holds "+HEARTBEAT_JOB_LIMIT+" jobs, the limit - retire a job before adding another, or the operator raises the limit.";
+ return null;
+}
 function createJob(root:string,input:{name:string;minutes:number;profile:string;prompt:string;channelId:string|null;cron?:string|null;schedule?:string|null;timezone?:string;mode?:"agent"|"script";script?:string|null;onceAt?:string|null}):HeartbeatJob{
- if(jobNameTaken(root,input.name))throw Error("Heartbeat limit or duplicate name");
+ const blocker=heartbeatCreationBlocker(root,input.name); if(blocker)throw Error(blocker);
  const item:HeartbeatJob={id:randomUUID(),name:input.name,minutes:input.minutes,profile:input.profile,prompt:input.prompt,channelId:input.channelId,enabled:true,lastRun:null,createdAt:new Date().toISOString()};
  if(input.cron||input.schedule||input.onceAt){item.cron=input.cron??null;item.schedule=input.schedule??null;item.timezone=input.timezone??ownerTimezone();}
  if(input.onceAt)item.onceAt=input.onceAt;
  if(input.mode==="script"){item.mode="script";item.script=input.script??null;}
  insertJob(root,item);return item;
 }
-function jobNameTaken(root:string,name:string):boolean{const items=heartbeatJobs(root);return items.length>=32||items.some(j=>j.name===name);}
+function jobNameTaken(root:string,name:string):boolean{return heartbeatCreationBlocker(root,name)!==null;}
 function validJobName(name:string){if(!/^[a-zA-Z0-9 _-]{1,80}$/.test(name))throw Error("Invalid heartbeat name");}
 function validJobProfile(profile:string){if(!/^[a-z][a-z0-9._-]{0,63}$/.test(profile))throw Error("Invalid profile");}
 export function addHeartbeatJob(root:string,name:string,minutes:number,profile:string,prompt:string,channelId:string|null=null):HeartbeatJob{

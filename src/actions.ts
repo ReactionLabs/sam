@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore } from "./memory.js";
 import { PreferenceStore } from "./preferences.js";
-import { addHeartbeatJob, addScheduledJob } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatCreationBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
 import { channels } from "./channels.js";
 import { channelForChat, errorReason } from "./telegram.js";
@@ -712,6 +712,16 @@ function validateHeartbeatDetail(root: string, detail: string): void {
     throw new Error("Unknown profile \"" + profile + "\" in heartbeat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : ""));
   }
   if (typeof s.name !== "string" || !/^[a-zA-Z0-9 _-]{1,80}$/.test(s.name)) throw new Error("Invalid heartbeat name in detail");
+  // The creation precondition, at proposal time: the store's job
+  // limit and the name's freshness are deterministic the moment
+  // the card would be shown (the live store sits at the limit),
+  // so a heartbeat that can only fail on approval is refused
+  // here, in the ONE source's own words - the same text
+  // createJob throws if the store fills between proposal and
+  // approval, where execution re-checks through addHeartbeatJob /
+  // addScheduledJob.
+  const creationBlocker = heartbeatCreationBlocker(root, s.name);
+  if (creationBlocker) throw new Error(creationBlocker);
   // A named delivery channel must be a real channel on this
   // install: a job created for a channel that does not exist
   // would deliver nowhere and read as done. Refused here, at
