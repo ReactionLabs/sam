@@ -226,15 +226,36 @@ export function updateDraft(root: string, id: string, patch: Partial<Draft>): Dr
     return next;
   } catch (error) { failDraft(root, "write", error); }
 }
+// The ONE source for the draft store's SHAPE rules, measured
+// exactly as createDraft measures them (recipient trimmed,
+// channel trimmed and lowercased against the five, subject
+// trimmed, body trimmed). createDraft throws this text at
+// write time; the proposal gate's validateDraftDetail throws
+// the identical text at proposal time, so a draft detail that
+// breaks a shape rule never becomes a card that can only fail
+// on approval. The no-drafts contact fence is deliberately
+// NOT here: a contact can be marked between proposal and
+// approval, and that refusal stays an execution-time landing
+// (drafts.test.ts pins it).
+export function draftShapeBlocker(input: { to?: unknown; channel?: unknown; subject?: unknown; body?: unknown }): string | null {
+  const to = typeof input.to === "string" ? input.to.trim() : "";
+  if (!to || to.length > 120) return "Invalid draft recipient";
+  const channel = input.channel === undefined || input.channel === null ? "message" : typeof input.channel === "string" ? input.channel.trim().toLowerCase() : "";
+  if (!CHANNELS.includes(channel)) return "Invalid draft channel";
+  if (input.subject !== undefined && input.subject !== null) {
+    if (typeof input.subject !== "string" || input.subject.trim().length > 200) return "Invalid draft subject";
+  }
+  const body = typeof input.body === "string" ? input.body.trim() : "";
+  if (!body || body.length > 8000) return "Invalid draft body";
+  return null;
+}
 export function createDraft(root: string, input: { actor: string; to: string; channel?: string; subject?: string | null; body: string; via?: "cli" | "proposal" }): Draft {
   const to = (input.to ?? "").trim();
   const channel = (input.channel ?? "message").trim().toLowerCase();
   const subject = (input.subject ?? null)?.trim() || null;
   const body = (input.body ?? "").trim();
-  if (!to || to.length > 120) throw new Error("Invalid draft recipient");
-  if (!CHANNELS.includes(channel)) throw new Error("Invalid draft channel");
-  if (subject && subject.length > 200) throw new Error("Invalid draft subject");
-  if (!body || body.length > 8000) throw new Error("Invalid draft body");
+  const shapeBlocker = draftShapeBlocker(input);
+  if (shapeBlocker) throw new Error(shapeBlocker);
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   const blocked = draftBlockedFor(root, to);
   if (blocked) throw new Error("Contact " + blocked.display + " is marked no-drafts by the owner");

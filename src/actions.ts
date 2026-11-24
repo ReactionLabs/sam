@@ -13,7 +13,7 @@ import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { installSkill, scanSkillRef, SkillScanHold, skillScanHitIds } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
-import { createDraft } from "./drafts.js";
+import { createDraft, draftShapeBlocker } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, neverListSummary, scanNeverList, type ProposalRisk } from "./approval-policy.js";
 import { pushBranch, validateGitPushDetail } from "./git-work.js";
 import { queueEngineTask, validateEngineDetail } from "./engine.js";
@@ -767,6 +767,39 @@ function validateLawDetail(detail: string): void {
   const blocker = preferenceStatementBlocker(detail);
   if (blocker) throw new Error(blocker);
 }
+// The say and draft kinds' execution preconditions, at
+// proposal time. Neither kind had any: a say detail is parsed
+// only at execution, where ChatStore.add refuses a chat that
+// does not exist ("Chat not found") or a blank text ("Invalid
+// chat message"), and a draft detail only where createDraft
+// refuses on shape alone - so a non-JSON detail, a say naming
+// no real chat, or a draft breaking a shape rule was a card
+// that could only fail on approval. The draft check rides
+// draftShapeBlocker, the ONE source createDraft also throws;
+// the no-drafts contact fence is deliberately NOT checked
+// here (a contact can be marked between proposal and
+// approval, and that refusal stays an execution-time landing,
+// pinned by drafts.test.ts). Execution re-validates say
+// through this same function, as the other kinds re-validate.
+function validateSayDetail(root: string, detail: string): { chatId: string; text: string } {
+  let spec: unknown;
+  try { spec = JSON.parse(detail); } catch { throw new Error("Invalid say detail: expected JSON {chatId, text}"); }
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid say detail: expected JSON {chatId, text}");
+  const s = spec as { chatId?: unknown; text?: unknown };
+  if (typeof s.chatId !== "string" || !s.chatId.trim()) throw new Error("Invalid say chatId in detail");
+  if (typeof s.text !== "string" || !s.text.trim()) throw new Error("Invalid say text in detail");
+  const db = new ChatStore(root);
+  try { if (!db.get(s.chatId)) throw new Error("Chat not found"); }
+  finally { db.close(); }
+  return { chatId: s.chatId, text: s.text };
+}
+function validateDraftDetail(detail: string): void {
+  let spec: unknown;
+  try { spec = JSON.parse(detail); } catch { throw new Error("Invalid draft detail: expected JSON {to, channel, subject, body}"); }
+  if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid draft detail: expected JSON {to, channel, subject, body}");
+  const blocker = draftShapeBlocker(spec as { to?: unknown; channel?: unknown; subject?: unknown; body?: unknown });
+  if (blocker) throw new Error(blocker);
+}
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
@@ -776,6 +809,8 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
   if (input.kind === "law") validateLawDetail(detail);
+  if (input.kind === "say") validateSayDetail(root, detail);
+  if (input.kind === "draft") validateDraftDetail(detail);
   // Channel inheritance (Telegram reminder gaps, 2026-11-10): a
   // heartbeat proposed from inside a channel-bound chat (the
   // owner asked on Telegram) inherits that channel as the job's
@@ -886,7 +921,7 @@ async function execute(root: string, a: ActionProposal): Promise<string> {
     return "Heartbeat job created (" + job.id + ")";
   }
   if (a.kind === "say") {
-    const spec = JSON.parse(a.detail) as { chatId: string; text: string };
+    const spec = validateSayDetail(root, a.detail);
     const db = new ChatStore(root);
     try { db.add(spec.chatId, "assistant", spec.text); return "Message posted to chat " + spec.chatId; }
     finally { db.close(); }
