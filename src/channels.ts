@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 // Channels are how the outside world talks to SAM: a messaging surface (Telegram
 // first) bound to one profile. Like connectors, a channel stores only an env
@@ -252,6 +253,43 @@ export function updateChannel(root: string, id: string, patch: Partial<Channel>)
   const next: Channel = { ...current, ...patch, id: current.id };
   updateChannelRow(root, next);
   return next;
+}
+function normalizeChannelProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a channel cannot be created for this
+ *  profile: the name is not in the profile registry ("sam",
+ *  the implicit core profile, plus every registered agent),
+ *  so a channel created with it would be bound to nobody -
+ *  resolveBindingProfile falls back to the channel's own
+ *  profile as the default, the bridge and webhook doors
+ *  ensure a chat under that name, and the turn resolves no
+ *  registered profile, so the conversation runs unscoped
+ *  (no instructions, no connector pin, no law of the person
+ *  the channel was meant to serve) while reading as a
+ *  working channel. Every other profile-naming creation
+ *  door already validates the registry (channels bind,
+ *  events bind, agents add-fallback, skills allow,
+ *  heartbeats add / schedule); the channel creation doors
+ *  (channels add / add-discord / add-webhook and the config
+ *  wizard's channels section) throw this text before
+ *  creating anything. The store itself stays permissive by
+ *  design, exactly as for heartbeat jobs: a profile can be
+ *  removed AFTER a channel names it, and the channel keeps
+ *  resolving to its stored default - creation doors are
+ *  where the check belongs. When exactly one registered
+ *  profile matches the bad name folded for case and
+ *  separators, the refusal names it ("Second Shift" ->
+ *  "second-shift"). Null means the profile can be named. */
+export function channelProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeChannelProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeChannelProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in channel detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 export function addChannel(root: string, kind: Channel["kind"], name: string, profile: string, tokenEnv: string, ownerIds: number[] = []): Channel {
   if (kind !== "telegram" && kind !== "webhook" && kind !== "discord") throw Error("Invalid channel kind");

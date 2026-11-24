@@ -3,7 +3,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
-import { channels, addChannel, type Channel } from "./channels.js";
+import { channels, addChannel, channelProfileBlocker, type Channel } from "./channels.js";
 import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { modelRoutingTable } from "./model-routing.js";
@@ -572,6 +572,8 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
     const profile = (await io.ask("Profile it talks to: ")).trim();
     const tokenEnv = (await io.ask("Env var NAME holding its token (never the token itself): ")).trim();
     if (!name || !profile || !tokenEnv) { io.print("A channel needs a name, a profile, and a token env name; nothing was added."); return; }
+    const profileBlocker = channelProfileBlocker(root, profile);
+    if (profileBlocker) { io.print("Refused: " + profileBlocker); return; }
     try {
       const created: Channel = addChannel(root, "telegram", name, profile, tokenEnv);
       recordActivity(root, "owner", "config-wizard", configWizardChannelLedgerSummary(created.name, created.profile));
