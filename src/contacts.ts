@@ -151,6 +151,66 @@ export function recordContactFailure(root: string, phase: ContactPhase, error: u
   recordActivity(root, "sam", "contact-failed", contactFailureSummary(phase, reason));
 }
 
+// The contact failed history scorecard (2026-11-23, the
+// measured-proof series): the contact store's touches ledger
+// every failure as a "contact-failed" line through the ONE
+// writer above (contactFailureSummary, fixed shape "Contact
+// <phase> failed: <reason>", capped 200; phases read / write,
+// ridden by recordContactFailure from the store seams, actor
+// sam) - and while self-work's classifyDefect labels single
+// lines and the Address Book render failures carry their own
+// fold (address-book-failed), no surface folds this kind, so
+// a dead contacts store - the store holding the per-person
+// permission notes, including the noDraft hard rule the
+// drafting path checks on every draft - could fail every
+// touch with nothing counting the class in aggregate, and a
+// reader folding a dead store as "no contacts" would be
+// exactly the silent failure the seam was built to prevent.
+// Every failure line is by construction a store touch that
+// did not complete, so the verdict is attention when any
+// failure was ever recorded or any line is unparseable,
+// else clear. This parser is strict: only the two phases
+// the writer writes parse, and a non-empty reason is
+// required and consumed, never printed - a reason can carry
+// a store path and never surfaces here, and no contact
+// record (a note is the owner's words about a person) ever
+// enters the fold. A line from any other kind never parses.
+// A pure read: it creates nothing, updates nothing, and
+// reads no contact record - the store seams themselves are
+// untouched.
+export function parseContactFailedSummary(summary: string): { phase: ContactPhase } | null {
+  const m = /^Contact (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as ContactPhase };
+}
+
+export function contactFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "contact-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let write = 0;
+  for (const line of lines) {
+    const parsed = parseContactFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else write += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Contact failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 function tagContactLedgered(error: unknown): void {
   if (error !== null && (typeof error === "object" || typeof error === "function")) {
     (error as { contactLedgered?: boolean }).contactLedgered = true;
