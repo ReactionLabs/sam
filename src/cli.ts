@@ -57,7 +57,7 @@ import { minis, spawnMini, removeMini } from "./minis.js";
 import { links, createLink, addLinkMember, removeLinkMember, deleteLink, linkFailedHistoryScorecardText } from "./links.js";
 import { linkExchange } from "./collab.js";
 import { issueDoorKey, disableDoor } from "./mini-door.js";
-import { ChatStore } from "./chats.js";
+import { ChatStore, chatProfileBlocker } from "./chats.js";
 import { addTeamMember, listTeamMembers, listTeamRuns, removeTeamMember, runResearchTeam, runStandingTeam, teamMemberHistoryScorecardText, teamMessagesFailedHistoryScorecardText, teamRunHistoryScorecardText, teamStatus } from "./team-runtime.js";
 import { STANDING_FILES, listStandingFiles, readStandingFile, standingFileFailedHistoryScorecardText, writeStandingFile, clearStandingFile } from "./standing-files.js";
 import { proposeModelEdit } from "./model-edit.js";
@@ -765,7 +765,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
   await serveWebhookChannel({channel,sam,secret,port:Number(o.port),root});
  });
 const chats=program.command("chats").description("Persistent separate chat histories (no model invocation)");
-chats.command("new").argument("<title>").option("--profile <name>","Bind the chat to a profile").action((title:string,o:{profile?:string})=>{const db=new ChatStore(program.opts().workspace);try{output(db.create(title,o.profile&&o.profile!=="sam"?o.profile:null));}finally{db.close();}});
+chats.command("new").argument("<title>").option("--profile <name>","Bind the chat to a profile (must be a registered profile: sam or a registered agent - an unknown profile refuses before anything is created, naming the registry)").action((title:string,o:{profile?:string})=>{const root=program.opts().workspace as string;if(o.profile&&o.profile!=="sam"){const profileBlocker=chatProfileBlocker(root,o.profile);if(profileBlocker)throw new Error(profileBlocker);}const db=new ChatStore(root);try{output(db.create(title,o.profile&&o.profile!=="sam"?o.profile:null));}finally{db.close();}});
 chats.command("list").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.list());}finally{db.close();}});
 chats.command("managed").option("--profile <name>","Acting profile (default sam)").option("--archived","Include archived").action((o:{profile?:string;archived?:boolean})=>output(listManagedChats(program.opts().workspace,o.profile??"sam",{includeArchived:!!o.archived})));
 chats.command("rename").argument("<id>").argument("<title>").option("--profile <name>","Acting profile (default sam)").action((id:string,title:string,o:{profile?:string})=>output(renameManagedChat(program.opts().workspace,o.profile??"sam",id,title)));

@@ -421,3 +421,32 @@ export class ChatStore {
   }
   close(){this.db.close();}
 }
+function normalizeChatProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a chat cannot be created for this
+ *  profile: the name is not in the profile registry ("sam",
+ *  the implicit core profile, plus every registered agent),
+ *  so a chat bound to it would resolve no registered profile
+ *  and every turn in it would run unscoped - no instructions,
+ *  no connector pin, no law of the person it was meant to be
+ *  with. The dashboard door already refuses an unknown agent
+ *  inline; the terminal creation doors (CLI `chats new
+ *  --profile`, `sam tui --profile`) ride this source and
+ *  refuse before creating anything. When exactly one valid
+ *  profile matches the bad name folded for case and
+ *  separators, the refusal names it ("Second Shift" ->
+ *  "second-shift"). Null means the profile can be named.
+ *  The store itself stays permissive by design: a profile
+ *  removed after a chat names it leaves the chat with its
+ *  stored binding, so ChatStore.create is NOT gated here. */
+export function chatProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeChatProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeChatProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in chat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}

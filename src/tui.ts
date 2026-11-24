@@ -9,7 +9,7 @@
 
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { ChatStore } from "./chats.js";
+import { ChatStore, chatProfileBlocker } from "./chats.js";
 import { runChatTurn } from "./agent-turn.js";
 import { cliSourceMark } from "./message-provenance.js";
 import { lastSkillByChat } from "./skill-use.js";
@@ -79,6 +79,20 @@ export async function runTui(root: string, opts: { profile?: string; bannerOnly?
     process.stdout.write(banner());
     for (const line of detectionLines) process.stdout.write(paint(DIM, line) + "\n");
     return;
+  }
+
+  // Profile gate (chat creation door parity): a Terminal chat
+  // bound to a profile outside the registry would run every
+  // turn unscoped. Refuse under the banner, creating and
+  // reusing nothing - the same ONE source the CLI door rides.
+  if (profile !== "sam") {
+    let profileBlocker: string | null = null;
+    try { profileBlocker = chatProfileBlocker(root, profile); } catch { /* a registry read failure never blocks the splash */ }
+    if (profileBlocker) {
+      process.stdout.write(banner());
+      process.stdout.write(paint(DIM, profileBlocker) + "\n");
+      return;
+    }
   }
 
   if (!process.stdin.isTTY) {
