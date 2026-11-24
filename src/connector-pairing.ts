@@ -1,5 +1,5 @@
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import {
   addConnectorVault, allowlistPairHost, connectors, isLoopbackHost,
   removeConnector, testConnector, updateConnector, type Connector,
@@ -142,6 +142,69 @@ export function connectorPairedLedgerSummary(name: string, host: string, vaultKe
 export function pairFailedSummary(name: string, host: string, vaultKey: string, error: unknown): string {
   return "Pairing connector \"" + name + "\" at " + host + " using vault credential " + vaultKey +
     " failed and was rolled back: " + pairFailureReason(error);
+}
+
+// The connector pair failed history scorecard (2026-11-23, the
+// measured-proof series): pairConnector's rollback ledgers every
+// failed pairing as a "connector-pair-failed" line through the
+// ONE writer above (pairFailedSummary, fixed shape "Pairing
+// connector \"<name>\" at <host> using vault credential
+// <vaultKey> failed and was rolled back: <reason>", actor the
+// acting profile) - and while self-work's classifyDefect labels
+// single lines and the success side carries its own fold (the
+// config-acts scorecard over "connector-paired"), no surface
+// folds this kind, so a pairing endpoint or vault binding that
+// dies on every attempt - the self-pairing flow is how SAM
+// gains new reach, and every failure rolls back fully, leaving
+// no enabled connector behind - can fail repeatedly with
+// nothing counting the class in aggregate. Every failure line
+// is by construction a pairing that did not complete, so the
+// verdict is attention when any failure was ever recorded or
+// any line is unparseable, else clear. This parser is strict:
+// only the fixed shape parses (the name is 1-64 chars of the
+// NAME_RE alphabet in quotes, the host is a single spaceless
+// token, the vault credential name matches VAULT_NAME_RE), and
+// a non-empty reason is required and consumed, never printed -
+// a reason can carry a transport cause and never surfaces here,
+// and no connector name, host, or vault credential name ever
+// enters the fold (distinct values surface as numbers only).
+// A line from any other kind never parses. A pure read: it
+// creates nothing, updates nothing, and pairs nothing - the
+// pair seam itself is untouched.
+export function parsePairFailedSummary(summary: string): { name: string; host: string; vaultKey: string } | null {
+  const m = /^Pairing connector "([A-Za-z0-9 _.\-]{1,64})" at (\S+) using vault credential ([a-z0-9][a-z0-9-]{0,63}) failed and was rolled back: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[4] ?? "").trim()) return null;
+  return { name: m[1] ?? "", host: m[2] ?? "", vaultKey: m[3] ?? "" };
+}
+
+export function connectorPairFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "connector-pair-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const names = new Set<string>();
+  const hosts = new Set<string>();
+  const vaultKeys = new Set<string>();
+  for (const line of lines) {
+    const parsed = parsePairFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      names.add(parsed.name);
+      hosts.add(parsed.host);
+      vaultKeys.add(parsed.vaultKey);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Connector pair failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(names.size) + " distinct connectors");
+  parts.push(String(hosts.size) + " distinct hosts");
+  parts.push(String(vaultKeys.size) + " distinct vault credentials");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 /** The pair flow itself. The tester is injectable for tests; the
