@@ -635,6 +635,60 @@ export function taskBatteryFailureSummary(phase: TaskBatteryPhase, reason: strin
   return ("Task battery store " + phase + " failed: " + clean).slice(0, 200);
 }
 
+// The task battery failed history scorecard (2026-11-24, the
+// measured-proof series): every failed task battery store
+// touch ledgers a "task-battery-failed" line through the ONE
+// writer above (taskBatteryFailureSummary, fixed shape "Task
+// battery store <phase> failed: <reason>", phases read /
+// write) - and while self-work's classifyDefect labels single
+// lines and the task battery history scorecard folds the
+// SUCCESS kind ("task-battery" run lines), no surface folds
+// this kind, so a dead battery store - a failed write loses a
+// run's scorecard at the final insert, in the store that
+// exists to prove whether Sam got better at real jobs - can
+// fail on every touch with nothing counting the class in
+// aggregate. Every failure line is by construction a store
+// touch that did not complete, so the verdict is attention
+// when any failure was ever recorded or any line is
+// unparseable, else clear. This parser is strict: only the
+// two fixed phases parse, and a non-empty reason is required
+// and consumed, never printed. A line from any other kind
+// never parses. A pure read: it creates nothing, runs no
+// battery case, and opens no store - the store seams
+// themselves are untouched.
+export function parseTaskBatteryFailedSummary(summary: string): { phase: TaskBatteryPhase } | null {
+  const m = /^Task battery store (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as TaskBatteryPhase };
+}
+
+export function taskBatteryFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "task-battery-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let write = 0;
+  for (const line of lines) {
+    const parsed = parseTaskBatteryFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else write += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Task battery failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 /**
  * The reason a task-battery-failed line carries (census sprint
  * 2026-11-17): recordTaskBatteryFailure took error.message alone,
