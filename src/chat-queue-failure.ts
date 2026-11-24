@@ -1,5 +1,5 @@
 import { resolve } from "node:path";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Failure visibility for the chat queue store
@@ -63,6 +63,68 @@ export function chatQueueFailureReason(error: unknown): string {
 export function recordChatQueueFailure(root: string, phase: ChatQueuePhase, error: unknown): void {
   const reason = chatQueueFailureReason(error);
   recordActivity(root, "sam", "chat-queue-failed", chatQueueFailureSummary(phase, reason));
+}
+
+// The chat queue failed history scorecard (2026-11-23, the
+// measured-proof series): the chat queue store's touches
+// ledger every failure as a "chat-queue-failed" line through
+// the ONE writer above (chatQueueFailureSummary, fixed shape
+// "Chat queue store <phase> failed: <reason>", capped 200;
+// phases read / write, ridden by recordChatQueueFailure from
+// chatQueueTouch / chatQueueTouchAsync across chat-queue.ts
+// and turn-control.ts, actor sam) - and while self-work's
+// classifyDefect labels single lines and the message /
+// intervention / reset scorecards fold the queue's other
+// kinds, no surface folds this kind, so a dead chat-queue.db -
+// the burst queue every owner message is accounted in, the
+// turn claims, and the reset generations two modules share -
+// could fail every touch with nothing counting the class in
+// aggregate, while the dashboard folds the failure as no
+// queue and no active turn. Every failure line is by
+// construction a store touch that did not complete, so the
+// verdict is attention when any failure was ever recorded or
+// any line is unparseable, else clear. This parser is strict:
+// only the two phases the writer writes parse, and a
+// non-empty reason is required and consumed, never printed -
+// a reason can carry a store path and never surfaces here,
+// and no queue record (message content is the owner's words)
+// ever enters the fold. A line from any other kind never
+// parses. A pure read: it creates nothing, updates nothing,
+// and reads no queue record - the store seams themselves are
+// untouched. (This store's reads create the queue file by
+// design; the scorecard reads only the activity ledger, so
+// its bare run creates nothing at all.)
+export function parseChatQueueFailedSummary(summary: string): { phase: ChatQueuePhase } | null {
+  const m = /^Chat queue store (read|write) failed: ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[2] ?? "").trim()) return null;
+  return { phase: m[1] as ChatQueuePhase };
+}
+
+export function chatQueueFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "chat-queue-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let write = 0;
+  for (const line of lines) {
+    const parsed = parseChatQueueFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      if (parsed.phase === "read") read += 1;
+      else write += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Chat queue failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(write) + " write");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagChatQueueLedgered(error: unknown): void {
