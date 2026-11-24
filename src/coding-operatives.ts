@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
@@ -10,6 +10,7 @@ import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./telegram.js";
 import { OperativeRegistry, OPERATIVE_HEARTBEAT_TTL_MS, type Operative } from "./operatives.js";
+import { commandCandidates, namedExecutable, probeDelimiter, probePlatform, type BinaryProbe } from "./bin-path.js";
 
 // Coding-agent operatives (item 9). SAM delegates a repo job to a
 // local Codex CLI or Claude Code process the way a coordinator hands
@@ -104,7 +105,39 @@ function git(cwd: string, args: string[]): { ok: boolean; out: string } {
   }
 }
 
-export function validateDelegateSpec(input: { adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number; chatId: string | null } {
+/** The binary ONE adapter's run would spawn, resolved exactly
+ *  as adapterLaunch resolves it: Codex rides SAM_CODEX_BIN, else
+ *  "codex" on PATH; Claude Code rides SAM_CLAUDE_BIN, else
+ *  SAM_ENGINE_BIN, else "claude" on PATH - through the bin-path
+ *  helpers (the engine-connect providerBinary pattern: a named
+ *  executable must be a real file, a symlink is not a file).
+ *  Null means that adapter is not installed on this machine. */
+export function delegateBinary(adapter: CodingAdapter, env: NodeJS.ProcessEnv = process.env, probe?: BinaryProbe): string | null {
+  const platform = probePlatform(probe);
+  const delimiter = probeDelimiter(probe);
+  const launch = adapterLaunch(adapter, env);
+  const namedRaw = adapter === "codex" ? env.SAM_CODEX_BIN?.trim() : (env.SAM_CLAUDE_BIN?.trim() || env.SAM_ENGINE_BIN?.trim());
+  if (namedRaw) {
+    const named = namedExecutable(namedRaw, platform);
+    try { return lstatSync(named).isFile() ? named : null; } catch { return null; }
+  }
+  for (const candidate of commandCandidates(env.PATH, delimiter, launch.bin, platform)) {
+    try { if (lstatSync(candidate).isFile()) return candidate; } catch { /* keep looking */ }
+  }
+  return null;
+}
+
+/** The ONE source of the delegate not-installed refusal: the
+ *  proposal-time gate in validateDelegateSpec throws it, so a
+ *  card that cannot execute is never shown, in the engine
+ *  kind's own shape. */
+export function delegateNotInstalledReason(adapter: CodingAdapter): string {
+  return adapter === "codex"
+    ? "The coding operative (Codex) is not installed on this machine - no SAM_CODEX_BIN is set and no \"codex\" binary is on PATH. Installing it is the operator's act; until then a delegation cannot execute."
+    : "The coding operative (Claude Code) is not installed on this machine - neither SAM_CLAUDE_BIN nor SAM_ENGINE_BIN is set and no \"claude\" binary is on PATH. Installing it is the operator's act; until then a delegation cannot execute.";
+}
+
+export function validateDelegateSpec(input: { adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }, env: NodeJS.ProcessEnv = process.env): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number; chatId: string | null } {
   if (!CODING_ADAPTERS.includes(input.adapter as CodingAdapter)) throw new Error("Unknown coding adapter \"" + input.adapter + "\". Adapters: " + CODING_ADAPTERS.join(", "));
   const branch = (input.branch ?? "").trim();
   if (!BRANCH_RE.test(branch) || branch.split("/").includes("..") || REFUSED_BRANCHES.has(branch) || REFUSED_BRANCHES.has(branch.toLowerCase()))
@@ -119,12 +152,21 @@ export function validateDelegateSpec(input: { adapter: string; repo: string; bra
   if (!inside.ok || inside.out !== "true") throw new Error("Repo is not a git work tree: " + repo);
   const head = git(repo, ["rev-parse", "--verify", "HEAD"]);
   if (!head.ok) throw new Error("Repo has no commits yet, so a worktree branch cannot be created: " + repo);
+  // The operative binary is the run's last deterministic
+  // precondition: with no binary installed, the approved run's
+  // spawn can only fail (ENOENT, exit code null, delegation
+  // failed), so a card for that adapter can never execute. The
+  // engine kind refuses not-installed at proposal time for
+  // exactly this reason; the delegate gate now reads the same
+  // precondition before any card is shown, in the ONE reason's
+  // words. Installing the CLI stays the operator's act.
+  if (!delegateBinary(input.adapter as CodingAdapter, env)) throw new Error(delegateNotInstalledReason(input.adapter as CodingAdapter));
   const chatId = input.chatId ?? null;
   if (chatId !== null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(chatId)) throw new Error("Invalid chat id");
   return { adapter: input.adapter as CodingAdapter, repo, branch, prompt, timeoutMs, chatId };
 }
 
-export function validateDelegateDetail(detail: string): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number } {
+export function validateDelegateDetail(detail: string, env: NodeJS.ProcessEnv = process.env): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number } {
   let spec: unknown;
   try { spec = JSON.parse(detail); } catch { throw new Error("Invalid delegate detail: expected JSON {adapter, repo, branch, prompt}"); }
   if (!spec || typeof spec !== "object" || Array.isArray(spec)) throw new Error("Invalid delegate detail: expected JSON {adapter, repo, branch, prompt}");
@@ -135,7 +177,7 @@ export function validateDelegateDetail(detail: string): { adapter: CodingAdapter
     branch: typeof s.branch === "string" ? s.branch : "",
     prompt: typeof s.prompt === "string" ? s.prompt : "",
     timeoutMs: typeof s.timeoutMs === "number" ? s.timeoutMs : undefined,
-  });
+  }, env);
 }
 
 // State convergence (UNIFICATION item 4, thirty-fourth store):
@@ -252,15 +294,15 @@ export function operativeLiveness(operative: Operative, now = Date.now()): "fres
   return Date.parse(operative.last_seen_at) > now - OPERATIVE_HEARTBEAT_TTL_MS ? "fresh" : "stale";
 }
 
-export function proposeDelegation(root: string, input: { actor?: string; adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }, propose: (detail: string, title: string) => { id: string }): Delegation {
-  const spec = validateDelegateSpec(input);
+export function proposeDelegation(root: string, input: { actor?: string; adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }, propose: (detail: string, title: string) => { id: string }, env: NodeJS.ProcessEnv = process.env): Delegation {
+  const spec = validateDelegateSpec(input, env);
   if (spec.chatId) {
     const db = new ChatStore(root);
     try { if (!db.get(spec.chatId)) throw new Error("Unknown chat: " + spec.chatId); }
     finally { db.close(); }
   }
   const operative = ensureOperative(root, spec.adapter);
-  const launch = adapterLaunch(spec.adapter);
+  const launch = adapterLaunch(spec.adapter, env);
   const detail = JSON.stringify({ adapter: spec.adapter, repo: spec.repo, branch: spec.branch, prompt: spec.prompt, timeoutMs: spec.timeoutMs });
   const title = "Delegate to " + spec.adapter + " on " + spec.branch;
   const proposal = propose(detail, title);
@@ -535,7 +577,7 @@ export async function runApprovedDelegation(root: string, action: { id: string; 
   if (existing?.status === "cancelled") throw new Error("Delegation was cancelled before it ran");
   const spec = validateDelegateDetail(existing
     ? JSON.stringify({ adapter: existing.adapter, repo: existing.repo, branch: existing.branch, prompt: existing.prompt, timeoutMs: existing.timeoutMs })
-    : action.detail);
+    : action.detail, env);
   const launch = adapterLaunch(spec.adapter, env);
   const operative = ensureOperative(root, spec.adapter);
   const job: Delegation = existing ?? {
