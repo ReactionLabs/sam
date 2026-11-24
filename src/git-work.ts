@@ -147,6 +147,29 @@ export function codingCommitLedgerSummary(paths: string[], branch: string, head:
   return "Committed " + paths.join(", ") + " on " + branch + " (" + head + ", iteration " + iteration + ")";
 }
 
+/** The git precondition the coding loop enforces at task start,
+ *  read BEFORE anything is queued: the exact refusal reason
+ *  prepareTaskBranch would close a task blocked with, or null
+ *  when a task may start (a non-git code root, or a git root
+ *  with a HEAD and a clean tree). Pure reads only - rev-parse
+ *  and status, never a checkout, never a mutation - so a caller
+ *  deciding whether to queue at all (the self-work work bridge)
+ *  can name the precondition instead of minting a task whose
+ *  only possible outcome is the identical block. This probe is
+ *  the ONE source of the refusal text: prepareTaskBranch rides
+ *  it, so the queue-time note and the task's block reason can
+ *  never drift apart. */
+export function codeRootGitBlocker(root: string): string | null {
+  const repo = gitRepoRoot(root);
+  if (!repo) return null;
+  const head = gitSync(repo, ["rev-parse", "HEAD"]);
+  if (!head.ok) return "The code root is a git repository with no commits yet - make the first commit outside SAM, then re-queue the task.";
+  const status = gitSync(repo, ["status", "--porcelain", "--untracked-files=normal"]);
+  if (!status.ok) return "Could not read the code root's git status: " + status.out.slice(0, 200);
+  if (status.out.trim()) return "The code root's working tree has uncommitted changes that are not this task's - SAM never sweeps the owner's work into its branch. Commit or stash them outside SAM, then re-queue the task.";
+  return null;
+}
+
 /** Prepare the task's branch before its first iteration. Creating
  *  or resuming sam/<task> is the only mutation; a dirty tree or an
  *  unborn HEAD refuses (mode "refused", the reason in `error`), and
@@ -155,11 +178,9 @@ export function prepareTaskBranch(root: string, task: { id: string; title: strin
   const repo = gitRepoRoot(root);
   if (!repo) return { mode: "none", branch: null, baseSha: null, commits: [], pending: [], error: null };
   const branch = taskBranchName(task);
+  const blocker = codeRootGitBlocker(root);
+  if (blocker) return { mode: "refused", branch, baseSha: null, commits: [], pending: [], error: blocker };
   const head = gitSync(repo, ["rev-parse", "HEAD"]);
-  if (!head.ok) return { mode: "refused", branch, baseSha: null, commits: [], pending: [], error: "The code root is a git repository with no commits yet - make the first commit outside SAM, then re-queue the task." };
-  const status = gitSync(repo, ["status", "--porcelain", "--untracked-files=normal"]);
-  if (!status.ok) return { mode: "refused", branch, baseSha: null, commits: [], pending: [], error: "Could not read the code root's git status: " + status.out.slice(0, 200) };
-  if (status.out.trim()) return { mode: "refused", branch, baseSha: null, commits: [], pending: [], error: "The code root's working tree has uncommitted changes that are not this task's - SAM never sweeps the owner's work into its branch. Commit or stash them outside SAM, then re-queue the task." };
   if (currentBranch(repo) !== branch) {
     const step = branchExists(repo, branch)
       ? gitSync(repo, ["checkout", branch])

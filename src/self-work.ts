@@ -8,6 +8,7 @@ import { readActivity, recordActivity, type ActivityLine } from "./activity.js";
 import { channels } from "./channels.js";
 import { ChatStore } from "./chats.js";
 import { codeRoot } from "./code.js";
+import { codeRootGitBlocker } from "./git-work.js";
 import { getCodingTask, listCodingTasks, queueCodingTask, type CodingTask } from "./coding.js";
 import { addScheduledJob, heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
 import { readSelfAudit, type SelfAudit } from "./self-audit.js";
@@ -1559,6 +1560,15 @@ export function queueSelfWorkFix(root: string, now: Date = new Date()): SelfWork
   if (inFlight) throw new Error("A self-work fix is already in flight: spec " + inFlight.specId + " (" + inFlight.defectKey + "), coding task " + inFlight.taskId + " - one fix at a time; it closes through the coding loop before another queues.");
   if (fixes.some(f => f.specId === spec.id)) throw new Error("Spec " + spec.id + " (" + spec.defectKey + ") already has a fix record - a spec is worked once; the next recorded run's spec is the next candidate.");
   if (!codeRoot(root)) throw new Error("No code root is designated on this install, so a self-work fix has no workbench. The operator designates one with: sam code set-root <path>.");
+  // The coding runner refuses a git code root whose tree is dirty
+  // (or has no commits yet) at task start, deterministically - so
+  // queueing into that state mints a chat, a fix record, and a task
+  // whose only possible outcome is the identical block, every day,
+  // until the owner cleans the tree. Read the precondition here,
+  // before creating anything: the refusal rides advanceSelfWork's
+  // queue note, naming the one act that unblocks the loop.
+  const gitBlocker = codeRootGitBlocker(root);
+  if (gitBlocker) throw new Error("Spec " + spec.id + " (" + spec.defectKey + ") cannot queue yet: " + gitBlocker);
   const store = new ChatStore(root);
   let chatId: string;
   try { chatId = store.create(("Self-work: " + spec.label).slice(0, 120), "sam").id; } finally { store.close(); }
