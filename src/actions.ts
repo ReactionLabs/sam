@@ -11,7 +11,7 @@ import { channels } from "./channels.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
-import { installSkill, scanSkillRef, SkillScanHold } from "./skill-registry.js";
+import { installSkill, scanSkillRef, SkillScanHold, skillScanHitIds } from "./skill-registry.js";
 import { validateSkillAuthorDetail, writeAuthoredSkill } from "./skill-author.js";
 import { createDraft } from "./drafts.js";
 import { approvalAutoVia, classifyProposal, loadApprovalPolicy, neverListSummary, scanNeverList, type ProposalRisk } from "./approval-policy.js";
@@ -499,6 +499,90 @@ export function neverListHistoryScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writer for the skill-scan-hold activity line, so
+// the scorecard's parser below can never drift from the seam
+// it counts. Its shape is byte-identical to what the
+// decideAction seam wrote inline before this writer existed:
+// "<kind>: <title> - <scan message>", where the scan message
+// is the SkillScanHold error's own fixed shape ("flagged skill
+// content: <name> [<hit id>, ...]; ...").
+export function skillScanHoldLedgerSummary(kind: string, title: string, scanMessage: string): string {
+  return kind + ": " + title + " - " + scanMessage;
+}
+// The skill scan hold history scorecard (2026-11-24, the
+// measured-proof series): when an auto-approved skill
+// install's content scan flags the skill, the ONE gate holds
+// it - the decision reverts to a pending card for the owner -
+// and ledgers one "skill-scan-hold" line, but the class was
+// never folded, so how often the scan caught a flagged skill
+// an approval mode would otherwise have installed silently,
+// and which of the scan's classes it caught, was invisible in
+// aggregate. The held card itself reads as an ordinary
+// pending card in the gate folds, indistinguishable from a
+// never-decided one; this ledger line is the only witness
+// that the scan ever fired. A recorded hold is itself the
+// signal, so the verdict is attention when any hold was ever
+// recorded or any line is unparseable, else clear (the
+// never-list precedent). The parser validates the fixed shape
+// exactly: the kind against the fixed ACTION_KINDS enum with
+// an unknown kind folding to "other", never printed as free
+// text; the flagged entries as skill names (consumed, counted
+// as a distinct number only, never printed) each carrying at
+// least one hit id validated against the scan's own five-class
+// vocabulary (an id outside it is drift, never a new class);
+// the free title is consumed and never printed. This text
+// folds the class to counts only, on ONE line: the held
+// count, the distinct-skill count as a number only, the
+// counts per fixed hit class, the counts per kind, and the
+// total. No stamp, no actor, no title, no skill name, and no
+// verbatim summary enters the text. A pure read: it creates
+// nothing, spends no model call, and proposes, decides, and
+// executes nothing - the hold seam itself is untouched.
+export function parseSkillScanHoldSummary(summary: string): { kind: string; skills: string[]; hits: string[] } | null {
+  const m = /^([a-z][a-z0-9-]*): (.+) - flagged skill content: (.+)$/.exec(summary);
+  if (!m) return null;
+  const vocab = new Set(skillScanHitIds());
+  const skills: string[] = [];
+  const hits: string[] = [];
+  for (const entry of (m[3] as string).split("; ")) {
+    const e = /^([a-z0-9][a-z0-9._-]*) \[([a-z0-9-]+(?:, [a-z0-9-]+)*)\]$/.exec(entry);
+    if (!e) return null;
+    skills.push(e[1] as string);
+    for (const id of (e[2] as string).split(", ")) {
+      if (!vocab.has(id)) return null;
+      hits.push(id);
+    }
+  }
+  if (!skills.length || !hits.length) return null;
+  return { kind: (KINDS as string[]).includes(m[1] as string) ? (m[1] as string) : "other", skills, hits };
+}
+export function skillScanHoldHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "skill-scan-hold" });
+  let held = 0;
+  let unparseable = 0;
+  const skillSet = new Set<string>();
+  const byHit = new Map<string, number>();
+  const byKind = new Map<string, number>();
+  for (const line of lines) {
+    const parsed = parseSkillScanHoldSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    held += 1;
+    for (const s of parsed.skills) skillSet.add(s);
+    for (const h of parsed.hits) byHit.set(h, (byHit.get(h) ?? 0) + 1);
+    byKind.set(parsed.kind, (byKind.get(parsed.kind) ?? 0) + 1);
+  }
+  const hits = skillScanHitIds().filter(h => (byHit.get(h) ?? 0) > 0).map(h => h + " " + String(byHit.get(h)));
+  const kinds = [...KINDS, "other"].filter(k => (byKind.get(k) ?? 0) > 0).map(k => k + " " + String(byKind.get(k)));
+  const parts: string[] = [];
+  parts.push("Skill scan hold history: " + (held > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(held) + " held");
+  parts.push(String(skillSet.size) + " distinct skills");
+  parts.push("hits " + (hits.length ? hits.join(" / ") : "none"));
+  parts.push("kinds " + (kinds.length ? kinds.join(" / ") : "none"));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
@@ -866,7 +950,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
       a.status = "pending"; a.decidedAt = null; a.decidedBy = null;
       a.result = "Auto-install held by the skill content scan (" + e.message + ") - waiting for the owner, who can approve it as-is or install it from the CLI";
       updateAction(root, a);
-      recordActivity(root, a.actor, "skill-scan-hold", a.kind + ": " + a.title + " - " + e.message);
+      recordActivity(root, a.actor, "skill-scan-hold", skillScanHoldLedgerSummary(a.kind, a.title, e.message));
       return a;
     }
     a.status = "failed"; a.result = actionFailureReason(e);

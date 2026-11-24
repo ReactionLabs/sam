@@ -293,6 +293,9 @@ const SKILL_SCAN_PATTERNS: Array<{ id: string; label: string; pattern: RegExp }>
   { id: "exfiltrate-credentials", label: "asks for credentials to be sent, shared or revealed", pattern: /\b(send|post|upload|share|leak|exfiltrate|reveal|disclose|print|show|give)\b[^.\n]{0,64}\b(api[-_ ]?keys?|access tokens?|auth tokens?|passwords?|secrets?|credentials?|private keys?)\b/i },
   { id: "pipe-to-shell", label: "pipes a downloaded URL into a shell", pattern: /\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|da|z)?sh\b/i },
 ];
+export function skillScanHitIds(): string[] {
+  return SKILL_SCAN_PATTERNS.map(p => p.id);
+}
 export function scanSkillContent(text: string): SkillScanHit[] {
   const hits: SkillScanHit[] = [];
   for (const p of SKILL_SCAN_PATTERNS) if (p.pattern.test(text ?? "")) hits.push({ id: p.id, label: p.label });
