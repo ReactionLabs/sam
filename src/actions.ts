@@ -583,6 +583,75 @@ export function skillScanHoldHistoryScorecardText(root: string): string {
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
 }
+// The ONE writer for the reproposal activity line, so the
+// scorecard's parser below can never drift from the seam it
+// counts. Its shape is byte-identical to what the
+// decideAction seam wrote inline before this writer existed:
+// "Corrected re-proposal for failed <kind>: <title> ->
+// profile <fix>", where the fix is the one unambiguous
+// corrected profile name (correctedProfileName - a known
+// profile or nothing is ever written).
+export function reproposalLedgerSummary(kind: string, title: string, fix: string): string {
+  return "Corrected re-proposal for failed " + kind + ": " + title + " -> profile " + fix;
+}
+// The reproposal history scorecard (2026-11-24, the
+// measured-proof series): when a heartbeat proposal dies at
+// execution on an unknown profile and the correction is
+// unambiguous, the ONE gate creates a corrected re-proposal
+// aimed at the fixed profile and ledgers one "reproposal"
+// line - but the class was never folded, so how often the
+// gate has re-aimed a dead card at a different profile was
+// invisible in aggregate. The new card's own proposal line
+// names only kind and title, never that it is a correction
+// or which profile it now targets, and the failed line is
+// written before the corrected profile joins the failed
+// record's result; this ledger line is the only witness of
+// the correction itself. A recorded correction is itself
+// the signal (a card SAM proposed was unexecutable as
+// written), so the verdict is attention when any correction
+// was ever recorded or any line is unparseable, else clear.
+// The parser validates the fixed shape exactly: the kind
+// against the fixed ACTION_KINDS enum with an unknown kind
+// folding to "other", never printed as free text; the free
+// title consumed and never printed; the fix as a profile
+// name in the registry's own alphabet (consumed, counted as
+// a distinct number only, never printed). This text folds
+// the class to counts only, on ONE line: the corrected
+// count, the distinct-profile count as a number only, the
+// counts per kind, and the total. No stamp, no actor, no
+// title, no profile name, and no verbatim summary enters
+// the text. A pure read: it creates nothing, spends no
+// model call, and proposes, decides, and executes nothing -
+// the reproposal seam itself is untouched beyond naming
+// its writer.
+export function parseReproposalSummary(summary: string): { kind: string; profile: string } | null {
+  const m = /^Corrected re-proposal for failed ([a-z][a-z0-9-]*): (.+) -> profile ([a-z][a-z0-9._-]*)$/.exec(summary);
+  if (!m) return null;
+  return { kind: (KINDS as string[]).includes(m[1] as string) ? (m[1] as string) : "other", profile: m[3] as string };
+}
+export function reproposalHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "reproposal" });
+  let corrected = 0;
+  let unparseable = 0;
+  const profileSet = new Set<string>();
+  const byKind = new Map<string, number>();
+  for (const line of lines) {
+    const parsed = parseReproposalSummary(line.summary);
+    if (!parsed) { unparseable += 1; continue; }
+    corrected += 1;
+    profileSet.add(parsed.profile);
+    byKind.set(parsed.kind, (byKind.get(parsed.kind) ?? 0) + 1);
+  }
+  const kinds = [...KINDS, "other"].filter(k => (byKind.get(k) ?? 0) > 0).map(k => k + " " + String(byKind.get(k)));
+  const parts: string[] = [];
+  parts.push("Reproposal history: " + (corrected > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(corrected) + " corrected");
+  parts.push(String(profileSet.size) + " distinct profiles");
+  parts.push("kinds " + (kinds.length ? kinds.join(" / ") : "none"));
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
 export function listActions(root: string): ActionProposal[] {
   if (!existsSync(actionsDbFile(root)) && !existsSync(actionsFile(root))) return [];
   let db: Database.Database;
@@ -984,7 +1053,7 @@ async function applyDecision(root: string, a: ActionProposal, approve: boolean, 
           self.result = (self.result ?? "") + " Corrected re-proposal pending approval: " + np.id + " (profile " + reproposal.fix + ")";
           updateAction(root, self); a.result = self.result;
         }
-        if (!existing) recordActivity(root, decider, "reproposal", "Corrected re-proposal for failed " + a.kind + ": " + a.title + " -> profile " + reproposal.fix);
+        if (!existing) recordActivity(root, decider, "reproposal", reproposalLedgerSummary(a.kind, a.title, reproposal.fix));
       } catch { /* a re-proposal that itself refuses (e.g. the never-list) leaves the failure result standing */ }
     }
     return a;
