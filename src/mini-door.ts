@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { minis } from "./minis.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // The web door: how a person reaches their mini. Each mini can have one door,
@@ -177,6 +177,63 @@ export function doorFailureReason(error:unknown):string{
 export function recordDoorFailure(root:string,phase:DoorPhase,error:unknown):void{
   const reason=doorFailureReason(error);
   recordActivity(root,"sam","door-failed",doorFailureSummary(phase,reason));
+}
+
+// The door failed history scorecard (2026-11-23, the
+// measured-proof series): the door store's touches ledger
+// every failure as a "door-failed" line through the ONE
+// writer above (doorFailureSummary, fixed shape "Door
+// <phase> failed: <reason>", capped 200; phases read /
+// resolve, ridden by recordDoorFailure from the load seam,
+// actor sam) - and while self-work's classifyDefect labels
+// single lines and the door history scorecard folds the
+// guard's blocked / lockout kinds, no surface folds this
+// kind, so a dead mini-doors.db - the store every web door
+// rides, where a failed resolve fails closed and a
+// legitimate key holder's door dies outright - could fail
+// every touch with nothing counting the class in aggregate.
+// Every failure line is by construction a store touch that
+// did not complete, so the verdict is attention when any
+// failure was ever recorded or any line is unparseable,
+// else clear. This parser is strict: only the two phases
+// the writer writes parse, and a non-empty reason is
+// required and consumed, never printed - a reason can carry
+// a store path and never surfaces here, and no door record
+// (a door key is a P10 bearer credential) ever enters the
+// fold. A line from any other kind never parses. A pure
+// read: it creates nothing, updates nothing, and reads no
+// door record - the store seams themselves are untouched.
+export function parseDoorFailedSummary(summary:string):{phase:DoorPhase}|null{
+  const m=/^Door (read|resolve) failed: ([\s\S]+)$/.exec(summary);
+  if(!m)return null;
+  if(!(m[2]??"").trim())return null;
+  return {phase:m[1] as DoorPhase};
+}
+
+export function doorFailedHistoryScorecardText(root:string):string{
+  const lines=readActivity(root,Number.MAX_SAFE_INTEGER,{kind:"door-failed"});
+  let failed=0;
+  let unparseable=0;
+  let read=0;
+  let resolveCount=0;
+  for(const line of lines){
+    const parsed=parseDoorFailedSummary(line.summary);
+    if(parsed){
+      failed+=1;
+      if(parsed.phase==="read")read+=1;
+      else resolveCount+=1;
+      continue;
+    }
+    unparseable+=1;
+  }
+  const parts:string[]=[];
+  parts.push("Door failed history: "+(failed>0||unparseable>0?"attention":"clear"));
+  parts.push(String(failed)+" failed");
+  parts.push(String(read)+" read");
+  parts.push(String(resolveCount)+" resolve");
+  parts.push(String(lines.length)+" total");
+  if(unparseable>0)parts.push(String(unparseable)+" unparseable");
+  return parts.join(", ");
 }
 
 function tagDoorLedgered(error:unknown):void{
