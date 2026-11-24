@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore } from "./memory.js";
-import { PreferenceStore } from "./preferences.js";
+import { PreferenceStore, preferenceStatementBlocker } from "./preferences.js";
 import { addHeartbeatJob, addScheduledJob, heartbeatCreationBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
 import { channels } from "./channels.js";
@@ -753,6 +753,20 @@ function validateHeartbeatDetail(root: string, detail: string): void {
   } else if (!Number.isSafeInteger(Number(s.minutes)) || Number(s.minutes) < 5 || Number(s.minutes) > 10080) throw new Error("Invalid heartbeat minutes in detail (5 to 10080)");
   if (typeof s.prompt !== "string" || !s.prompt.trim() || s.prompt.length > 2000) throw new Error("Invalid heartbeat prompt in detail");
 }
+// The law kind's execution precondition, at proposal time: the
+// approved execution writes the detail through
+// PreferenceStore.note, which refuses a statement that is empty
+// or over the cap once normalized - while the gate's own detail
+// bound is far looser, so an over-long law (the tool contract
+// itself says max 200 chars) was a card that could only fail on
+// approval. The gate now throws preferenceStatementBlocker, the
+// ONE source note() also throws, before any card or proposal
+// ledger line exists; execution re-checks through note() as
+// before, so a statement is measured the same way at both seams.
+function validateLawDetail(detail: string): void {
+  const blocker = preferenceStatementBlocker(detail);
+  if (blocker) throw new Error(blocker);
+}
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
@@ -761,6 +775,7 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   if (!detail || detail.length > 4000) throw new Error("Invalid action detail");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   if (input.kind === "heartbeat") validateHeartbeatDetail(root, detail);
+  if (input.kind === "law") validateLawDetail(detail);
   // Channel inheritance (Telegram reminder gaps, 2026-11-10): a
   // heartbeat proposed from inside a channel-bound chat (the
   // owner asked on Telegram) inherits that channel as the job's

@@ -20,6 +20,19 @@ export type PreferenceStatus = "noted" | "law" | "revoked";
 export interface Preference { id:string; profile:string; statement:string; kind:PreferenceKind; status:PreferenceStatus; hits:number; source:string; created_at:string; updated_at:string }
 export const PROMOTE_HITS = 3;
 function normalize(statement:string):string{return statement.trim().replace(/\s+/g," ").replace(/[.!]+$/,"");}
+export const PREFERENCE_STATEMENT_MAX = 200;
+// The ONE source for whether a statement can be stored at all:
+// empty once normalized, or over the cap once normalized (the
+// store measures the normalized form - whitespace collapsed,
+// trailing punctuation stripped - never the raw text). note()
+// throws this at write time; the P1 proposal gate for kind law
+// throws the identical text at proposal time, so a law card
+// that could only fail on approval is never shown.
+export function preferenceStatementBlocker(statement:string):string|null{
+  const clean=normalize(statement);
+  if(!clean||clean.length>PREFERENCE_STATEMENT_MAX)return "Invalid preference statement";
+  return null;
+}
 function key(profile:string,statement:string):string{return createHash("sha256").update(profile+"\n"+normalize(statement).toLowerCase()).digest("hex");}
 // Failure visibility (gap found 2026-11-15, hourly run
 // 02:04 EST): preferences.db is the store every profile's
@@ -121,7 +134,8 @@ export class PreferenceStore {
   note(profile:string,statement:string,kind:PreferenceKind,source:string):Preference{
     return this.touch("write",()=>{
     const clean=normalize(statement);
-    if(!clean||clean.length>200)throw new Error("Invalid preference statement");
+    const blocker=preferenceStatementBlocker(statement);
+    if(blocker)throw new Error(blocker);
     if(!/^[a-z][a-z0-9._-]{0,63}$/.test(profile)&&profile!=="sam")throw new Error("Invalid profile");
     const now=new Date().toISOString(),k=key(profile,clean);
     const existing=this.db.prepare("SELECT * FROM preferences WHERE pkey=?").get(k) as Preference|undefined;
