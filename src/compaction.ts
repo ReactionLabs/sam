@@ -144,6 +144,73 @@ export function recordCompactionFailure(root: string, actor: string, chatId: str
   recordActivity(root, actor, "compaction-failed", compactionFailureSummary(chatId, phase, reason));
 }
 
+export type CompactionPhase = "read" | "flush" | "save";
+
+// The compaction failed history scorecard (2026-11-23, the
+// measured-proof series): the fold's three durable steps ledger
+// every failure as a "compaction-failed" line through the ONE
+// writer above (compactionFailureSummary, fixed shape "Compaction
+// <phase> failed for chat <8-char prefix>: <reason>", capped 200;
+// phases read / flush / save, ridden by recordCompactionFailure
+// from the fold seams, actor the acting profile) - and while
+// self-work's classifyDefect labels single lines and the success
+// side carries its own fold (compactionScorecardText over the
+// "compaction" kind), no surface folds this kind, so a wedged
+// fold - a locked or corrupt store is all it takes - could fail
+// every later turn on a chat (a flush failure means the chat
+// never compacts at all) with nothing counting the class in
+// aggregate. Every failure line is by construction a fold step
+// that did not complete, so the verdict is attention when any
+// failure was ever recorded or any line is unparseable, else
+// clear. This parser is strict: only the three phases the writer
+// writes parse, the chat segment must be exactly the writer's
+// 8-char slice (a longer segment never parses), and a non-empty
+// reason is required and consumed, never printed - a reason can
+// carry a store path and never surfaces here, and no chat id
+// beyond its counted prefix, message content, or digest text
+// ever enters the fold (distinct chats surface as a number
+// only). A line from any other kind never parses. A pure read:
+// it creates nothing, updates nothing, and folds nothing - the
+// fold seams themselves are untouched.
+export function parseCompactionFailedSummary(summary: string): { phase: CompactionPhase; chat: string } | null {
+  const m = /^Compaction (read|flush|save) failed for chat ([A-Za-z0-9_-]{8}): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[3] ?? "").trim()) return null;
+  return { phase: m[1] as CompactionPhase, chat: m[2] ?? "" };
+}
+
+export function compactionFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "compaction-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  let read = 0;
+  let flush = 0;
+  let save = 0;
+  const chats = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseCompactionFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      chats.add(parsed.chat);
+      if (parsed.phase === "read") read += 1;
+      else if (parsed.phase === "flush") flush += 1;
+      else save += 1;
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Compaction failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(read) + " read");
+  parts.push(String(flush) + " flush");
+  parts.push(String(save) + " save");
+  parts.push(String(chats.size) + " distinct chats");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
+}
+
 // The fence snapshot reader for both sides of a fold: a profile
 // with no preference store yet has no law to protect, so the
 // snapshot is empty rather than the read creating the store on
