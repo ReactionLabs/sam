@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ChatStore } from "./chats.js";
-import { recordActivity } from "./activity.js";
+import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
 // Standing files per profile (Plan Phase A, item 1 - the Hermes/OpenClaw
@@ -98,6 +98,65 @@ export function standingFileFailureReason(error: unknown): string {
 export function recordStandingFileFailure(root: string, profile: string, name: string, error: unknown): void {
   const reason = standingFileFailureReason(error);
   recordActivity(root, profile, "standing-file-failed", standingFileFailureSummary(profile, name, reason));
+}
+
+// The standing file failed history scorecard (2026-11-24, the
+// measured-proof series): every failed standing-file read
+// ledgers a "standing-file-failed" line through the ONE writer
+// above (standingFileFailureSummary, fixed shape "Standing file
+// read failed for profile <profile> (<name>): <reason>", actor
+// the profile itself) - and while self-work's classifyDefect
+// labels single lines and the config-acts scorecard folds the
+// SUCCESS kind ("standing-file" set / cleared lines), no
+// surface folds this kind, so a broken standing file - a dead
+// read means a persona silently drops out of every prompt that
+// profile assembles, the exact failure the seam was built to
+// surface - can fail on every turn with nothing counting the
+// class in aggregate. Every failure line is by construction a
+// read that did not complete, so the verdict is attention when
+// any failure was ever recorded or any line is unparseable,
+// else clear. This parser is strict: only the fixed shape
+// parses (the profile is the writer's own alphabet - a
+// lowercase-led name of at most 64 chars - the file name is
+// one of the three fixed standing files, persona / owner /
+// ops), and a non-empty reason is required and consumed, never
+// printed - a reason can carry a filesystem path and never
+// surfaces here, and no profile or file name ever enters the
+// fold (distinct values surface as numbers only). A line from
+// any other kind never parses. A pure read: it creates
+// nothing, reads no standing file, and assembles nothing -
+// the read seams themselves are untouched.
+export function parseStandingFileFailedSummary(summary: string): { profile: string; name: string } | null {
+  const m = /^Standing file read failed for profile ([a-z][a-z0-9._-]{0,63}) \((persona|owner|ops)\): ([\s\S]+)$/.exec(summary);
+  if (!m) return null;
+  if (!(m[3] ?? "").trim()) return null;
+  return { profile: m[1] ?? "", name: m[2] ?? "" };
+}
+
+export function standingFileFailedHistoryScorecardText(root: string): string {
+  const lines = readActivity(root, Number.MAX_SAFE_INTEGER, { kind: "standing-file-failed" });
+  let failed = 0;
+  let unparseable = 0;
+  const profiles = new Set<string>();
+  const names = new Set<string>();
+  for (const line of lines) {
+    const parsed = parseStandingFileFailedSummary(line.summary);
+    if (parsed) {
+      failed += 1;
+      profiles.add(parsed.profile);
+      names.add(parsed.name);
+      continue;
+    }
+    unparseable += 1;
+  }
+  const parts: string[] = [];
+  parts.push("Standing file failed history: " + (failed > 0 || unparseable > 0 ? "attention" : "clear"));
+  parts.push(String(failed) + " failed");
+  parts.push(String(profiles.size) + " distinct profiles");
+  parts.push(String(names.size) + " distinct files");
+  parts.push(String(lines.length) + " total");
+  if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
+  return parts.join(", ");
 }
 
 function tagStandingFileReadLedgered(error: unknown): void {
