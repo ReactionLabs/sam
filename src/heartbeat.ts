@@ -220,25 +220,50 @@ export function heartbeatCreationBlocker(root:string,name:string):string|null{
  return null;
 }
 /** The ONE source for why a heartbeat job cannot name this
- *  delivery channel: the id is not in the channel registry, so
- *  a job created with it would queue every changed output in
- *  the delivery outbox and fail at deliverToChannel ("Delivery
- *  channel not found") across ticks until the outbox settles
- *  it failed - created on paper, delivered nowhere. The ONE
- *  gate's heartbeat validation throws this text at proposal
- *  time and both CLI doors (heartbeats add / schedule) throw
- *  it before creating anything. The store itself stays
- *  permissive by design: a channel can be removed AFTER a job
- *  names it, and that job's deliveries must queue and fail in
- *  the outbox, never silently - creation doors are where the
- *  check belongs (the brief and self-work installers validate
- *  their channels at their doors the same way). Null means
- *  the channel can be named (or none was). */
+ *  delivery channel: the value names no channel in the
+ *  registry, so a job created with it would queue every
+ *  changed output in the delivery outbox and fail at
+ *  deliverToChannel ("Delivery channel not found") across
+ *  ticks until the outbox settles it failed - created on
+ *  paper, delivered nowhere. A value reads no blocker when
+ *  it names a registered channel by id OR by exact name
+ *  (channel names are unique - addChannel refuses a
+ *  duplicate - and every other channel door accepts the
+ *  name: the brief and self-work installers resolve by id
+ *  or name, the bind / pair doors find by idOrName, and
+ *  the connector pin doors resolved the same two-shape
+ *  field at 17:04); heartbeatChannelId resolves a passing
+ *  name or id to the id, so every door stores the id
+ *  through the same source. The refusal lists the
+ *  registry as name (id) and, when exactly one registered
+ *  name matches the bad value folded for case and
+ *  separators, names that correction. The ONE gate's
+ *  heartbeat validation throws this text at proposal time
+ *  and both CLI doors (heartbeats add / schedule) throw
+ *  it before creating anything; proposeAction resolves a
+ *  named channel to its id in the stored card detail, so
+ *  execution delivers exactly as an id-named proposal
+ *  does. The store itself stays permissive by design: a
+ *  channel can be removed AFTER a job names it, and that
+ *  job's deliveries must queue and fail in the outbox,
+ *  never silently - creation doors are where the check
+ *  belongs. Null means the channel can be named (or none
+ *  was). */
+export function normalizeHeartbeatChannelName(value:string):string{
+ return (value??"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+}
+export function heartbeatChannelId(root:string,value:string):string|null{
+ const known=channels(root);
+ return known.find(c=>c.id===value)?.id??known.find(c=>c.name===value)?.id??null;
+}
 export function heartbeatChannelBlocker(root:string,channelId:string|null|undefined):string|null{
  if(channelId===null||channelId===undefined||channelId==="")return null;
+ if(heartbeatChannelId(root,channelId))return null;
  const known=channels(root);
- if(known.some(c=>c.id===channelId))return null;
- return "Unknown channel \""+channelId+"\" in heartbeat detail. Valid channels: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered");
+ const target=normalizeHeartbeatChannelName(channelId);
+ const matches=target?known.filter(c=>normalizeHeartbeatChannelName(c.name)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Unknown channel \""+channelId+"\" in heartbeat detail. Valid channels: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered")+(fix?". Did you mean \""+fix.name+"\" ("+fix.id+")?":"");
 }
 function normalizeHeartbeatProfileName(name:string):string{
  return name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");

@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { MemoryStore, notePatchBlocker } from "./memory.js";
 import { PreferenceStore, preferenceStatementBlocker } from "./preferences.js";
-import { addHeartbeatJob, addScheduledJob, heartbeatChannelBlocker, heartbeatCreationBlocker, heartbeatProfileBlocker } from "./heartbeat.js";
+import { addHeartbeatJob, addScheduledJob, heartbeatChannelBlocker, heartbeatChannelId, heartbeatCreationBlocker, heartbeatProfileBlocker } from "./heartbeat.js";
 import { compileSchedule, ownerTimezone, scriptArgv, validateTimezone } from "./schedule.js";
 import { channelForChat, errorReason } from "./telegram.js";
 import { ChatStore } from "./chats.js";
@@ -892,10 +892,21 @@ export function proposeAction(root: string, input: { actor: string; kind: string
   // nothing. The inherited id is written into the stored detail,
   // so the card the owner approves already shows where the job
   // will deliver.
-  if (input.kind === "heartbeat" && input.chatId) {
+  if (input.kind === "heartbeat") {
     try {
       const spec = JSON.parse(detail) as { channelId?: unknown };
-      if (spec.channelId === undefined || spec.channelId === null || spec.channelId === "") {
+      // Channel resolution (the heartbeat channel gate): a
+      // detail may name its delivery channel by registered
+      // name or id (validateHeartbeatDetail's ONE source
+      // accepts both); the stored card detail carries the
+      // resolved id, so execution - which reads the stored
+      // detail - delivers exactly as an id-named proposal
+      // does, and the card the owner approves already shows
+      // the id the job will deliver to.
+      if (typeof spec.channelId === "string" && spec.channelId !== "") {
+        const resolved = heartbeatChannelId(root, spec.channelId);
+        if (resolved && resolved !== spec.channelId) detail = JSON.stringify({ ...spec, channelId: resolved });
+      } else if (input.chatId) {
         const inherited = channelForChat(root, input.chatId);
         if (inherited) detail = JSON.stringify({ ...spec, channelId: inherited });
       }
