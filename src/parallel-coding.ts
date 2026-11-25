@@ -658,6 +658,38 @@ export interface QueueParallelInput {
   concurrency?: number; maxVerifyIterations?: number; sliceTimeoutMs?: number;
 }
 
+function normalizeParallelProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a parallel job cannot be queued
+ *  for this actor profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a job bound to it would be accounted to no one -
+ *  the record sits in the queue under an actor that is no
+ *  profile, its ledger line carries that same phantom actor,
+ *  and the job's slices and merged work are accounted to a
+ *  profile that resolves no registered profile. The terminal
+ *  queue door (CLI `parallel queue --actor`) rides this source
+ *  and refuses before queuing anything. When exactly one valid
+ *  profile matches the bad name folded for case and separators,
+ *  the refusal names it ("Second Shift" -> "second-shift"). Null
+ *  means the profile can be named. queueParallelJob itself
+ *  stays permissive by design: a profile removed after a job
+ *  names it leaves the record with its stored actor, and the
+ *  sam_parallel_task chat tool names its actor by construction
+ *  (the speaking chat's own profile), so queueParallelJob is
+ *  NOT gated. */
+export function parallelProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeParallelProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeParallelProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in parallel detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function queueParallelJob(root: string, input: QueueParallelInput, env: NodeJS.ProcessEnv = process.env): ParallelJob {
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   const spec = (input.spec ?? "").trim();
