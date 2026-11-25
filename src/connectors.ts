@@ -267,6 +267,53 @@ export function connectors(root:string):Connector[]{
  }catch(error){failConnector(root,"read",error);}
  finally{db!.close();}
 }
+// The connector-pin field gate (gap found 2026-11-25,
+// hourly run 17:04 EST): two CLI doors write a connector
+// pin onto a profile - `minis spawn --connector` and
+// `agents set-connector` - and neither read the
+// connector registry for a UUID-shaped value.
+// ChatStore.createAgent / setAgentConnector check only
+// that a pin is UUID-SHAPED, so a phantom UUID minted a
+// mini pinned to a connector that does not exist (the
+// scoped SAM's every turn routes at a missing
+// connector; the mini built to serve one person's data
+// source silently has none) and silently re-pinned a
+// profile the same way, while a connector NAME - the
+// value an operator naturally types - died obscurely
+// on "Invalid agent profile" at spawn. The proposal
+// door got this right (validateSpawnDetail refuses a
+// pin naming no connector this install holds).
+// connectorPinBlocker is the ONE source carrying the
+// refusal text for the pin field: a value reads no
+// blocker when it names a registered connector by id
+// OR by exact name; anything else is refused with the
+// registry listed as name (id) and a fold correction
+// when exactly one registered name matches folded for
+// case and separators. connectorPinId resolves a
+// passing value (name or id) to the connector's id,
+// so both doors pin the resolved id through the same
+// source. The stores stay permissive by design (a
+// connector removed after a profile names it keeps its
+// stored pin; validateSpawnDetail re-checks existence
+// at execution; the pair flow pins a connector it just
+// registered by construction), so the gate lives at
+// the CLI doors, not in the stores.
+export function normalizeConnectorPinName(value:string):string{
+ return (value??"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+}
+export function connectorPinId(root:string,value:string):string|null{
+ const known=connectors(root);
+ return known.find(c=>c.id===value)?.id??known.find(c=>c.name===value)?.id??null;
+}
+export function connectorPinBlocker(root:string,value:string|null|undefined):string|null{
+ if(value===null||value===undefined||value==="")return null;
+ if(connectorPinId(root,value))return null;
+ const known=connectors(root);
+ const target=normalizeConnectorPinName(value);
+ const matches=target?known.filter(c=>normalizeConnectorPinName(c.name)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Unknown connector \""+value+"\" in connector pin. Valid connectors: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered")+(fix?". Did you mean \""+fix.name+"\" ("+fix.id+")?":"");
+}
 function findConnectorRow(root:string,id:string):Connector|null{
  if(!storeExists(root))return null;
  const db=openConnectorsStore(root);

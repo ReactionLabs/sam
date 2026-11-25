@@ -138,7 +138,7 @@ import { doorFailedHistoryScorecardText, listDoors } from "./mini-door.js";
 import { doorHistoryScorecardText, runRedTeamPack, screenDoorMessage } from "./door-guard.js";
 import { missionStatuses, type MissionStatus } from "./kernel.js";
 import { modelRoutingTable } from "./model-routing.js";
-import { connectors, connectorFailedHistoryScorecardText } from "./connectors.js";
+import { connectors, connectorFailedHistoryScorecardText, connectorPinBlocker, connectorPinId } from "./connectors.js";
 import { dashboardConfigFailedHistoryScorecardText } from "./dashboard-config.js";
 import { activityFailedHistoryScorecardText, recordActivity } from "./activity.js";
 import { usageSummary, readUsage, usageFailedHistoryScorecardText } from "./usage.js";
@@ -513,7 +513,7 @@ bkCmd.command("drill-scorecard").description("Backup drill history as plain text
 bkCmd.command("history-scorecard").description("Backup history as plain text with no clock reading - verdict, the backup, failed, and restore counts, the latest backup's files, databases, and bytes, and the total (never a stamp, an actor, an archive name, a failure reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a failed backup or a malformed line is the news (this is the sam-backup-history script job's stdout; a pure read over the same activity ledger the nightly backup ledgers: creates nothing, spends no model call, verifies nothing, restores nothing; exits 0 always, the verdict lives in the text)").action(()=>output(backupHistoryScorecardText(program.opts().workspace as string)));
 bkCmd.command("restore").argument("<archive>").description("Restore state from a verified archive into this workspace; refuses to overwrite live state without --force (old state is kept aside, never deleted)").option("--force","Restore over existing state, keeping the old .sam aside").action((archive:string,o:{force?:boolean})=>output(restoreBackup(program.opts().workspace,archive,!!o.force)));
 const miniCmd=program.command("minis").description("Minis: a scoped SAM spawned for one person, their data only");
-miniCmd.command("spawn").argument("<name>").requiredOption("--person <who>","The person this mini serves").requiredOption("--instructions <text>","What this mini is for").option("--model <id>","Pin a model").option("--connector <id>","Pin one MCP connector by id").option("--heartbeat","Give it a starter daily-digest heartbeat").action((name:string,o:{person:string;instructions:string;model?:string;connector?:string;heartbeat?:boolean})=>output(spawnMini(program.opts().workspace,{name,person:o.person,instructions:o.instructions,model:o.model??null,connectorId:o.connector??null,starterHeartbeat:!!o.heartbeat})));
+miniCmd.command("spawn").argument("<name>").requiredOption("--person <who>","The person this mini serves").requiredOption("--instructions <text>","What this mini is for").option("--model <id>","Pin a model").option("--connector <nameOrId>","Pin one MCP connector by registered name or id; an unknown connector refuses before anything is spawned, naming the registry").option("--heartbeat","Give it a starter daily-digest heartbeat").action((name:string,o:{person:string;instructions:string;model?:string;connector?:string;heartbeat?:boolean})=>{const root=program.opts().workspace as string;const pinBlocker=o.connector?connectorPinBlocker(root,o.connector):null;if(pinBlocker)throw new Error(pinBlocker);output(spawnMini(root,{name,person:o.person,instructions:o.instructions,model:o.model??null,connectorId:o.connector?connectorPinId(root,o.connector):null,starterHeartbeat:!!o.heartbeat}));});
 miniCmd.command("list").action(()=>output(minis(program.opts().workspace)));
 miniCmd.command("door").argument("<name>").description("Issue (or rotate) the web door key for a mini (or sam, the core); the key is shown once").option("--home-link","Show a Main SAM link in the door header (operator doors only)").option("--visitor","Visitor door (P12): people chatting are customers, not the owner - their text is never captured as preference, law, or fact").action((name:string,o:{homeLink?:boolean;visitor?:boolean})=>{const key=issueDoorKey(program.opts().workspace,name,{homeLink:!!o.homeLink,visitor:!!o.visitor});output({mini:name,mode:o.visitor?"visitor":"owner",path:"/mini/"+key});});
 miniCmd.command("door-off").argument("<name>").action((name:string)=>output({disabled:disableDoor(program.opts().workspace,name)}));
@@ -626,17 +626,14 @@ agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argum
   output({profile:name,fallbacks});
 });
 agentCmd.command("clear-fallbacks").argument("<name>").description("Remove every failover route for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is cleared, naming the registry). The primary pin is left alone").action((name:string)=>{const root=program.opts().workspace as string;const profileBlocker=failoverProfileBlocker(root,name);if(profileBlocker)throw new Error(profileBlocker);output({profile:name,cleared:clearFallbackRoutes(root,name)});});
-agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; use 'none' to clear the pin").action((name:string,connector:string)=>{
+agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; an unknown connector refuses before anything is re-pinned, naming the registry; use 'none' to clear the pin").action((name:string,connector:string)=>{
   const root=program.opts().workspace as string;
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; it uses no pinned connector");
   let connectorId:string|null=null;
   if(connector!=="none"){
-    if(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(connector))connectorId=connector;
-    else{
-      const found=connectors(root).find(c=>c.name===connector);
-      if(!found)throw new Error("Unknown connector \""+connector+"\". Registered connectors: "+(connectors(root).map(c=>c.name).join(", ")||"(none)"));
-      connectorId=found.id;
-    }
+    const pinBlocker=connectorPinBlocker(root,connector);
+    if(pinBlocker)throw new Error(pinBlocker);
+    connectorId=connectorPinId(root,connector);
   }
   const db=new ChatStore(root);
   try{
