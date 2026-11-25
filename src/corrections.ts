@@ -1,4 +1,5 @@
 import { listActions, proposeAction, type ActionProposal } from "./actions.js";
+import { ChatStore } from "./chats.js";
 import { PreferenceStore, type PreferenceKind } from "./preferences.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
@@ -77,6 +78,33 @@ export function detectCorrection(text: string): Correction | null {
   return null;
 }
 function normStatement(s: string): string { return s.trim().toLowerCase().replace(/[.!]+$/, "").replace(/\s+/g, " "); }
+function normalizeCorrectionProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+// The ONE source carrying the profile refusal for the
+// correction door: a correction binds by profile name, and
+// on approval the executor saves standing law at that
+// profile's scope - law injection only ever consults "sam"
+// and real profile scopes, so a correction proposed under
+// a name that is no profile becomes law for nobody and
+// governs nothing, silently. The CLI corrections check
+// door throws this text before detecting or proposing
+// anything. proposeCorrection itself stays permissive by
+// design (a profile removed after a correction names it
+// keeps its stored actor, and the live turn, consolidation,
+// and the eval battery name their actor by construction
+// from the speaking chat or the job's profile), so it is
+// NOT gated here.
+export function correctionProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeCorrectionProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeCorrectionProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in correction detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 // Route one detected correction into the P1 gate. Deduped twice over: an
 // identical pending law proposal for the same profile is returned as-is
 // (created:false), and a correction that is already standing law proposes
