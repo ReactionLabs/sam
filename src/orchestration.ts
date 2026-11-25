@@ -393,6 +393,40 @@ function validateSpec(spec: LaneSpec, profileTools: string[]): void {
 
 export interface PlanInput { profile?: string; ask: string; lanes: LaneSpec[]; chatId?: string }
 
+function normalizeOrchestrationProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source for why an orchestrated job cannot be
+ *  planned or run under this profile name: the name is not
+ *  in the profile registry. CLI `orchestrate plan` and
+ *  `orchestrate run` passed the spec file's raw profile
+ *  into planJob/orchestrate, which checks only that it is
+ *  a non-empty string - a phantom or folded name
+ *  ("Second Shift" for "second-shift") minted a job record
+ *  and an orchestration-planned ledger line under a profile
+ *  that does not exist, and run went on to hire workers
+ *  accounted to nobody. Both CLI orchestrate doors now
+ *  throw this source's text before planning or running
+ *  anything. When exactly one valid profile matches the
+ *  bad name folded for case and separators, the refusal
+ *  names it. Null means the profile can be named. The
+ *  store itself stays permissive by design: a profile
+ *  removed after a job names it keeps its stored job, and
+ *  the by-construction callers (the sam_orchestrate chat
+ *  tool names the speaking chat's actor; the task battery
+ *  names "sam") are NOT gated here. */
+export function orchestrationProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeOrchestrationProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeOrchestrationProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in orchestration spec. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 /**
  * Plan a job: validate every lane's done-shape, scope, and depth, check the
  * team fits the live remaining pool, and persist the plan. Nothing runs yet.
