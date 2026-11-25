@@ -6,6 +6,7 @@ import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { draftBlockedFor } from "./contacts.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 // Outbound drafts (P12): SAM writes on the owner's behalf, but a draft is
 // where its power stops. A draft is a record in SAM's own store - there is
@@ -248,6 +249,39 @@ export function draftShapeBlocker(input: { to?: unknown; channel?: unknown; subj
   const body = typeof input.body === "string" ? input.body.trim() : "";
   if (!body || body.length > 8000) return "Invalid draft body";
   return null;
+}
+function normalizeDraftProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a draft cannot be created for
+ *  this actor profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a draft bound to it would be accounted to no one -
+ *  the record sits in the store under an actor that is no
+ *  profile, its ledger line carries that same phantom actor,
+ *  and no profile's surface ever accounts for it as its own
+ *  work. The terminal creation door (CLI `drafts create
+ *  --actor`) rides this source and refuses before creating
+ *  anything. When exactly one valid profile matches the bad
+ *  name folded for case and separators, the refusal names it
+ *  ("Second Shift" -> "second-shift"). Null means the profile
+ *  can be named. createDraft itself stays permissive by
+ *  design: a profile removed after a draft names it leaves the
+ *  record with its stored actor, and the ONE gate's approved
+ *  draft execution names its actor by construction (the
+ *  proposing chat's own profile) and is not gated here, so
+ *  createDraft is NOT gated. The proposal gate's
+ *  validateDraftDetail cannot gate this field either: the
+ *  draft detail carries no actor. */
+export function draftProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeDraftProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeDraftProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in draft detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 export function createDraft(root: string, input: { actor: string; to: string; channel?: string; subject?: string | null; body: string; via?: "cli" | "proposal" }): Draft {
   const to = (input.to ?? "").trim();
