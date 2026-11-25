@@ -450,3 +450,36 @@ export function chatProfileBlocker(root: string, profile: string): string | null
   const fix = matches.length === 1 ? matches[0] : null;
   return "Unknown profile \"" + profile + "\" in chat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
+
+/** The ONE source for why a chat event cannot be recorded
+ *  under this agent name: the name is not in the profile
+ *  registry ("sam", the implicit core profile, plus every
+ *  registered agent), so an event stamped with it would
+ *  sit in a real chat's thread (the dashboard renders team
+ *  events as bubbles) attributed to an agent that does not
+ *  exist - a phantom speaking in the record. The CLI
+ *  `chats event --agent` door's own description already
+ *  promised a registered agent identifier, but it passed
+ *  the raw name into ChatStore.addEvent, which checks
+ *  only the name's shape. That door now throws this
+ *  source's text before recording anything. When exactly
+ *  one valid profile matches the bad name folded for case
+ *  and separators, the refusal names it ("Second Shift"
+ *  -> "second-shift"). Null means the agent can be named.
+ *  The store itself stays permissive by design: a profile
+ *  removed after an event names it leaves the event with
+ *  its stored attribution, and the internal writers name
+ *  their agent by construction (the team runtime's "sam"
+ *  and its standing members, which are registered agents
+ *  by the time they speak, and the orchestration lane's
+ *  "sam"), so ChatStore.addEvent is NOT gated here. */
+export function chatEventProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeChatProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeChatProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in chat event detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
