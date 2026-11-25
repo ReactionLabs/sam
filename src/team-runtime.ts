@@ -627,6 +627,39 @@ export function teamFailureReason(error: unknown): string {
   return error instanceof Error ? errorReason(error) : "Team run failed";
 }
 
+function normalizeTeamLeadProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source for why a standing team run cannot be
+ *  led under this profile name: the name is not in the
+ *  profile registry. CLI `team run --lead` passed the raw
+ *  lead into runStandingTeam, which checks nothing about
+ *  it - a shape-valid phantom lead created the run's chat
+ *  bound to itself (ChatStore.create checks only the name
+ *  shape), stored the run record under itself, and
+ *  ledgered the assignment and result team messages from
+ *  itself, while a folded name ("Second Shift" for
+ *  "second-shift") died obscurely on that shape check
+ *  naming no correction. The CLI team run door now throws
+ *  this source's text before running anything. When
+ *  exactly one valid profile matches the bad name folded
+ *  for case and separators, the refusal names it. Null
+ *  means the profile can be named. runStandingTeam itself
+ *  stays permissive by design: a profile removed after a
+ *  run names it keeps its stored run and chat, and the
+ *  CLI is its only caller, so the gate lives at the door. */
+export function teamLeadProfileBlocker(root: string, lead: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(lead)) return null;
+  const target = normalizeTeamLeadProfileName(lead ?? "");
+  const matches = target ? names.filter(n => normalizeTeamLeadProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + lead + "\" in team run lead. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export async function runStandingTeam(root: string, task: string, opts?: { lead?: string; maxRounds?: number; complete?: StandingCompleter; env?: NodeJS.ProcessEnv }): Promise<TeamRunRecord> {
   const text = task.trim();
   if (!text || text.length > 2000) throw new Error("Team task must be 1 to 2000 characters");
