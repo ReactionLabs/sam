@@ -83,7 +83,7 @@ import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
-import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentScorecardText, withSpawnPool } from "./subagents.js";
+import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentProfileBlocker, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, orchestrationFailedHistoryScorecardText, orchestrationScorecardText, planJob, remainingPool } from "./orchestration.js";
 import { cancelDelegation, delegateHistoryScorecardText, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
@@ -1092,8 +1092,10 @@ memory.command("unsuppress").argument("<id>").description("Revoke a capture supp
 });
 
 const subagentCmd=program.command("subagent").description("Debug invisible helpers a chat turn started on its own. list, status, and cancel inspect them. The owner-facing path is the sam_spawn_subagent tool: the chat shows Working on it, then the folded answer, never the helper's own text. A child with no pinned connector runs on the plain chat path");
-subagentCmd.command("spawn").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
+subagentCmd.command("spawn").description("Spawn one helper for a profile that must be in the profile registry (sam or a registered agent); an unknown profile is refused before anything spawns").requiredOption("--prompt <text>","The child's task").option("--profile <name>","Parent profile","sam").option("--tools <names>","Comma-separated tool allowlist; omit to inherit the parent. Cannot add tools the parent does not have").option("--parent <id>","Spawn under this sub-agent instead of the profile").option("--chat <id>","Chat that receives the result").option("--rounds <n>","Round budget to carve, 1 to 6","2").option("--calls <n>","Tool-call budget to carve, 1 to 16","4").action(async(o:{prompt:string;profile:string;tools?:string;parent?:string;chat?:string;rounds:string;calls:string})=>{
   const tools=o.tools?o.tools.split(",").map(s=>s.trim()).filter(Boolean):undefined;
+  const profileBlocker=subagentProfileBlocker(program.opts().workspace,o.profile);
+  if(profileBlocker)throw new Error(profileBlocker);
   // A one-shot CLI spawn hires from its own invocation scope (Defect 3):
   // the small pool, fresh for this command - never a lifetime ledger.
   output(await withSpawnPool(smallSpawnPool("cli:spawn"),()=>spawnSubagent(program.opts().workspace,{profile:o.profile,prompt:o.prompt,tools,parentId:o.parent??null,chatId:o.chat??null,rounds:Number(o.rounds),maxCalls:Number(o.calls)})));

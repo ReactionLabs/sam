@@ -493,6 +493,41 @@ function runner(opts?: SpawnOpts): SpawnOpts | undefined {
   return testRunner ? { ...testRunner, ...opts } : opts;
 }
 
+function normalizeSubagentProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a helper cannot be spawned for
+ *  this profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a helper bound to it would serve no one - the
+ *  record sits in the registry under a profile that is no
+ *  profile, its subagent-spawn ledger line carries that same
+ *  phantom actor, the child resolves no registered profile
+ *  (no instructions, connector pin, or law), and its carved
+ *  budget and work are accounted to that phantom. The
+ *  terminal spawn door (CLI `subagent spawn --profile`)
+ *  rides this source and refuses before spawning anything.
+ *  When exactly one valid profile matches the bad name
+ *  folded for case and separators, the refusal names it
+ *  ("Second Shift" -> "second-shift"). Null means the
+ *  profile can be named. spawnSubagent itself stays
+ *  permissive by design: a profile removed after a helper
+ *  names it leaves the record with its stored profile, the
+ *  sam_spawn_subagent chat tool names its profile by
+ *  construction (the speaking chat's own profile), and the
+ *  orchestration lane runner carries its job's stored
+ *  profile - so spawnSubagent is NOT gated. */
+export function subagentProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeSubagentProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeSubagentProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in subagent detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 function openSubagent(root: string, input: SpawnInput): Subagent {
   const prompt = input.prompt?.trim() ?? "";
   if (!prompt || prompt.length > 2000) throw new Error("Sub-agent prompt must be 1 to 2000 characters");
