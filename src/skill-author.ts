@@ -324,6 +324,33 @@ export function skillCuratorLedgerSummary(findings: CuratorFinding[]): string {
   return "Skill curator flagged " + findings.length + " issue(s): " + findings.map(f => f.kind + " (" + f.skills.join(", ") + ")").join("; ").slice(0, 300);
 }
 
+function normalizeSkillAuthorProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+// The ONE source carrying the profile refusal for the
+// skill propose door: a skill proposal binds by acting
+// profile, and that actor is what the proposal record, the
+// skill-gated ledger line, and - on approval - the authored
+// skill's provenance record all carry, so a proposal made
+// under a name that is no profile corrupts the provenance
+// of a real, global skill with a phantom author. The CLI
+// skills propose door throws this text before validating
+// or proposing anything. proposeAuthoredSkill itself stays
+// permissive by design (a profile removed after a proposal
+// names it keeps its stored actor, and the sam_author_skill
+// chat tool names its actor by construction from the
+// speaking chat), so it is NOT gated here.
+export function skillAuthorProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeSkillAuthorProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeSkillAuthorProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in skill propose detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export type ProposeSkillResult = { status: "pending_owner_approval"; patch: boolean; proposal: ActionProposal };
 
 export function proposeAuthoredSkill(root: string, input: { actor: string; name: string; description: string; instructions: string; chatId?: string | null }): ProposeSkillResult {
