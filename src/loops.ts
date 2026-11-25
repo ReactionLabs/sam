@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 /**
  * Open loops (Smarter-and-Smoother S2 carry-in + the SECOND
@@ -241,6 +242,38 @@ export function updateOpenLoop(root: string, id: string, patch: Partial<OpenLoop
   const next: OpenLoop = { ...current, ...patch, id: current.id };
   updateLoopRow(root, next);
   return next;
+}
+
+function normalizeLoopProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a loop cannot be opened for this
+ *  profile: the name is not in the profile registry ("sam",
+ *  the implicit core profile, plus every registered agent),
+ *  so a loop bound to it would be revisited by a turn that
+ *  resolves no registered profile and runs unscoped - no
+ *  instructions, no connector pin, no law of the person it
+ *  was meant to watch for. The terminal creation door (CLI
+ *  `loops open`) rides this source and refuses before
+ *  creating anything. When exactly one valid profile matches
+ *  the bad name folded for case and separators, the refusal
+ *  names it ("Second Shift" -> "second-shift"). Null means
+ *  the profile can be named. The store itself stays
+ *  permissive by design: a profile removed after a loop names
+ *  it leaves the loop with its stored binding (the revisit's
+ *  failure isolation records the dead re-check), and callers
+ *  that name a profile by construction (the chat tool's
+ *  actor, the loop-audit probe, the eval battery's scratch
+ *  profile) are not gated here, so openLoop is NOT gated. */
+export function loopProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeLoopProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeLoopProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in loop detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 export function openLoop(root: string, input: { profile: string; chatId?: string | null; question: string; answer?: string; watchFor: string; dueInHours?: number }): OpenLoop {
