@@ -137,6 +137,39 @@ export function delegateNotInstalledReason(adapter: CodingAdapter): string {
     : "The coding operative (Claude Code) is not installed on this machine - neither SAM_CLAUDE_BIN nor SAM_ENGINE_BIN is set and no \"claude\" binary is on PATH. Installing it is the operator's act; until then a delegation cannot execute.";
 }
 
+function normalizeDelegateProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source for why a delegation cannot be proposed
+ *  for this actor profile: the name is not in the profile
+ *  registry ("sam", the implicit core profile, plus every
+ *  registered agent), so a delegation bound to it would be
+ *  accounted to no one - the card sits on the ONE gate under
+ *  an actor that is no profile, its delegate-proposed ledger
+ *  line carries that same phantom actor, and on approval the
+ *  operative's work runs under that actor. The terminal
+ *  propose door (CLI `delegate --actor`) rides this source
+ *  and refuses before proposing anything. When exactly one
+ *  valid profile matches the bad name folded for case and
+ *  separators, the refusal names it ("Second Shift" ->
+ *  "second-shift"). Null means the profile can be named.
+ *  proposeDelegation itself stays permissive by design: a
+ *  profile removed after a delegation names it keeps its
+ *  stored actor, and the approved execution path
+ *  (runApprovedDelegation) carries the card's stored actor -
+ *  so proposeDelegation is NOT gated here. */
+export function delegateProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeDelegateProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeDelegateProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in delegate detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function validateDelegateSpec(input: { adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }, env: NodeJS.ProcessEnv = process.env): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number; chatId: string | null } {
   if (!CODING_ADAPTERS.includes(input.adapter as CodingAdapter)) throw new Error("Unknown coding adapter \"" + input.adapter + "\". Adapters: " + CODING_ADAPTERS.join(", "));
   const branch = (input.branch ?? "").trim();

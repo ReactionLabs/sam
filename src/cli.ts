@@ -86,7 +86,7 @@ import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentProfileBlocker, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, orchestrationFailedHistoryScorecardText, orchestrationScorecardText, planJob, remainingPool } from "./orchestration.js";
-import { cancelDelegation, delegateHistoryScorecardText, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
+import { cancelDelegation, delegateHistoryScorecardText, delegateProfileBlocker, getDelegation, listDelegations, operativeLiveness, proposeDelegation } from "./coding-operatives.js";
 import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, configWizardHistoryScorecardText, detectSetup, readSetupRecord, runConfigWizard, setupHistoryScorecardText, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
@@ -1130,10 +1130,11 @@ operative.command("candidates").argument("<capabilities>").action((capabilities:
   finally{reg.close();}
 });
 
-const delegateCmd=program.command("delegate").description("Delegate a repo coding job to a Codex CLI or Claude Code operative. This creates an approval card (adapter, repo, branch, prompt) and runs nothing until the owner approves. Proposing refuses when the named operative's CLI is not installed on this machine (no env-named binary and none on PATH), so a card that cannot execute is never shown. The operative works in a worktree on its own branch, never main, and does not push or open a pull request");
+const delegateCmd=program.command("delegate").description("Delegate a repo coding job to a Codex CLI or Claude Code operative. This creates an approval card (adapter, repo, branch, prompt) and runs nothing until the owner approves. The acting profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is proposed, naming the registry). Proposing refuses when the named operative's CLI is not installed on this machine (no env-named binary and none on PATH), so a card that cannot execute is never shown. The operative works in a worktree on its own branch, never main, and does not push or open a pull request");
 delegateCmd.argument("[adapter]").option("--repo <path>","Git repository to work in").option("--branch <name>","Branch for the worktree (never main or master)").option("--prompt <text>","The job, shown on the approval card").option("--chat <id>","Chat that receives the branch, diff stat, and test result").option("--timeout <ms>","Process budget in milliseconds, 1000 to 600000","120000").option("--actor <name>","Acting profile","sam").action((adapter:string|undefined,o:{repo?:string;branch?:string;prompt?:string;chat?:string;timeout:string;actor:string})=>{
   if(!adapter||!o.repo||!o.branch||!o.prompt)throw new Error("Usage: sam delegate <codex|claude-code> --repo <path> --branch <name> --prompt <text>");
   const root=program.opts().workspace as string;
+  const profileBlocker=delegateProfileBlocker(root,o.actor);if(profileBlocker)throw new Error(profileBlocker);
   const timeoutMs=Number(o.timeout);
   const job=proposeDelegation(root,{actor:o.actor,adapter,repo:o.repo,branch:o.branch,prompt:o.prompt,timeoutMs,chatId:o.chat??null},(detail,title)=>proposeAction(root,{actor:o.actor,kind:"delegate",title,detail,chatId:o.chat??null}));
   output({status:"pending_owner_approval",delegation:job.id,action:job.actionId,adapter:job.adapter,repo:job.repo,branch:job.branch,prompt:job.prompt,auth:job.auth,note:"Nothing runs until the owner approves this card."});
