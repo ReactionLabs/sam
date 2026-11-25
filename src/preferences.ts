@@ -5,6 +5,7 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 // Preference memory: what the person likes, captured from their own chats with a
 // profile, and the path by which a preference becomes LAW for that profile.
@@ -32,6 +33,40 @@ export function preferenceStatementBlocker(statement:string):string|null{
   const clean=normalize(statement);
   if(!clean||clean.length>PREFERENCE_STATEMENT_MAX)return "Invalid preference statement";
   return null;
+}
+function normalizePreferenceProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a preference cannot be created for
+ *  this profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a preference bound to it - and `preferences add`
+ *  records a rule, which is standing LAW the moment it lands -
+ *  would be read back by no one: law is injected only through
+ *  lawsFor(a real profile) at prompt assembly, so the record
+ *  would sit in the store as law governing nobody. The
+ *  terminal creation door (CLI `preferences add`) rides this
+ *  source and refuses before opening the store or creating
+ *  anything. When exactly one valid profile matches the bad
+ *  name folded for case and separators, the refusal names it
+ *  ("Second Shift" -> "second-shift"). Null means the profile
+ *  can be named. The store itself stays permissive by design:
+ *  a profile removed after a preference names it leaves the
+ *  record with its stored binding, and callers that name a
+ *  profile by construction (the turn loop's preference capture
+ *  from a chat's own profile, heartbeat consolidation, the ONE
+ *  gate's approved law execution, the eval battery's scratch
+ *  profile) are not gated here, so PreferenceStore.note is
+ *  NOT gated. */
+export function preferenceProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizePreferenceProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizePreferenceProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in preference detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 function key(profile:string,statement:string):string{return createHash("sha256").update(profile+"\n"+normalize(statement).toLowerCase()).digest("hex");}
 // Failure visibility (gap found 2026-11-15, hourly run
