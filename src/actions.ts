@@ -839,6 +839,36 @@ function validateDraftDetail(detail: string): void {
   const blocker = draftShapeBlocker(spec as { to?: unknown; channel?: unknown; subject?: unknown; body?: unknown });
   if (blocker) throw new Error(blocker);
 }
+function normalizeActionProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a proposal cannot be made for
+ *  this actor profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a card bound to it would be accounted to no one -
+ *  the card sits on the ONE gate under an actor that is no
+ *  profile, its proposal ledger line carries that same phantom
+ *  actor, and on approval its execution runs under that actor.
+ *  The generic terminal propose door (CLI `actions propose
+ *  <profile>`) rides this source and refuses before proposing
+ *  anything. When exactly one valid profile matches the bad
+ *  name folded for case and separators, the refusal names it
+ *  ("Second Shift" -> "second-shift"). Null means the profile
+ *  can be named. proposeAction itself stays permissive by
+ *  design: chat tools name their actor by construction (the
+ *  speaking chat's own profile), the domain propose doors ride
+ *  their own ONE sources, and push doors carry a stored task's
+ *  actor, so proposeAction is NOT gated here. */
+export function actionProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeActionProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeActionProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in action detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
   if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
   const title = (input.title ?? "").trim();
