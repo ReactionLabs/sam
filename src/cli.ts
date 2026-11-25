@@ -143,7 +143,7 @@ import { dashboardConfigFailedHistoryScorecardText } from "./dashboard-config.js
 import { activityFailedHistoryScorecardText, recordActivity } from "./activity.js";
 import { usageSummary, readUsage, usageFailedHistoryScorecardText } from "./usage.js";
 import { contextFailedHistoryScorecardText, contextSummary, contextToday } from "./context-meter.js";
-import { CaptureGuardStore, addSuppression, captureGuardFailedHistoryScorecardText, suppressionScorecardText } from "./capture-guard.js";
+import { CaptureGuardStore, addSuppression, captureGuardFailedHistoryScorecardText, suppressionProfileBlocker, suppressionScorecardText } from "./capture-guard.js";
 
 const program=new Command();
 program.name("sam").description("S.A.M. | Secret Agent Man mission commander").version("0.1.0");
@@ -1081,8 +1081,9 @@ memory.command("search").argument("<query>").action((query:string)=>{
 memory.command("archive").argument("<id>").action((id:string)=>{
   const mem=new MemoryStore(dbPath()); try{output({archived:mem.archive(id)});}finally{mem.close();}
 });
-memory.command("suppress").argument("<phrase...>").option("--profile <name>","Profile the suppression binds","sam").description("Record a standing do-not-store instruction (Program H): the phrase is refused by every automatic memory capture path and by MemoryStore.add itself, from now on, until unsuppressed").action((phrase:string[],o:{profile:string})=>{
-  output(addSuppression(program.opts().workspace,{profile:o.profile,needle:phrase.join(" "),source:"cli"}));
+memory.command("suppress").argument("<phrase...>").option("--profile <name>","Profile the suppression binds","sam").description("Record a standing do-not-store instruction (Program H) for a profile that must be in the profile registry (sam or a registered agent); an unknown profile refuses before anything is recorded, naming the registry: the phrase is refused by every automatic memory capture path and by MemoryStore.add itself, from now on, until unsuppressed").action((phrase:string[],o:{profile:string})=>{
+  const root=program.opts().workspace; const profileBlocker=suppressionProfileBlocker(root,o.profile); if(profileBlocker)throw new Error(profileBlocker);
+  output(addSuppression(root,{profile:o.profile,needle:phrase.join(" "),source:"cli"}));
 });
 memory.command("suppressions").option("--profile <name>","Only this profile").option("--all","Include revoked").description("List capture suppressions (standing do-not-store instructions), active first-class; the needle is shown because this is the operator's own door").action((o:{profile?:string;all?:boolean})=>{
   const guard=new CaptureGuardStore(program.opts().workspace); try{output(guard.list(o.profile,!!o.all));}finally{guard.close();}

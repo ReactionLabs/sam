@@ -5,6 +5,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 // Capture guard (Program H, self-knowledge item A - the keystone):
 // a standing owner instruction to keep something out of memory now
@@ -315,6 +316,33 @@ export function findSuppressionHit(root: string, profile: string, content: strin
  *  backlog the owner may purge; nothing is auto-deleted. The
  *  count read is best-effort (a dead memory store never blocks
  *  recording the owner's instruction). */
+function normalizeSuppressionProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+// The ONE source carrying the profile refusal for the
+// suppression door: a suppression binds by profile name, and
+// matching only ever consults "sam" and real profile scopes,
+// so a suppression recorded under a name that is no profile
+// can never match anything - the owner's standing do-not-store
+// instruction would silently protect nothing. The CLI
+// suppress door throws this text before recording anything.
+// addSuppression itself stays permissive by design (a profile
+// removed after a suppression names it keeps its stored
+// record, and captureSuppressionsFromText names its profile
+// by construction from the speaking chat), so it is NOT gated
+// here.
+export function suppressionProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeSuppressionProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeSuppressionProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in suppression detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function addSuppression(root: string, input: { profile: string; needle: string; source: string; existingMatches?: number }): { record: CaptureSuppression; created: boolean } {
   const store = new CaptureGuardStore(root);
   let result: { record: CaptureSuppression; created: boolean };
