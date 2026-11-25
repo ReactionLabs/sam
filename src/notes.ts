@@ -84,6 +84,42 @@ export type SaveNoteResult =
 // record, not even by knowing its id.
 export function actorScope(actor: string): string { return actor === "sam" ? "core" : "profile:" + actor; }
 
+function normalizeNoteProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a note cannot be created for this
+ *  profile: the name is not in the profile registry ("sam",
+ *  the implicit core profile, plus every registered agent),
+ *  so a note bound to it would be read back by no one - a
+ *  soft save writes a real memory record at scope
+ *  profile:<name>, and recall assembles per real profile, so
+ *  the record would sit in the store as memory serving
+ *  nobody; a hard save or a patch would mint a ONE-gate
+ *  proposal under an actor that does not exist (and patch
+ *  would first die misleadingly on its scope check against a
+ *  scope nobody owns). The terminal creation doors (CLI
+ *  `notes save` and `notes patch`) ride this source and
+ *  refuse before creating anything. When exactly one valid
+ *  profile matches the bad name folded for case and
+ *  separators, the refusal names it ("Second Shift" ->
+ *  "second-shift"). Null means the profile can be named.
+ *  saveNote / patchNote themselves stay permissive by
+ *  design: a profile removed after a note names it leaves
+ *  the record with its stored scope, and callers that name
+ *  a profile by construction (the chat tool's actor from
+ *  its own chat, the eval battery's scratch profile) are
+ *  not gated here, so saveNote / patchNote are NOT gated. */
+export function noteProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeNoteProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeNoteProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in note detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function validatePatchTarget(root: string, actor: string, id: string): MemoryRecord {
   const store = new MemoryStore(join(resolve(root), ".sam", "missions.db"));
   try {
