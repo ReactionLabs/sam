@@ -2,6 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSy
 import { join, resolve, relative, isAbsolute } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
+import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
@@ -377,6 +378,37 @@ export function skillAllowlistHistoryScorecardText(root: string): string {
   parts.push(String(lines.length) + " total");
   if (unparseable > 0) parts.push(String(unparseable) + " unparseable");
   return parts.join(", ");
+}
+
+// The ONE source carrying the profile refusal for the
+// skill allowlist doors: an allowlist set or clear binds
+// by profile, and that name is what the store row and the
+// skill-allowlist ledger line carry. `skills allow` gated
+// inline on the registry; `skills allow-clear` never got
+// the check at all - a shape-valid phantom (or a typo)
+// deleted nothing, yet the verb reported success and the
+// store ledgered a cleared line under the phantom actor,
+// so the operator believed a real profile's skill fence
+// was lifted while the real fence stood untouched. Both
+// CLI allowlist doors throw this text before setting or
+// clearing anything. setSkillAllowlist itself stays
+// permissive by design (a profile removed after a fence
+// names it keeps its stored row, and a later store-level
+// clear under that name must still be able to lift it;
+// the chat-side readers name their profile by
+// construction), so it is NOT gated here.
+function normalizeSkillAllowlistProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+export function skillAllowlistProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeSkillAllowlistProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeSkillAllowlistProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in skill allowlist detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 export function setSkillAllowlist(workspace: string, profile: string, names: string[] | null): string[] | null {
