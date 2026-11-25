@@ -95,7 +95,7 @@ import { agentRepinConnectorLedgerSummary, agentRepinInstructionsLedgerSummary, 
 import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authProbeHistoryScorecardText, authStatus, authStatusText, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, providerAddLedgerSummary, providerHistoryScorecardText, providerRemoveLedgerSummary, removeProvider } from "./providers.js";
-import { addFallbackRoute, clearFallbackRoutes, failoverHistoryScorecardText, failoverRouteLedgerSummary, fallbackRoutes } from "./failover.js";
+import { addFallbackRoute, clearFallbackRoutes, failoverHistoryScorecardText, failoverProfileBlocker, failoverRouteLedgerSummary, fallbackRoutes } from "./failover.js";
 import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
 import { samBanner } from "./banner.js";
@@ -617,15 +617,15 @@ agentCmd.command("set-provider").argument("<name>").argument("<provider>").descr
 });
 agentCmd.command("failover-history").description("Failover history as plain text with no clock reading - verdict, the hop count, the routes-added count, the failed count with its read / write split, the distinct-chat count as a number only, and the total (never a stamp, an actor, a chat id, a provider or model name, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a store failure or a malformed line is the news (this is the sam-failover-history script job's stdout; a pure read over the same activity ledger the turn, route, and store seams ledger: creates nothing, spends no model call, routes nothing, opens no store; exits 0 always, the verdict lives in the text)").action(()=>output(failoverHistoryScorecardText(program.opts().workspace)));
 agentCmd.command("fallbacks").argument("<name>").description("Failover routes for a profile, tried in order after the primary provider+model when a turn fails before any tool has run").action((name:string)=>output({profile:name,fallbacks:fallbackRoutes(program.opts().workspace,name)}));
-agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argument("<model>").description("Append a failover route (configured provider id + model). The turn uses it only when the previous route fails before any tool runs").action((name:string,provider:string,model:string)=>{
+agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argument("<model>").description("Append a failover route (configured provider id + model) for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is added, naming the registry). The turn uses it only when the previous route fails before any tool runs").action((name:string,provider:string,model:string)=>{
   const root=program.opts().workspace as string;
-  const known=knownProfileNames(root);
-  if(!known.includes(name))throw new Error("Unknown profile \""+name+"\". Known profiles: "+known.join(", "));
+  const profileBlocker=failoverProfileBlocker(root,name);
+  if(profileBlocker)throw new Error(profileBlocker);
   const fallbacks=addFallbackRoute(root,name,{provider,model});
   recordActivity(root,name,"failover-route",failoverRouteLedgerSummary(provider,model));
   output({profile:name,fallbacks});
 });
-agentCmd.command("clear-fallbacks").argument("<name>").description("Remove every failover route for a profile. The primary pin is left alone").action((name:string)=>{const root=program.opts().workspace as string;output({profile:name,cleared:clearFallbackRoutes(root,name)});});
+agentCmd.command("clear-fallbacks").argument("<name>").description("Remove every failover route for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is cleared, naming the registry). The primary pin is left alone").action((name:string)=>{const root=program.opts().workspace as string;const profileBlocker=failoverProfileBlocker(root,name);if(profileBlocker)throw new Error(profileBlocker);output({profile:name,cleared:clearFallbackRoutes(root,name)});});
 agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; use 'none' to clear the pin").action((name:string,connector:string)=>{
   const root=program.opts().workspace as string;
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; it uses no pinned connector");

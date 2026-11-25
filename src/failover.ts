@@ -5,6 +5,7 @@ import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
 import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
+import { ChatStore } from "./chats.js";
 import { errorReason } from "./error-reason.js";
 
 // Model failover (sprint item 2). A profile's primary route is its
@@ -339,6 +340,49 @@ export function updateFallbackRoutes(root: string, profile: string, routes: Fall
     return cleaned;
   } catch (error) { failFailover(root, "write", error); }
   finally { db.close(); }
+}
+
+function normalizeFailoverProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source for why a failover route cannot be added
+ *  or cleared under this profile name: the name is not in
+ *  the profile registry ("sam", the implicit core profile,
+ *  plus every registered agent), so routes recorded under
+ *  it would belong to nobody - turnRoutes only ever reads
+ *  routes under a real profile's name, so they could never
+ *  fire - and routes the operator meant to clear under a
+ *  mistyped name would stand untouched. The pair asymmetry
+ *  is the defect (the skill-allowlist pair's lesson): the
+ *  CLI `agents add-fallback` door checked the registry
+ *  inline, but its pair door `agents clear-fallbacks`
+ *  passed the raw name into clearFallbackRoutes, whose
+ *  honest cleared:false for a phantom is byte-identical to
+ *  a real profile with no routes to clear - the operator
+ *  cannot tell a typo from nothing-to-clear, and a folded
+ *  name ("Second Shift" for "second-shift") silently
+ *  clears nothing while the real profile's routes stand.
+ *  Both CLI failover doors now throw this source's text
+ *  before adding or clearing anything. When exactly one
+ *  valid profile matches the bad name folded for case and
+ *  separators, the refusal names it. Null means the
+ *  profile can be named. The store itself stays permissive
+ *  by design: a profile removed after routes name it keeps
+ *  its stored row, and a later store-level clear under that
+ *  name must still be able to lift it, and turnRoutes names
+ *  its profile by construction from the speaking chat, so
+ *  addFallbackRoute / clearFallbackRoutes are NOT gated
+ *  here. */
+export function failoverProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeFailoverProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeFailoverProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in failover route detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 export function clearFallbackRoutes(root: string, profile: string): boolean {
