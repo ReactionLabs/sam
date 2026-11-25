@@ -6,6 +6,7 @@ import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
 import type { RunSource, SourceKind } from "./source-citations.js";
 import { errorReason } from "./error-reason.js";
+import { ChatStore } from "./chats.js";
 
 /**
  * Artifacts: durable deliverables Sam hands the owner.
@@ -230,6 +231,42 @@ function parseProvenance(json: string, fallbackProfile: string): ArtifactProvena
 function validateProfile(profile: string): string {
   if (profile !== "sam" && !ARTIFACT_PROFILE_PATTERN.test(profile ?? "")) throw new Error("Invalid artifact profile");
   return profile;
+}
+
+function normalizeArtifactProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source for why an artifact cannot be created or
+ *  updated for this profile: the name is not in the profile
+ *  registry ("sam", the implicit core profile, plus every
+ *  registered agent), so an artifact bound to it would be
+ *  owned by no one - the record sits in the store under a
+ *  profile that is no profile, its ledger line carries that
+ *  same phantom profile, and no profile's surface ever lists
+ *  it as its own work (an update under a phantom profile dies
+ *  misleadingly on the ownership check instead). The creation
+ *  doors (CLI `artifacts create --profile` and
+ *  `artifacts update --profile`, and the dashboard artifacts
+ *  API) ride this source and refuse before creating or
+ *  versioning anything. When exactly one valid profile matches
+ *  the bad name folded for case and separators, the refusal
+ *  names it ("Second Shift" -> "second-shift"). Null means the
+ *  profile can be named. createArtifact / updateArtifact
+ *  themselves stay permissive by design: a profile removed
+ *  after an artifact names it leaves the record with its
+ *  stored profile, and callers that name a profile by
+ *  construction (the chat tool's actor) are not gated here, so
+ *  the store functions are NOT gated. */
+export function artifactProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeArtifactProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeArtifactProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in artifact detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 function validateTitle(title: string): string {

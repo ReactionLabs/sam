@@ -21,7 +21,7 @@ import { readDashboardConfig, writeDashboardConfig, type DashboardConfig } from 
 import { citationViewForMessage, citationViewsForChat, type ResolvedCitation } from "./chat-citations.js";
 import { autotitleChat } from "./chat-title.js";
 import { sourcesForMessage, sourceViewsForChat, type RunSource } from "./source-citations.js";
-import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
+import { ARTIFACT_CONTENT_CSP, ARTIFACT_CONTENT_MAX_BYTES, artifactProfileBlocker, artifactReadingHtml, artifactsForChat, createArtifact, getArtifact, getArtifactVersion, listArtifactVersions, listArtifacts, renderMarkdownArtifact, updateArtifact, type ArtifactSummary } from "./artifacts.js";
 import { awaitChatQueue, chatTurnActive, enqueueChatMessage, listChatQueue, mergeQueueIntoMessages, resendFailedMessage, resetChatTurn, resumeChatQueues, type QueueItem } from "./chat-queue.js";
 import { CHAT_LIVE_HEARTBEAT_MS, CHAT_LIVE_POLL_MS, CHAT_LIVE_RETRY_MS, chatThreadSignature, sseThreadEvent } from "./dashboard-live.js";
 import { grooveEnabled, makeTheme } from "./theme.js";
@@ -327,7 +327,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         if(req.method==="GET"&&!artifactApi[1]){json(200,{artifacts:listArtifacts(workspace,profile)});return;}
         if(req.method==="POST"&&!artifactApi[1]){
           const body=await postArtifact();
-          const made=createArtifact(workspace,{profile:typeof body.profile==="string"?body.profile:profile,title:typeof body.title==="string"?body.title:"",kind:typeof body.kind==="string"?body.kind:"",content:typeof body.content==="string"?body.content:"",chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
+          const ownerProfile=typeof body.profile==="string"?body.profile:profile;
+          const profileBlocker=artifactProfileBlocker(workspace,ownerProfile);if(profileBlocker)throw Error(profileBlocker);
+          const made=createArtifact(workspace,{profile:ownerProfile,title:typeof body.title==="string"?body.title:"",kind:typeof body.kind==="string"?body.kind:"",content:typeof body.content==="string"?body.content:"",chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
           json(201,made);return;
         }
         const artifactId=artifactApi[1];
@@ -344,7 +346,9 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         }
         if(req.method==="PUT"||req.method==="POST"){
           const body=await postArtifact();
-          const updated=updateArtifact(workspace,artifactId,{profile:typeof body.profile==="string"?body.profile:profile,content:typeof body.content==="string"?body.content:"",title:typeof body.title==="string"?body.title:undefined,chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
+          const ownerProfile=typeof body.profile==="string"?body.profile:profile;
+          const profileBlocker=artifactProfileBlocker(workspace,ownerProfile);if(profileBlocker)throw Error(profileBlocker);
+          const updated=updateArtifact(workspace,artifactId,{profile:ownerProfile,content:typeof body.content==="string"?body.content:"",title:typeof body.title==="string"?body.title:undefined,chatId:typeof body.chatId==="string"?body.chatId:null,jobId:typeof body.jobId==="string"?body.jobId:null});
           json(200,updated);return;
         }
         res.writeHead(405);res.end();return;
