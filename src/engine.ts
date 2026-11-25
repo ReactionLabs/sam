@@ -450,7 +450,11 @@ function normalizeEngineProfileName(name: string): string {
  *  and the run's work is accounted to a profile that resolves
  *  no registered profile. The terminal queue door (CLI
  *  `engine queue --actor`) rides this source and refuses
- *  before queuing anything. When exactly one valid profile
+ *  before queuing anything, and the gate-level propose door
+ *  (CLI `engine propose --actor`) rides the same source and
+ *  refuses before proposing anything - a card bound to a
+ *  phantom actor would queue its run under that actor on
+ *  approval. When exactly one valid profile
  *  matches the bad name folded for case and separators, the
  *  refusal names it ("Second Shift" -> "second-shift"). Null
  *  means the profile can be named. queueEngineTask itself
