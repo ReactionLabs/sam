@@ -209,6 +209,37 @@ export function updateBackgroundTask(root: string, id: string, patch: Partial<Ba
   updateTaskRow(root, next);
   return next;
 }
+function normalizeBackgroundProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source for why a background task cannot be queued
+ *  for this actor profile: the name is not in the profile registry
+ *  ("sam", the implicit core profile, plus every registered
+ *  agent), so a task bound to it would be accounted to no one -
+ *  the record sits in the queue under an actor that is no
+ *  profile, its ledger line carries that same phantom actor,
+ *  and the drain runs its turn under a profile that resolves
+ *  no registered profile. The terminal queue door (CLI
+ *  `background handoff --actor`) rides this source and refuses
+ *  before queuing anything. When exactly one valid profile
+ *  matches the bad name folded for case and separators, the
+ *  refusal names it ("Second Shift" -> "second-shift"). Null
+ *  means the profile can be named. queueBackgroundTask itself
+ *  stays permissive by design: a profile removed after a task
+ *  names it leaves the record with its stored actor, and the
+ *  sam_handoff_task chat tool names its actor by construction
+ *  (the speaking chat's own profile) and is not gated here, so
+ *  queueBackgroundTask is NOT gated. */
+export function backgroundProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeBackgroundProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeBackgroundProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in background detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export function queueBackgroundTask(root: string, input: { actor: string; chatId: string; prompt: string; title?: string }): BackgroundTask {
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
   const prompt = (input.prompt ?? "").trim();
