@@ -29,6 +29,14 @@ import { readActivity, recordActivity } from "./activity.js";
  *   server fix). A short page is an exact count. A full page is a
  *   FLOOR - "100 or more (the tool pages at 100 and reports no
  *   total)" - never dressed up as an exact number.
+ * - ONE RETRY ON A MALFORMED REPLY (2026-11-26): a reply that
+ *   cannot be parsed at all (non-JSON text, no text content,
+ *   unexpected shape) is a transient wobble class - live proof:
+ *   one non-JSON reply at 07:19 UTC killed a tick whose facts
+ *   the next tick read unchanged. Each read retries ONCE on
+ *   that class only; a second malformed reply fails by the
+ *   same name as before. Fact failures and transport errors
+ *   never retry.
  * - DETERMINISM: same tool results, same text, byte for byte. The
  *   report is a Phase C script job's stdout (sam-stack-watch), so
  *   P3 diffing compares stable text and a frozen stack stays
@@ -150,6 +158,33 @@ export function formatCount(n: number): string {
   return n.toLocaleString("en-US");
 }
 
+/** The unwrap parse failures: the three shapes
+ *  unwrapToolResult throws when a tool reply cannot be read
+ *  at all (non-JSON text, no text content, unexpected
+ *  shape). These are the transient-wobble class - live proof
+ *  2026-11-26: one non-JSON reply at 07:19 UTC killed a
+ *  whole tick whose facts the 07:53 UTC tick then read
+ *  unchanged. Parse-level FACT failures (a missing field, a
+ *  missing array) and transport errors are NOT this class:
+ *  they name a deterministic problem a retry cannot fix. */
+export function isStackToolParseFailure(err: unknown): boolean {
+  return err instanceof Error && err.message.startsWith("Stack tool returned ");
+}
+
+/** ONE read of a stack tool, parsed: a parse failure (the
+ *  wobble class above) retries the call exactly once; a
+ *  second parse failure throws the same named error as an
+ *  unretried read would, so the job still fails by name and
+ *  delivers nothing. Any other failure throws at once. */
+export async function readStackTool<T>(call: StackToolCaller, connector: Connector, tool: string, args: Record<string, unknown>, parse: (raw: unknown) => T): Promise<T> {
+  try {
+    return parse(await call(connector, tool, args));
+  } catch (err) {
+    if (!isStackToolParseFailure(err)) throw err;
+    return parse(await call(connector, tool, args));
+  }
+}
+
 export interface StackWatchReport {
   text: string;
   connector: string;
@@ -171,8 +206,8 @@ export async function buildStackWatchReport(root: string, opts: { call?: StackTo
     throw new Error("No enabled connector offers the Nines stack tools (stack_health, paper_setups), so the stack watch has nothing to read. Registered connectors: " + (registered.length ? registered.join(", ") : "(none)"));
   }
   const call = opts.call ?? ((c: Connector, tool: string, args: Record<string, unknown>) => readConnectorTool(c, tool, args, root));
-  const health = parseStackHealth(await call(connector, "stack_health", {}));
-  const entered = countEnteredSetups(await call(connector, "paper_setups", { state: ENTERED_STATE, limit: ENTERED_PAGE_LIMIT }));
+  const health = await readStackTool(call, connector, "stack_health", {}, parseStackHealth);
+  const entered = await readStackTool(call, connector, "paper_setups", { state: ENTERED_STATE, limit: ENTERED_PAGE_LIMIT }, countEnteredSetups);
   const frozen = isFrozenStack(health.candidatesNewest);
   const lines = [
     "Candidates total: " + formatCount(health.candidatesTotal),
