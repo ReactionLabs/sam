@@ -66,6 +66,38 @@ export interface ActionProposal {
 }
 const KINDS: ActionKind[] = ["note", "law", "heartbeat", "say", "skill", "draft", "skill-author", "git-push", "engine", "spawn", "delegate", "pair"];
 export const ACTION_KINDS: readonly string[] = KINDS;
+function foldActionKindName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why an action kind name cannot be
+ *  used: the name is not one of the twelve kinds in this
+ *  module's KINDS registry, so a proposal filed under it
+ *  would execute through no executor the ONE gate has. An
+ *  exact kind reads no blocker. Anything else is refused
+ *  with the twelve kinds named and, when exactly one kind
+ *  matches the bad name folded for case and separators
+ *  ("Git Push", "git_push" -> "git-push"; "Skill Author"
+ *  -> "skill-author"; "NOTE" -> "note"), that kind named
+ *  as the correction. proposeAction throws this text, so
+ *  every proposal route refuses in the ONE source's words
+ *  before anything is proposed; the CLI `actions propose`
+ *  door throws it before proposing, and the CLI
+ *  `actions set-mode --auto` door throws it for the first
+ *  bad kind before recording anything (it previously
+ *  improvised a second "Unknown action kind(s)" text for
+ *  the same registry). The "Invalid action kind" prefix
+ *  is kept: its readers match on it. The scorecard bucket
+ *  parsers and classifyProposal stay permissive by
+ *  design - they fold an unknown STORED kind to "other"
+ *  or classify it consequential (fail-closed) and never
+ *  refuse a person. */
+export function actionKindBlocker(kind: unknown): string | null {
+  if (typeof kind === "string" && KINDS.includes(kind as ActionKind)) return null;
+  const target = typeof kind === "string" ? foldActionKindName(kind) : "";
+  const matches = target ? KINDS.filter(k => foldActionKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid action kind \"" + String(kind) + "\". Kinds: " + KINDS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 function actionsFile(root: string): string { return join(resolve(root), ".sam", "actions.json"); }
 function actionsDbFile(root: string): string { return join(resolve(root), ".sam", "actions.db"); }
 // State convergence (UNIFICATION item 4): the gate's store is SQLite
@@ -870,7 +902,7 @@ export function actionProfileBlocker(root: string, profile: string): string | nu
   return "Unknown profile \"" + profile + "\" in action detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 export function proposeAction(root: string, input: { actor: string; kind: string; title: string; detail: string; chatId?: string | null; supersedes?: string | null }): ActionProposal {
-  if (!KINDS.includes(input.kind as ActionKind)) throw new Error("Invalid action kind");
+  { const kindBlocker = actionKindBlocker(input.kind); if (kindBlocker) throw new Error(kindBlocker); }
   const title = (input.title ?? "").trim();
   let detail = (input.detail ?? "").trim();
   if (!title || title.length > 200) throw new Error("Invalid action title");
