@@ -170,8 +170,40 @@ export function delegateProfileBlocker(root: string, profile: string): string | 
   return "Unknown profile \"" + profile + "\" in delegate detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
+function foldCodingAdapterName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why a coding adapter name cannot be
+ *  used: the name is not one of the adapters in this
+ *  module's CODING_ADAPTERS registry, so a delegation bound
+ *  to it would name an operative SAM cannot launch. An
+ *  exact adapter reads no blocker. Anything else is refused
+ *  with the two adapters named as the registry and, when
+ *  exactly one adapter matches the bad name folded for case
+ *  and separators ("Codex" -> "codex"; "claude code",
+ *  "claude_code" -> "claude-code"), that adapter named as
+ *  the correction. validateDelegateSpec throws this text -
+ *  the seam every delegation route rides (the CLI
+ *  `delegate` door through proposeDelegation, the P1 gate
+ *  through validateDelegateDetail) - so both doors refuse
+ *  in the ONE source's words before any card is proposed.
+ *  The "Unknown coding adapter" prefix is kept: it is the
+ *  shape the refusal has always carried. Stored-adapter
+ *  readers stay permissive by design - a stored delegation
+ *  record's adapter is cast on read, so an adapter removed
+ *  after a record names it leaves the record readable. */
+export function codingAdapterBlocker(adapter: unknown): string | null {
+  if (typeof adapter === "string" && (CODING_ADAPTERS as readonly string[]).includes(adapter)) return null;
+  const target = typeof adapter === "string" ? foldCodingAdapterName(adapter) : "";
+  const matches = target ? CODING_ADAPTERS.filter(a => foldCodingAdapterName(a) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown coding adapter \"" + String(adapter) + "\". Adapters: " + CODING_ADAPTERS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function validateDelegateSpec(input: { adapter: string; repo: string; branch: string; prompt: string; timeoutMs?: number; chatId?: string | null }, env: NodeJS.ProcessEnv = process.env): { adapter: CodingAdapter; repo: string; branch: string; prompt: string; timeoutMs: number; chatId: string | null } {
-  if (!CODING_ADAPTERS.includes(input.adapter as CodingAdapter)) throw new Error("Unknown coding adapter \"" + input.adapter + "\". Adapters: " + CODING_ADAPTERS.join(", "));
+  const adapterBlocker = codingAdapterBlocker(input.adapter);
+  if (adapterBlocker) throw new Error(adapterBlocker);
   const branch = (input.branch ?? "").trim();
   if (!BRANCH_RE.test(branch) || branch.split("/").includes("..") || REFUSED_BRANCHES.has(branch) || REFUSED_BRANCHES.has(branch.toLowerCase()))
     throw new Error("Refused branch \"" + branch + "\". A coding operative works on its own branch, never main or master.");
