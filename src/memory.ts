@@ -8,6 +8,47 @@ import { findSuppressionHitInDb, suppressionProfilesForScope, MemorySuppressedEr
 import { errorReason } from "./error-reason.js";
 
 export type MemoryKind = "observation" | "decision" | "failure" | "procedure";
+export const MEMORY_KINDS: readonly MemoryKind[] = ["observation", "decision", "failure", "procedure"];
+
+function foldMemoryKindName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why a memory kind name cannot be
+ *  used: the name is not one of the four kinds in this
+ *  module's MEMORY_KINDS registry, so the record would be
+ *  stored under a kind no reading surface classifies. An
+ *  exact kind reads no blocker. Anything else is refused
+ *  with the four kinds named as the registry and, when
+ *  exactly one kind matches the bad name folded for case
+ *  and separators ("Observation" -> "observation";
+ *  "pro-cedure", "pro cedure" -> "procedure"), that kind
+ *  named as the correction. MemoryStore.add throws this
+ *  text - the seam every writer rides (the CLI
+ *  `memory add` door, episode and compaction flushes,
+ *  approved note actions) - and saveNote in notes.ts
+ *  throws it before its tier classification, because a
+ *  hard-tier note routes to the approval gate without
+ *  touching the store, so the note door (the CLI
+ *  `notes save --kind` door and the chat sam_save_note
+ *  tool) needs the check at its own seam in the same
+ *  words. The two improvised texts this replaces
+ *  ("Invalid memory kind. Choose ..." at the store,
+ *  "Invalid note kind. Choose ..." at the note door)
+ *  refused the same registry in two wordings depending on
+ *  the door taken. The "Invalid memory kind" prefix is
+ *  kept: its readers match on it (MEMORY_STORE_VALIDATION
+ *  below, the memory failure tests). Stored-kind readers
+ *  stay permissive by design - the row reader casts the
+ *  stored kind, so a kind removed after a record names it
+ *  leaves the record readable. */
+export function memoryKindBlocker(kind: unknown): string | null {
+  if (typeof kind === "string" && (MEMORY_KINDS as readonly string[]).includes(kind)) return null;
+  const target = typeof kind === "string" ? foldMemoryKindName(kind) : "";
+  const matches = target ? MEMORY_KINDS.filter(k => foldMemoryKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid memory kind \"" + String(kind) + "\". Kinds: " + MEMORY_KINDS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export interface MemoryRecord {
   id:string; mission_id:string|null; kind:MemoryKind; content:string;
   source:string; source_hash:string; created_at:string; archived_at:string|null;
@@ -205,7 +246,7 @@ export class MemoryStore {
   }
   add(input:{missionId?:string;kind:MemoryKind;content:string;source:string;scope?:string;aliases?:string[]}):MemoryRecord {
     return this.touch("write",()=>{
-    if(!["observation","decision","failure","procedure"].includes(input.kind))throw new Error("Invalid memory kind. Choose observation, decision, failure, or procedure.");
+    const kindBlocker=memoryKindBlocker(input.kind); if(kindBlocker)throw new Error(kindBlocker);
     if(!input.content.trim() || !input.source.trim())throw new Error("Memory requires content and provenance");
     if(input.content.length>100_000)throw new Error("Memory exceeds size limit");
     const words=countWords(input.content);

@@ -116,7 +116,7 @@ test("notes: validation refuses empty, oversize, and bad kinds before any write"
   try {
     assert.throws(() => saveNote(root, { actor: "sam", content: "  " }), /Invalid note content/);
     assert.throws(() => saveNote(root, { actor: "sam", content: "x".repeat(2001) }), /Invalid note content/);
-    assert.throws(() => saveNote(root, { actor: "sam", content: "fine", kind: "law" }), /Invalid note kind/);
+    assert.throws(() => saveNote(root, { actor: "sam", content: "fine", kind: "law" }), /Invalid memory kind/);
     assert.equal(records(root).length, 0);
     assert.equal(listActions(root).length, 0);
   } finally { rmSync(root, { recursive: true, force: true }); }

@@ -1,5 +1,5 @@
 import { join, resolve } from "node:path";
-import { MemoryStore, notePatchBlocker, type MemoryKind, type MemoryRecord } from "./memory.js";
+import { MemoryStore, memoryKindBlocker, notePatchBlocker, type MemoryKind, type MemoryRecord } from "./memory.js";
 import { ChatStore } from "./chats.js";
 import { proposeAction, type ActionProposal } from "./actions.js";
 import { readActivity, recordActivity } from "./activity.js";
@@ -164,8 +164,15 @@ export function saveNote(root: string, input: { actor: string; content: string; 
   const content = (input.content ?? "").trim();
   if (!content || content.length > 2000) throw new Error("Invalid note content (1 to 2000 characters)");
   if (!/^[a-z][a-z0-9._-]{0,63}$/.test(input.actor) && input.actor !== "sam") throw new Error("Invalid actor");
+  // The kind refusal reads the registry through its ONE
+  // source (memoryKindBlocker in memory.ts, the module that
+  // owns MEMORY_KINDS): checked here, before the tier
+  // classification, because a hard-tier note routes to the
+  // gate without touching MemoryStore.add, the other seam
+  // that throws the same text.
+  const kindBlocker = memoryKindBlocker(input.kind ?? "observation");
+  if (kindBlocker) throw new Error(kindBlocker);
   const kind = (input.kind ?? "observation") as MemoryKind;
-  if (!["observation", "decision", "failure", "procedure"].includes(kind)) throw new Error("Invalid note kind. Choose observation, decision, failure, or procedure.");
   if (input.chatId) refuseVisitor(root, input.chatId);
   const { tier, reason } = classifyNote(content, { supersedes: input.supersedes ?? null });
   if (tier === "hard") {
