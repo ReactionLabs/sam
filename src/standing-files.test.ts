@@ -41,7 +41,7 @@ test("standing files: write/read/list/clear roundtrip for a registered profile a
 test("standing files: bad profile, bad file name, empty and oversize content all refuse", () => {
   const root = scratch();
   try {
-    assert.throws(() => writeStandingFile(root, "nobody", "persona", "x"), /Unknown profile "nobody"\. Known profiles: sam, dip, trading/);
+    assert.throws(() => writeStandingFile(root, "nobody", "persona", "x"), /Unknown profile "nobody" in standing file detail\. Valid profiles: sam, dip, trading/);
     assert.throws(() => writeStandingFile(root, "dip", "diary", "x"), /Unknown standing file "diary"\. Standing files: persona, owner, ops/);
     assert.throws(() => writeStandingFile(root, "dip", "persona", "   "), /empty/);
     assert.throws(() => writeStandingFile(root, "dip", "persona", "x".repeat(STANDING_FILE_MAX_CHARS + 1)), /cap is/);

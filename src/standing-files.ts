@@ -45,11 +45,43 @@ export function knownProfileNames(root: string): string[] {
   try { return ["sam", ...db.agents().map(a => a.name)]; }
   finally { db.close(); }
 }
+function normalizeStandingProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source carrying the standing-files door's profile
+ *  refusal text (per-field audit, 2026-11-25): assertKnownProfile
+ *  checked the profile against the registry inline and refused
+ *  with its own wording ("Known profiles", not the common
+ *  "Valid profiles") and NO fold correction, while every
+ *  sibling profile door names both - and a folded name
+ *  ("Second Shift" for "second-shift") never even reached
+ *  that refusal, dying on the format check in front of it.
+ *  standingFileProfileBlocker carries the refusal text (valid
+ *  profiles listed, fold correction when exactly one
+ *  matches); assertKnownProfile throws it for an unknown
+ *  well-formed name and for a malformed name that folds to
+ *  exactly one registered profile, and keeps the existing
+ *  "Invalid profile name" refusal for a malformed name that
+ *  folds to nothing, so the gate's shape is unchanged - the
+ *  gate already lived at this store (list/read/write/clear
+ *  all assert here, and the CLI agents files doors ride
+ *  them), so every caller refuses in the same words before
+ *  anything is read or written. */
+export function standingFileProfileBlocker(root: string, profile: string): string | null {
+  const names = knownProfileNames(root);
+  if (names.includes(profile)) return null;
+  const target = normalizeStandingProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeStandingProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in standing file detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 function assertKnownProfile(root: string, profile: string): void {
-  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(profile) && profile !== "sam") throw new Error("Invalid profile name: " + profile);
-  if (!knownProfileNames(root).includes(profile)) {
-    throw new Error("Unknown profile \"" + profile + "\". Known profiles: " + knownProfileNames(root).join(", "));
+  const blocker = standingFileProfileBlocker(root, profile);
+  if (!blocker) return;
+  if (!/^[a-z][a-z0-9._-]{0,63}$/.test(profile) && profile !== "sam" && !blocker.includes("Did you mean")) {
+    throw new Error("Invalid profile name: " + profile);
   }
+  throw new Error(blocker);
 }
 function standingDir(root: string, profile: string): string {
   return join(resolve(root), ".sam", "standing", profile);
