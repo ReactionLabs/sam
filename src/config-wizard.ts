@@ -35,6 +35,36 @@ import { errorReason } from "./telegram.js";
 export const CONFIG_SECTIONS = ["model", "channels", "keys", "engine"] as const;
 export type ConfigSectionId = (typeof CONFIG_SECTIONS)[number];
 
+function normalizeConfigSectionName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The section-name gate for the config doors (refusal-class
+ *  sweep, 2026-11-26): every other naming door reads its
+ *  registry through a ONE source in its owning module before
+ *  acting, but the config section name was refused by TWO
+ *  doors improvising the identical text independently - the
+ *  CLI sections door (printSections in cli.ts) and the wizard
+ *  door (runConfigWizard below) each threw "Unknown config
+ *  section" from their own inline filter miss, and neither
+ *  offered a fold correction, so a folded name ("Model" for
+ *  "model") dead-ended with nothing beyond the list.
+ *  configSectionBlocker is now the ONE source carrying the
+ *  refusal text (sections listed, fold correction when
+ *  exactly one matches); both doors throw it before showing
+ *  or running anything. The wizard's interactive pick loop
+ *  stays as is - it re-prompts rather than refusing, a
+ *  different shape by design. configSections and detectSetup
+ *  stay permissive by design - only the doors' refusal
+ *  shape changes. */
+export function configSectionBlocker(section: string): string | null {
+  if ((CONFIG_SECTIONS as readonly string[]).includes(section)) return null;
+  const target = normalizeConfigSectionName(section ?? "");
+  const matches = target ? CONFIG_SECTIONS.filter(s => normalizeConfigSectionName(s) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown config section \"" + section + "\". Sections: " + CONFIG_SECTIONS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export interface KeyState { name: string; purpose: string; state: "present" | "absent" }
 export interface SetupDetection {
   firstRun: boolean;
@@ -516,7 +546,7 @@ export async function runConfigWizard(root: string, io: WizardIo, opts: { sectio
   const env = opts.env ?? process.env;
   const sections = configSections(root, env);
   const wanted = opts.section ? sections.filter(s => s.id === opts.section) : sections;
-  if (opts.section && !wanted.length) throw new Error("Unknown config section \"" + opts.section + "\". Sections: " + CONFIG_SECTIONS.join(", "));
+  if (opts.section && !wanted.length) throw new Error(configSectionBlocker(opts.section)!);
   const show = (s: ConfigSection) => {
     io.print("");
     io.print("== " + s.title + " (" + s.state + ") ==");
