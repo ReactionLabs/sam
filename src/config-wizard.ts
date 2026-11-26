@@ -11,7 +11,7 @@ import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { readActivity, recordActivity } from "./activity.js";
-import { agentRepinModelLedgerSummary } from "./agent-repins.js";
+import { agentRepinModelLedgerSummary, agentRepinProfileBlocker } from "./agent-repins.js";
 import { errorReason } from "./telegram.js";
 
 // CLI dressing item 1 (Dip, 2026-11-10; OpenClaw borrow, research doc
@@ -546,6 +546,17 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
     io.print("Profiles: " + d.profiles.map(p => p.name).join(", "));
     const name = (await io.ask("Profile to re-pin [Enter to skip]: ")).trim();
     if (!name) return;
+    // The wizard's model section is a re-pin door (it rides
+    // setAgentModel and ledgers an agent-repin line), so its
+    // profile refusal reads the registry through the ONE
+    // source that owns the re-pin refusal text - before the
+    // model is even asked for, so a folded name ("Second
+    // Shift" for "second-shift") gets the correction instead
+    // of dead-ending after the operator typed a model. "sam"
+    // is a valid profile and passes the blocker, then refuses
+    // for its own core reason below, exactly as the CLI doors.
+    const profileBlocker = agentRepinProfileBlocker(root, name);
+    if (profileBlocker) { io.print("Refused: " + profileBlocker); return; }
     if (name === "sam") { io.print("Profile \"sam\" is the core profile and carries no pin row; its model is the SAM_MODEL environment value."); return; }
     const model = (await io.ask("Model for " + name + " ['none' clears the pin]: ")).trim();
     if (!model) return;
@@ -553,7 +564,7 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
       const db = new ChatStore(root);
       try {
         const updated = db.setAgentModel(name, model === "none" ? null : model);
-        if (!updated) { io.print("Unknown profile \"" + name + "\". Known profiles: " + d.profiles.map(p => p.name).join(", ")); return; }
+        if (!updated) { io.print("Refused: " + (agentRepinProfileBlocker(root, name) ?? "Unknown profile \"" + name + "\" in agent re-pin detail.")); return; }
         recordActivity(root, name, "agent-repin", agentRepinModelLedgerSummary(updated.model, true));
         io.print("Saved: " + name + " model pin is now " + (updated.model ?? "(route tier decides)") + ".");
       } finally { db.close(); }

@@ -69,10 +69,17 @@ function normalizeAgentRepinProfileName(name: string): string {
  *  folded for case and separators, the refusal names it.
  *  Null means the profile can be named. The ChatStore
  *  setters stay permissive by design: a profile removed
- *  after a pin names it keeps its stored pins, and the
- *  config wizard's model section rides setAgentModel
- *  through its own surface, so the setters are NOT gated
- *  here. */
+ *  after a pin names it keeps its stored pins, so the
+ *  setters are NOT gated here. The config wizard's model
+ *  section (per-field audit, 2026-11-26 01:04 run) rides
+ *  this same source: it was the last re-pin surface still
+ *  improvising the refusal (its own "Known profiles" line,
+ *  discovered only after the setter returned null, after
+ *  the operator had already typed the model); it now
+ *  checks this blocker right after the profile name is
+ *  entered, before the "sam" core refusal and before the
+ *  model prompt, and its setter-null fallback reads the
+ *  same source. */
 export function agentRepinProfileBlocker(root: string, profile: string): string | null {
   const db = new ChatStore(root);
   let names: string[];
