@@ -53,6 +53,32 @@ export function pairProfileNames(root: string): string[] {
   finally { db.close(); }
 }
 
+function normalizePairProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source carrying the pair door's profile refusal
+ *  text (per-field audit, 2026-11-25): validatePairSpec
+ *  checked the pair detail's profile against the registry
+ *  inline and refused with the bare list - a folded name
+ *  ("Second Shift" for "second-shift") got no correction,
+ *  while every sibling profile door names the correction
+ *  when exactly one registered profile matches folded.
+ *  pairProfileBlocker carries the refusal text (valid
+ *  profiles listed, fold correction when exactly one
+ *  matches); validatePairSpec throws it, so the ONE gate's
+ *  proposal validation, the gate's executor, and the
+ *  operator CLI `sam pair` door all refuse in the same
+ *  words before anything is registered, bound, or pinned. */
+export function pairProfileBlocker(root: string, profile: string): string | null {
+  const names = pairProfileNames(root);
+  if (names.includes(profile)) return null;
+  const target = normalizePairProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizePairProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in pair detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 /** Proposal-time validation: a pair card that cannot execute is
  *  never shown. Checks shape, a fresh connector name, a vault
  *  credential that EXISTS by name, a known profile, and a URL
@@ -69,8 +95,8 @@ export function validatePairSpec(root: string, spec: PairSpec): PairSpec {
   if (connectors(root).some(c => c.name === name)) throw new Error("A connector named \"" + name + "\" already exists - pairing registers a new connector, it never rebinds an existing one");
   if (!VAULT_NAME_RE.test(vaultKey)) throw new Error("Invalid vault credential name in pair detail");
   if (!listVaultCredentials(root).some(c => c.name === vaultKey)) throw new Error("No vault credential named \"" + vaultKey + "\" - the owner deposits credentials into the vault (sam vault set); SAM never creates one");
-  const profiles = pairProfileNames(root);
-  if (!profiles.includes(profile)) throw new Error("Unknown profile \"" + profile + "\" in pair detail. Valid profiles: " + profiles.join(", "));
+  const profileBlocker = pairProfileBlocker(root, profile);
+  if (profileBlocker) throw new Error(profileBlocker);
   let parsed: URL;
   try { parsed = new URL(url); } catch { throw new Error("Invalid pair URL"); }
   if (parsed.username || parsed.password || parsed.hash || parsed.search) throw new Error("Pair URL must be a plain URL");
