@@ -103,9 +103,45 @@ export function discoverSkills(workspace: string): SkillEntry[] {
   return found;
 }
 
+// The skill-name gate for the skill doors (refusal-class
+// sweep, 2026-11-26): every other naming door reads its
+// registry through a ONE source in its owning module before
+// acting, but the installed-skill name was refused by
+// findSkill with the bare "Skill not found: X" - no registry
+// named, no fold correction - and every door riding it (CLI
+// skills show / read, the chat skill tools) inherited the
+// dead end, while readSkill refused a folded name on its
+// format check and cleanAllowlistNames listed the registry
+// with no correction. skillNameBlocker is now the ONE
+// source carrying the refusal text (keeping the "Skill not
+// found" prefix its readers match): an exact installed name
+// reads no blocker; anything else is refused with the
+// installed skills listed and a fold correction when
+// exactly one matches folded for case and separators.
+// discoverSkills and searchSkills stay permissive by
+// design - only the naming doors' refusal shape changes.
+export function normalizeSkillName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+export function skillNameBlocker(workspace: string, name: string): string | null {
+  const known = discoverSkills(workspace).map(s => s.name);
+  if (known.includes(name)) return null;
+  const target = normalizeSkillName(name ?? "");
+  const matches = target ? known.filter(n => normalizeSkillName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Skill not found: \"" + name + "\". Installed skills: " + (known.length ? known.join(", ") : "none installed") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
+function skillFoldCorrection(known: string[], value: string): string | null {
+  const target = normalizeSkillName(value ?? "");
+  const matches = target ? known.filter(n => normalizeSkillName(n) === target) : [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function findSkill(workspace: string, name: string): SkillEntry {
   const skill = discoverSkills(workspace).find(item => item.name === name);
-  if (!skill) throw new Error("Skill not found: " + name);
+  if (!skill) throw new Error(skillNameBlocker(workspace, name)!);
   return skill;
 }
 
@@ -299,7 +335,10 @@ function cleanAllowlistNames(workspace: string, names: string[]): string[] {
   const known = discoverSkills(workspace).map(s => s.name);
   const clean = [...new Set(names.map(n => n.trim()).filter(Boolean))];
   const unknown = clean.filter(n => !known.includes(n));
-  if (unknown.length) throw new Error("Unknown skill(s): " + unknown.join(", ") + ". Installed skills: " + (known.length ? known.join(", ") : "(none)"));
+  if (unknown.length) {
+    const fixes = unknown.map(n => skillFoldCorrection(known, n)).filter((f): f is string => f !== null);
+    throw new Error("Unknown skill(s): " + unknown.join(", ") + ". Installed skills: " + (known.length ? known.join(", ") : "(none)") + (fixes.length ? ". Did you mean " + fixes.map(f => "\"" + f + "\"").join(", ") + "?" : ""));
+  }
   return clean;
 }
 // Skill allowlist history (gap found 2026-11-21, hourly run
@@ -466,7 +505,11 @@ export function readSkillForProfile(workspace: string, profile: string, name: st
 
 /** Load a validated installed skill as untrusted reference material, never execute it. */
 export function readSkill(workspace: string, name: string): { name: string; description: string; untrusted: true; instructions: string } {
-  if (!/^[a-z0-9][a-z0-9_-]{0,99}$/.test(name)) throw new Error("Invalid skill name");
+  if (!/^[a-z0-9][a-z0-9_-]{0,99}$/.test(name)) {
+    const blocker = skillNameBlocker(workspace, name);
+    if (blocker && blocker.includes("Did you mean")) throw new Error(blocker);
+    throw new Error("Invalid skill name");
+  }
   const skill = findSkill(workspace, name);
   const base = realpathSync(resolve(workspace));
   const path = resolve(base, skill.path);
