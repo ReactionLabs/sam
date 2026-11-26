@@ -276,8 +276,32 @@ export function approvalModeLedgerSummary(mode: string, autoKinds: string[]): st
   return "Approval mode set to " + mode + (autoKinds.length ? (" (auto: " + autoKinds.join(", ") + ")") : "");
 }
 
+export function normalizeApprovalModeName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source carrying the approval-mode refusal text.
+ *  Every door that resolves a mode name rides it
+ *  (saveApprovalPolicy and the CLI `approvals set-mode`
+ *  door, which throws it before recording anything) - an
+ *  exact mode reads no blocker; anything else is refused
+ *  with the modes listed and a fold correction when exactly
+ *  one mode matches folded for case and separators
+ *  ("Manual" or "SMART " -> that mode), keeping the
+ *  "Invalid approval mode" prefix its readers match.
+ *  parsePolicy and the migrated loader stay permissive by
+ *  design (a bad STORED mode fails closed to manual; they
+ *  do not refuse a person). */
+export function approvalModeBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (APPROVAL_MODES as string[]).includes(value)) return null;
+  const target = normalizeApprovalModeName(typeof value === "string" ? value : "");
+  const matches = target ? APPROVAL_MODES.filter(m => normalizeApprovalModeName(m) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid approval mode \"" + String(value) + "\". Modes: " + APPROVAL_MODES.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function saveApprovalPolicy(root: string, patch: { mode?: ApprovalMode; autoKinds?: string[] }): ApprovalPolicy {
-  if (patch.mode !== undefined && !APPROVAL_MODES.includes(patch.mode)) throw new Error("Invalid approval mode \"" + patch.mode + "\". Modes: " + APPROVAL_MODES.join(", "));
+  if (patch.mode !== undefined) { const blocker = approvalModeBlocker(patch.mode); if (blocker) throw new Error(blocker); }
   const current = loadApprovalPolicy(root);
   const next: ApprovalPolicy = {
     mode: patch.mode ?? current.mode,
