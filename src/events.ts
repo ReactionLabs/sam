@@ -269,6 +269,38 @@ export function eventProfileBlocker(root: string, profile: string): string | nul
   return "Unknown profile \"" + profile + "\" in event binding. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
+function normalizeEventBindingName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The binding-name gate for the CLI event accept door
+ *  (refusal-class sweep, 2026-11-26): every other naming
+ *  door reads its registry through a ONE source in its
+ *  owning module before acting, but CLI `events accept
+ *  <name>` resolved the name through its own inline find
+ *  and on a miss threw the bare "Unknown event" - it did
+ *  not even echo the name it was given, named no registry,
+ *  and offered no fold correction, so a folded name
+ *  ("Lead Arrived" for "lead-arrived") dead-ended with
+ *  nothing to act on. eventBindingBlocker is now the ONE
+ *  source carrying the refusal text (bound events listed,
+ *  fold correction when exactly one matches); the CLI
+ *  accept door throws it before reading the secret env or
+ *  signing anything. acceptEvent's webhook 404 keeps the
+ *  bare text BY DESIGN: that door answers unauthenticated
+ *  network callers and must not enumerate the binding
+ *  registry to them. eventBindings and the event store
+ *  stay permissive by design - only this door's refusal
+ *  shape changes. */
+export function eventBindingBlocker(root: string, name: string): string | null {
+  const names = eventBindings(root).map(b => b.name);
+  if (names.includes(name)) return null;
+  const target = normalizeEventBindingName(name ?? "");
+  const matches = target ? names.filter(n => normalizeEventBindingName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown event \"" + name + "\". Bound events: " + (names.length ? names.join(", ") : "none") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function bindEvent(root: string, input: EventBinding): EventBinding {
   if (!NAME_RE.test(input.name)) throw new Error("Invalid event name");
   if (!NAME_RE.test(input.profile)) throw new Error("Invalid profile");
