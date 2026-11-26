@@ -422,8 +422,36 @@ export const SCRIPT_JOB_COMMANDS: Record<string, { description: string; argv: (r
   "sam-loop-history": { description: "The loop history trend (sam loops history): the activity ledger's loop-open, loop-updated, loop-resolved, loop-closed, and loop-failed lines folded to counts only on one line - the opened, updated (with its posted-in-chat split), resolved, and closed (with its chat-gone and visitor split) counts, the failed count, the distinct-profile count as a number only, and the total; a pure read that opens, revisits, and closes nothing and prints no question, answer, or failure reason (counting the history stays the scorecard's job, opening and revisiting stay the chat tool's and the heartbeat's acts), and its text carries no stamp, actor, question, answer, reason, or verbatim summary so a quiet day stays P3-silent and a failed re-check, a malformed line, or a mix shift is the news", argv: (root) => [process.execPath, fileURLToPath(new URL("./cli.js", import.meta.url)), "--workspace", root, "loops", "history"] },
 };
 export function scriptCommandNames(): string[] { return Object.keys(SCRIPT_JOB_COMMANDS); }
+
+/** Fold a script name for comparison: case and separators
+ *  never carry meaning, so "Sam Overview", "sam_overview",
+ *  and "SAM-OVERVIEW" all fold to the same target as
+ *  "sam-overview". */
+export function normalizeScriptName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source carrying the script-name refusal text.
+ *  Every door that resolves a script name rides scriptArgv
+ *  (heartbeat job creation, the P1 proposal gate's heartbeat
+ *  validation, and the tick's script runner), and scriptArgv
+ *  throws this - an exact allowlisted name reads no blocker;
+ *  anything else is refused with the allowlist named and a
+ *  fold correction when exactly one script name matches
+ *  folded for case and separators, keeping the "Unknown
+ *  script" prefix its readers match. scriptCommandNames and
+ *  SCRIPT_JOB_COMMANDS stay permissive by design (the
+ *  listing door reads them raw). */
+export function scriptNameBlocker(name: unknown): string | null {
+  if (typeof name === "string" && SCRIPT_JOB_COMMANDS[name]) return null;
+  const target = normalizeScriptName(typeof name === "string" ? name : "");
+  const matches = target ? scriptCommandNames().filter(n => normalizeScriptName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown script '" + String(name) + "'. Allowlisted scripts: " + scriptCommandNames().join(", ") + (fix ? ". Did you mean '" + fix + "'?" : "");
+}
+
 export function scriptArgv(root: string, name: string): string[] {
-  const cmd = SCRIPT_JOB_COMMANDS[name];
-  if (!cmd) throw new Error("Unknown script '" + name + "'. Allowlisted scripts: " + scriptCommandNames().join(", "));
-  return cmd.argv(root);
+  const blocker = scriptNameBlocker(name);
+  if (blocker) throw new Error(blocker);
+  return SCRIPT_JOB_COMMANDS[name].argv(root);
 }
