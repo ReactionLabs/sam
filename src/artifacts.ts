@@ -275,8 +275,41 @@ function validateTitle(title: string): string {
   return clean;
 }
 
+function foldArtifactKindName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why an artifact kind name cannot be
+ *  used: the name is not one of the two kinds in this
+ *  module's ARTIFACT_KINDS registry, so the record would be
+ *  stored under a kind no reading surface knows how to
+ *  render. An exact kind reads no blocker. Anything else is
+ *  refused with the two kinds named as the registry and,
+ *  when exactly one kind matches the bad name folded for
+ *  case and separators ("HTML" -> "html"; "MarkDown",
+ *  "mark-down", "mark down" -> "markdown"), that kind named
+ *  as the correction. validateKind throws this text, and
+ *  validateKind is the seam every creation route rides
+ *  (the CLI `artifacts create --kind` door, the dashboard
+ *  artifacts API, and the chat artifact tool all reach
+ *  createArtifact), so every route refuses in the ONE
+ *  source's words before anything is created. The
+ *  "Invalid artifact kind" prefix is kept: its readers
+ *  match on it. Stored-kind readers stay permissive by
+ *  design - rowToArtifact casts the stored kind, so a kind
+ *  removed after an artifact names it leaves the record
+ *  readable. */
+export function artifactKindBlocker(kind: unknown): string | null {
+  if (typeof kind === "string" && ARTIFACT_KINDS.includes(kind as ArtifactKind)) return null;
+  const target = typeof kind === "string" ? foldArtifactKindName(kind) : "";
+  const matches = target ? ARTIFACT_KINDS.filter(k => foldArtifactKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid artifact kind \"" + String(kind) + "\". Kinds: " + ARTIFACT_KINDS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 function validateKind(kind: string): ArtifactKind {
-  if (!ARTIFACT_KINDS.includes(kind as ArtifactKind)) throw new Error("Invalid artifact kind: " + String(kind) + " (html or markdown)");
+  const blocker = artifactKindBlocker(kind);
+  if (blocker) throw new Error(blocker);
   return kind as ArtifactKind;
 }
 
