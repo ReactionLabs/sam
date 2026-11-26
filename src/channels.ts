@@ -291,6 +291,39 @@ export function channelProfileBlocker(root: string, profile: string): string | n
   const fix = matches.length === 1 ? matches[0] : null;
   return "Unknown profile \"" + profile + "\" in channel detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
+export function normalizeChannelName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a channel door cannot name this
+ *  channel: the value names no channel in the registry, so
+ *  the door it rides (channels pair / redeem / bind /
+ *  resolve, through findChannel in pairing.ts) dead-ended
+ *  with the bare "Channel not found: X" - no registry, no
+ *  correction - while every sibling naming door reads its
+ *  registry through a ONE source. The heartbeat channel
+ *  field reads this same registry through
+ *  heartbeatChannelBlocker, but that text is
+ *  heartbeat-detail-specific and cannot serve the channel
+ *  doors themselves. A value reads no blocker when it
+ *  names a registered channel by exact id OR by exact
+ *  name. Anything else is refused with the channels listed
+ *  as name (id) and, when exactly one registered name
+ *  matches the bad value folded for case and separators,
+ *  that correction ("dip telegram" -> "Dip Telegram").
+ *  The "Channel not found" prefix is kept: existing
+ *  readers match it. By-id internal lookups (setBinding,
+ *  redeemPairingCode - the bridge carries the channel's
+ *  own id) are not this door and stay as they are, and
+ *  channels() / the store stay permissive by design.
+ *  Null means the channel can be named. */
+export function channelNameBlocker(root: string, idOrName: string): string | null {
+  const known = channels(root);
+  if (known.some(c => c.id === idOrName || c.name === idOrName)) return null;
+  const target = normalizeChannelName(idOrName ?? "");
+  const matches = target ? known.filter(c => normalizeChannelName(c.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Channel not found: \"" + idOrName + "\". Channels: " + (known.length ? known.map(c => c.name + " (" + c.id + ")").join(", ") : "none registered") + (fix ? ". Did you mean \"" + fix.name + "\" (" + fix.id + ")?" : "");
+}
 export function addChannel(root: string, kind: Channel["kind"], name: string, profile: string, tokenEnv: string, ownerIds: number[] = []): Channel {
   if (kind !== "telegram" && kind !== "webhook" && kind !== "discord") throw Error("Invalid channel kind");
   if (!namePattern.test(name) || !profilePattern.test(profile) || !envPattern.test(tokenEnv)) throw Error("Invalid channel name, profile, or environment variable");

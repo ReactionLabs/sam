@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from "node
 import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
-import { channels, setChannelOwners, type Channel } from "./channels.js";
+import { channelNameBlocker, channels, setChannelOwners, type Channel } from "./channels.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
@@ -292,7 +292,7 @@ export function formatPairingCode(normalized: string): string { return normalize
 
 export function findChannel(root: string, idOrName: string): Channel {
   const found = channels(root).find(c => c.id === idOrName) ?? channels(root).find(c => c.name === idOrName);
-  if (!found) throw Error("Channel not found: " + idOrName);
+  if (!found) throw Error(channelNameBlocker(root, idOrName) ?? ("Channel not found: " + idOrName));
   return found;
 }
 
