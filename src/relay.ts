@@ -1,3 +1,4 @@
+import { ChatStore } from "./chats.js";
 import { readProviderKey, resolveTurnConnection } from "./providers.js";
 import { turnRoutes } from "./failover.js";
 import { OpenAICompatibleProvider, type TokenUsage } from "./openai-compatible.js";
@@ -60,6 +61,38 @@ function dedupe(targets: RelayTarget[]): RelayTarget[] {
     out.push(t);
   }
   return out;
+}
+
+function normalizeRelayProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source carrying the relay door's profile refusal
+ *  text (per-field audit, 2026-11-26): the CLI `relay
+ *  --profile` door looked the profile up inline and refused
+ *  with the bare "Unknown profile \"X\"" - it named NO
+ *  registry (no valid-profiles list) and offered NO fold
+ *  correction, while every sibling profile door reads the
+ *  registry through a ONE source in its owning module
+ *  carrying the full refusal text. The CLI relay door now
+ *  throws this source's text before any route is resolved
+ *  or any model call is spent. When exactly one valid
+ *  profile matches the bad name folded for case and
+ *  separators, the refusal names it ("Second Shift" ->
+ *  "second-shift"). Null means the profile can be named.
+ *  relayTargetsForProfile itself stays permissive by
+ *  design: its by-construction caller (the /relay chat
+ *  command) names the speaking chat's own profile, so it
+ *  is NOT gated here. */
+export function relayProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeRelayProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeRelayProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in relay detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 export function relayTargetsForProfile(root: string, profileName: string, profile: { provider?: string | null; model?: string | null } | null, env: NodeJS.ProcessEnv = process.env): RelayTarget[] {

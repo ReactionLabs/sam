@@ -1,4 +1,5 @@
 import { readActivity } from "./activity.js";
+import { ChatStore } from "./chats.js";
 
 // The agent re-pin writers and scorecard (2026-11-20, the
 // measured-proof series): every profile re-pin - a model pin
@@ -41,6 +42,46 @@ export function agentRepinConnectorLedgerSummary(connectorId: string | null): st
 
 export function agentRepinInstructionsLedgerSummary(chars: number): string {
   return "Instructions rewritten (" + String(chars) + " chars)";
+}
+
+function normalizeAgentRepinProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The ONE source carrying the agent re-pin doors' profile
+ *  refusal text (per-field audit, 2026-11-26): the CLI
+ *  `agents set-model` / `set-provider` / `set-connector` /
+ *  `set-instructions` doors each discovered an unknown
+ *  profile only AFTER their ChatStore setter returned null,
+ *  and refused with their own inline wording ("Known
+ *  profiles", not the common "Valid profiles") and NO fold
+ *  correction, while every sibling profile door reads the
+ *  registry through a ONE source in its owning module
+ *  carrying the full refusal text before anything is
+ *  written. A re-pin changes what every later turn for that
+ *  profile runs on, so a folded name ("Second Shift" for
+ *  "second-shift") dead-ending there costs the operator a
+ *  guess. All four CLI re-pin doors now throw this source's
+ *  text before re-pinning anything (the "sam" core-profile
+ *  refusal stays after it: "sam" is a valid profile and
+ *  passes this blocker, then refuses for its own reason).
+ *  When exactly one valid profile matches the bad name
+ *  folded for case and separators, the refusal names it.
+ *  Null means the profile can be named. The ChatStore
+ *  setters stay permissive by design: a profile removed
+ *  after a pin names it keeps its stored pins, and the
+ *  config wizard's model section rides setAgentModel
+ *  through its own surface, so the setters are NOT gated
+ *  here. */
+export function agentRepinProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeAgentRepinProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeAgentRepinProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in agent re-pin detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 export type AgentRepinField = "model" | "provider" | "connector" | "instructions";

@@ -90,12 +90,12 @@ import { AssignmentLeases } from "./assignment-leases.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { CONFIG_SECTIONS, configSections, configWizardHistoryScorecardText, detectSetup, readSetupRecord, runConfigWizard, setupHistoryScorecardText, verifyAndSaveSetup, verifyModel } from "./config-wizard.js";
 import { configActsScorecardText } from "./config-acts.js";
-import { agentRepinConnectorLedgerSummary, agentRepinInstructionsLedgerSummary, agentRepinModelLedgerSummary, agentRepinProviderLedgerSummary, agentRepinScorecardText } from "./agent-repins.js";
+import { agentRepinConnectorLedgerSummary, agentRepinInstructionsLedgerSummary, agentRepinModelLedgerSummary, agentRepinProfileBlocker, agentRepinProviderLedgerSummary, agentRepinScorecardText } from "./agent-repins.js";
 import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authProbeHistoryScorecardText, authStatus, authStatusText, probeAuth } from "./auth-status.js";
 import { addProvider, listProviders, providerAddLedgerSummary, providerHistoryScorecardText, providerRemoveLedgerSummary, removeProvider } from "./providers.js";
 import { addFallbackRoute, clearFallbackRoutes, failoverHistoryScorecardText, failoverProfileBlocker, failoverRouteLedgerSummary, fallbackRoutes } from "./failover.js";
-import { parseRelayRoute, relayPrompt, relayTargetsForProfile } from "./relay.js";
+import { parseRelayRoute, relayProfileBlocker, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
 import { samBanner } from "./banner.js";
 import { grooveEnabled, makeTheme } from "./theme.js";
@@ -590,26 +590,30 @@ codexCmd.command("status").description("Whether a Codex login is pending or a to
 const agentCmd=program.command("agents").description("Agent profiles: list them and re-pin a profile's model or connector, or rewrite its instructions, after creation (profiles were create-only; a model switch used to need a direct database UPDATE)");
 agentCmd.command("list").description("List every registered agent profile with its model and connector pins").action(()=>{const db=new ChatStore(program.opts().workspace);try{output(db.agents());}finally{db.close();}});
 agentCmd.command("scorecard").description("Agent re-pin ledger lines as plain text with no clock reading - one line: verdict, the parsed act count, model pins set / cleared, provider pins set / cleared, connector pins set / cleared, and instructions rewrites with summed chars (never a stamp, an actor, a profile name, a model name, a provider id, a connector id, or any instruction text), the trending surface a daily script job P3-diffs, so a day no profile is re-pinned stays silent and a malformed line or a mix shift is the news (this is the sam-agent-repins script job's stdout; a pure read over the same activity ledger the re-pin seams ledger: creates nothing, spends no model call, re-pins nothing; exits 0 always, the verdict lives in the text)").action(()=>output(agentRepinScorecardText(program.opts().workspace)));
-agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again").action((name:string,model:string)=>{
+agentCmd.command("set-model").argument("<name>").argument("<model>").description("Re-pin a profile's model; use 'none' to clear the pin so the route tier decides again; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is re-pinned, naming the registry)").action((name:string,model:string)=>{
   const root=program.opts().workspace as string;
+  const profileBlocker=agentRepinProfileBlocker(root,name);
+  if(profileBlocker)throw new Error(profileBlocker);
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its model is the SAM_MODEL environment value");
   const db=new ChatStore(root);
   try{
     const updated=db.setAgentModel(name,model==="none"?null:model);
-    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    if(!updated)throw new Error(agentRepinProfileBlocker(root,name)??"Unknown profile \""+name+"\" in agent re-pin detail");
     recordActivity(root,name,"agent-repin",agentRepinModelLedgerSummary(updated.model));
     output(updated);
   }finally{db.close();}
 });
-agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider").action((name:string,provider:string)=>{
+agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is re-pinned, naming the registry)").action((name:string,provider:string)=>{
   const root=program.opts().workspace as string;
+  const profileBlocker=agentRepinProfileBlocker(root,name);
+  if(profileBlocker)throw new Error(profileBlocker);
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its provider is the environment provider");
   const providerId=provider==="none"?null:provider;
   if(providerId&&!listProviders(root).some(p=>p.id===providerId))throw new Error("Unknown provider \""+providerId+"\". Configured providers: "+listProviders(root).map(p=>p.id).join(", "));
   const db=new ChatStore(root);
   try{
     const updated=db.setAgentProvider(name,providerId);
-    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    if(!updated)throw new Error(agentRepinProfileBlocker(root,name)??"Unknown profile \""+name+"\" in agent re-pin detail");
     recordActivity(root,name,"agent-repin",agentRepinProviderLedgerSummary(updated.provider));
     output(updated);
   }finally{db.close();}
@@ -625,8 +629,10 @@ agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argum
   output({profile:name,fallbacks});
 });
 agentCmd.command("clear-fallbacks").argument("<name>").description("Remove every failover route for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is cleared, naming the registry). The primary pin is left alone").action((name:string)=>{const root=program.opts().workspace as string;const profileBlocker=failoverProfileBlocker(root,name);if(profileBlocker)throw new Error(profileBlocker);output({profile:name,cleared:clearFallbackRoutes(root,name)});});
-agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; an unknown connector refuses before anything is re-pinned, naming the registry; use 'none' to clear the pin").action((name:string,connector:string)=>{
+agentCmd.command("set-connector").argument("<name>").argument("<connector>").description("Re-pin a profile's MCP connector by registered connector name or id; an unknown connector refuses before anything is re-pinned, naming the registry; use 'none' to clear the pin; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is re-pinned, naming the registry)").action((name:string,connector:string)=>{
   const root=program.opts().workspace as string;
+  const profileBlocker=agentRepinProfileBlocker(root,name);
+  if(profileBlocker)throw new Error(profileBlocker);
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; it uses no pinned connector");
   let connectorId:string|null=null;
   if(connector!=="none"){
@@ -637,18 +643,20 @@ agentCmd.command("set-connector").argument("<name>").argument("<connector>").des
   const db=new ChatStore(root);
   try{
     const updated=db.setAgentConnector(name,connectorId);
-    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    if(!updated)throw new Error(agentRepinProfileBlocker(root,name)??"Unknown profile \""+name+"\" in agent re-pin detail");
     recordActivity(root,name,"agent-repin",agentRepinConnectorLedgerSummary(updated.connector_id));
     output(updated);
   }finally{db.close();}
 });
-agentCmd.command("set-instructions").argument("<name>").argument("<text...>").description("Rewrite a profile's instructions after creation (a profile's facts change: a connector arrives, a role changes); takes effect on the profile's next turn").action((name:string,text:string[])=>{
+agentCmd.command("set-instructions").argument("<name>").argument("<text...>").description("Rewrite a profile's instructions after creation (a profile's facts change: a connector arrives, a role changes); takes effect on the profile's next turn; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is rewritten, naming the registry)").action((name:string,text:string[])=>{
   const root=program.opts().workspace as string;
+  const profileBlocker=agentRepinProfileBlocker(root,name);
+  if(profileBlocker)throw new Error(profileBlocker);
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no instruction row; its instructions are the built-in capability statement");
   const db=new ChatStore(root);
   try{
     const updated=db.setAgentInstructions(name,text.join(" "));
-    if(!updated)throw new Error("Unknown profile \""+name+"\". Known profiles: "+["sam",...db.agents().map(a=>a.name)].join(", "));
+    if(!updated)throw new Error(agentRepinProfileBlocker(root,name)??"Unknown profile \""+name+"\" in agent re-pin detail");
     recordActivity(root,name,"agent-repin",agentRepinInstructionsLedgerSummary(updated.instructions.length));
     output(updated);
   }finally{db.close();}
@@ -664,15 +672,17 @@ usageCmd.command("summary").option("--actor <name>","Only this profile").option(
 usageCmd.command("list").option("--limit <n>","How many recent calls","20").action((o:{limit:string})=>output(readUsage(program.opts().workspace).slice(-Math.max(1,Number(o.limit)||20))));
 usageCmd.command("context").option("--actor <name>","Only this profile").description("Injected-context size per turn (Program H): chars and words measured at assembly in .sam/context.jsonl, with the memory-derived tiers (law, recall, standing, summary, history) broken out - the size metric that rides beside token spend").action((o:{actor?:string})=>output({today:contextToday(program.opts().workspace),allTime:contextSummary(program.opts().workspace,o.actor?{actor:o.actor}:{})}));
 usageCmd.command("context-failed-history").description("Context failed history as plain text with no clock reading - verdict, the failed count, the distinct-phase count as a number only, and the total (never a stamp, an actor, a phase name, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a recorded meter-ledger failure is the news (this is the sam-context-failed-history script job's stdout; a pure read over the same activity ledger the context meter failure seam ledgers: creates nothing, sends nothing, retries nothing, records no context; exits 0 always, the verdict lives in the text)").action(()=>output(contextFailedHistoryScorecardText(program.opts().workspace)));
-program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
+program.command("relay").description("Send one prompt to 2 or more configured models and print their answers side by side, with latency and token usage. Pass --route provider:model at least twice, or omit it to use a profile's primary route plus its fallbacks. No tools run").argument("<prompt>").option("--route <provider:model>","One provider:model route; repeat for each model",(value:string,prev:string[])=>{prev.push(value);return prev;},[] as string[]).option("--profile <name>","Profile whose routes to use when --route is omitted; must be a registered profile (sam or a registered agent - an unknown profile refuses before any route is resolved, naming the registry)","sam").option("--chat <id>","Also store the prompt and the side-by-side reply in this chat").action(async(prompt:string,o:{route:string[];profile:string;chat?:string})=>{
   const root=program.opts().workspace as string;
   let targets;
   if(o.route.length)targets=o.route.map(parseRelayRoute);
   else{
     let profile: {provider?:string|null;model?:string|null}|null=null;
     if(o.profile!=="sam"){
+      const profileBlocker=relayProfileBlocker(root,o.profile);
+      if(profileBlocker)throw new Error(profileBlocker);
       const db=new ChatStore(root);
-      try{const found=db.agents().find(a=>a.name===o.profile);if(!found)throw new Error("Unknown profile \""+o.profile+"\"");profile={provider:found.provider??null,model:found.model??null};}finally{db.close();}
+      try{const found=db.agents().find(a=>a.name===o.profile);if(!found)throw new Error(relayProfileBlocker(root,o.profile)??"Unknown profile \""+o.profile+"\" in relay detail");profile={provider:found.provider??null,model:found.model??null};}finally{db.close();}
     }
     targets=relayTargetsForProfile(root,o.profile,profile);
   }
