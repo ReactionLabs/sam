@@ -116,7 +116,7 @@ test("brief: install creates ONE daily wall-clock script job on the Phase C surf
 test("brief: an unknown install channel refuses naming the registry", () => {
   const f = fixture();
   try {
-    assert.throws(() => installBrief(f.root, { channelId: "nope" }), /Unknown channel 'nope'/);
+    assert.throws(() => installBrief(f.root, { channelId: "nope" }), /Unknown channel "nope" in heartbeat detail\. Valid channels: none registered/);
     assert.equal(briefStatus(f.root).installed, false);
   } finally { rmSync(f.base, { recursive: true, force: true }); }
 });

@@ -1,11 +1,10 @@
 import { readActivity, recordActivity } from "./activity.js";
 import { listActions } from "./actions.js";
 import { listBackgroundTasks } from "./background.js";
-import { channels } from "./channels.js";
 import { codingSummary } from "./coding.js";
 import { deliverySummary } from "./delivery-outbox.js";
 import { engineStatus } from "./engine.js";
-import { addScheduledJob, heartbeatJobs, heartbeatLog, type HeartbeatJob } from "./heartbeat.js";
+import { addScheduledJob, heartbeatChannelBlocker, heartbeatChannelId, heartbeatJobs, heartbeatLog, type HeartbeatJob } from "./heartbeat.js";
 import { runSense, type SenseResult, type SenseRunner } from "./senses.js";
 
 /**
@@ -297,15 +296,28 @@ export function briefStatus(root: string): { installed: boolean; job: HeartbeatJ
  *  Phase C surface, profile sam, riding the worthiness gate and
  *  the delivery outbox when a channel is named. Installing twice
  *  refuses - there is one brief, not a stack of them. A channel
- *  is named by id or by its registry name. */
+ *  is named by id or by its registry name, and the naming is
+ *  judged by the ONE source every heartbeat creation door uses
+ *  (heartbeatChannelBlocker in heartbeat.ts): an unknown channel
+ *  refuses before anything is created, naming the registry with
+ *  ids and the fold correction when exactly one registered
+ *  channel matches the bad name folded for case and separators;
+ *  a name that passes resolves to its id through
+ *  heartbeatChannelId, exactly as the CLI heartbeat doors
+ *  resolve it. The brief job IS a heartbeat job, so its channel
+ *  door carries no refusal text of its own. The already-
+ *  installed check fires first (the duplicate is the owner's
+ *  first problem either way). addScheduledJob and the job store
+ *  stay permissive by design - only this door's refusal shape
+ *  is gated. */
 export function installBrief(root: string, opts: { channelId?: string | null; schedule?: string; timezone?: string } = {}): HeartbeatJob {
   const existing = briefJob(root);
   if (existing) throw new Error("The morning brief is already installed as job '" + existing.name + "' (" + existing.id + ") - remove that heartbeat job first if it should move.");
   let channelId: string | null = null;
   if (opts.channelId) {
-    const found = channels(root).find(c => c.id === opts.channelId || c.name === opts.channelId);
-    if (!found) throw new Error("Unknown channel '" + opts.channelId + "'. Channels: " + (channels(root).map(c => c.name).join(", ") || "none"));
-    channelId = found.id;
+    const channelBlocker = heartbeatChannelBlocker(root, opts.channelId);
+    if (channelBlocker) throw new Error(channelBlocker);
+    channelId = heartbeatChannelId(root, opts.channelId);
   }
   return addScheduledJob(root, {
     name: BRIEF_JOB_NAME, profile: "sam",
