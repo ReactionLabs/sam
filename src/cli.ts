@@ -47,7 +47,7 @@ import { chatCitationScorecardText, runChatTurn, turnFailureNoteScorecardText, t
 import { runTui } from "./tui.js";
 import { renderImageFile } from "./term-image.js";
 import { listReachChannels, reachDoctor, reachScorecardText, runReach } from "./reach.js";
-import { channels, addChannel, removeChannel, setChannelOwners, channelFailedHistoryScorecardText, channelProfileBlocker } from "./channels.js";
+import { channels, addChannel, removeChannel, setChannelOwners, channelFailedHistoryScorecardText, channelProfileBlocker, runnerChannel } from "./channels.js";
 import { findChannel, issuePairingCode, pairingFailedHistoryScorecardText, pairingHistoryScorecardText, pairingStatus, redeemPairingCode } from "./pairing.js";
 import { TelegramApi, DashboardSamClient, runTelegramBridge, dashboardTokenFromLog, bridgePollScorecardText, bridgeFailedHistoryScorecardText } from "./telegram.js";
 import { serveWebhookChannel } from "./webhook.js";
@@ -321,15 +321,14 @@ channelCmd.command("binding-history").description("Binding history as plain text
 channelCmd.command("bindings").description("All deterministic bindings, with the channel each belongs to").action(()=>{const root=program.opts().workspace as string;const byId=new Map(channels(root).map(c=>[c.id,c.name]));output(listBindings(root).map(b=>({...b,channel:byId.get(b.channelId)??b.channelId})));});
 channelCmd.command("unbind").argument("<id>").description("Remove one binding by its id (channels bindings lists them)").action((id:string)=>output({removed:removeBinding(program.opts().workspace,id)}));
 channelCmd.command("resolve").argument("<idOrName>").option("--peer <id>","Sender id to resolve for").description("Show which profile a message on this channel would land on, and which rule decided it; the channel must be a registered channel (an unknown name or id refuses, naming the registry with a fold correction when exactly one matches)").action((idOrName:string,o:{peer?:string})=>{const root=program.opts().workspace as string;const channel=findChannel(root,idOrName);output({channel:channel.name,...resolveBindingProfile(root,channel,o.peer??null)});});
-program.command("telegram-bridge").description("Run the Telegram channel bridge (long-polling, owner allowlisted)")
- .option("--channel <name>","Channel name (default: first enabled telegram channel)")
+program.command("telegram-bridge").description("Run the Telegram channel bridge (long-polling, owner allowlisted; an unknown, disabled, or folded channel name refuses, naming the telegram channels with a fold correction when exactly one matches)")
+ .option("--channel <name>","Channel name (default: first enabled telegram channel; an unknown, disabled, or folded name refuses, naming the telegram channels with a fold correction when exactly one matches)")
  .option("--dashboard-url <url>","SAM dashboard base URL",process.env.SAM_DASHBOARD_URL??"http://127.0.0.1:4317")
  .option("--dashboard-log <path>","Dashboard log file to discover the current dashboard token from",process.env.SAM_DASHBOARD_LOG??"")
  .option("--dashboard-token <token>","Dashboard token (overrides log discovery)",process.env.SAM_DASHBOARD_TOKEN??"")
  .action(async(o:{channel?:string;dashboardUrl:string;dashboardLog:string;dashboardToken:string})=>{
   const root=program.opts().workspace as string;
-  const channel=channels(root).find(c=>c.enabled&&c.kind==="telegram"&&(!o.channel||c.name===o.channel));
-  if(!channel)throw new Error("No enabled telegram channel configured");
+  const channel=runnerChannel(root,"telegram",o.channel);
   const botToken=process.env[channel.tokenEnv];
   if(!botToken)throw new Error("Channel credential missing from environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");
@@ -339,13 +338,12 @@ program.command("telegram-bridge").description("Run the Telegram channel bridge 
   console.log(theme.ok("SAM telegram bridge: channel "+channel.name+" -> profile "+channel.profile+", owners "+(channel.ownerIds.length?channel.ownerIds.join(","):"(none yet, pairing mode)")));
   await runTelegramBridge({root,channel,sam,api:new TelegramApi(botToken),stop:()=>stopping});
  });
-program.command("discord-post").description("Post a message to a Discord channel via its webhook (channel kind: discord)")
+program.command("discord-post").description("Post a message to a Discord channel via its webhook (channel kind: discord; an unknown, disabled, or folded channel name refuses, naming the discord channels with a fold correction when exactly one matches)")
  .requiredOption("--channel <name>","Discord channel name")
  .requiredOption("--text <text>","Message text")
  .action(async(o:{channel:string;text:string})=>{
   const root=program.opts().workspace as string;
-  const channel=channels(root).find(c=>c.enabled&&c.kind==="discord"&&c.name===o.channel);
-  if(!channel)throw new Error("No enabled discord channel with that name");
+  const channel=runnerChannel(root,"discord",o.channel);
   output({posted:await postDiscord(channel,o.text)});
  });
 const prefCmd=program.command("preferences").description("Preference memory and standing law, per profile");
@@ -752,7 +750,7 @@ eventCmd.command("unbind").argument("<name>").action((name:string)=>output({remo
 eventCmd.command("accept").argument("<name>").requiredOption("--body <file>","UTF-8 JSON file: {type,id?,data}").option("--signature <hex>","HMAC-SHA256 hex of the file bytes. Omit to sign with the binding's secret env, for a local check").description("Accept one signed event now, the same door the webhook uses. The name must be a bound event (an unknown name refuses before anything is signed, naming the bound events with a fold correction when exactly one matches)").action(async(name:string,o:{body:string;signature?:string})=>{const root=program.opts().workspace as string;const bindingBlocker=eventBindingBlocker(root,name);if(bindingBlocker)throw new Error(bindingBlocker);const raw=readFileSync(o.body,"utf8");const binding=eventBindings(root).find(b=>b.name===name);if(!binding)throw new Error("Unknown event");const secret=process.env[binding.secretEnv];if(!secret)throw new Error("Event secret missing from environment: "+binding.secretEnv);const signature=o.signature??signEvent(secret,raw);const result=await acceptEvent(root,{name,rawBody:raw,signature});output(result);if(result.status!==200)process.exitCode=1;});
 eventCmd.command("history").description("Event door history as plain text with no clock reading - verdict, the bound, woke, with-id, and unbound counts, the failed count with its read and write split, and the distinct-name, distinct-type, and distinct-profile counts as numbers only, and the total (never a stamp, an actor, a binding name, an event type, an event id, a profile name, a secret env name, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a store failure or a malformed line is the news (this is the sam-event-history script job's stdout; a pure read over the same activity ledger the event seams ledger: creates nothing, binds nothing, unbinds nothing, accepts nothing; exits 0 always, the verdict lives in the text)").action(()=>output(eventHistoryScorecardText(program.opts().workspace)));
 eventCmd.command("serve").option("--port <number>","Loopback port","4392").description("Serve POST /events/<name> on 127.0.0.1. Signature header: x-sam-event-signature").action(async(o:{port:string})=>{const root=program.opts().workspace as string;const port=Number(o.port);await serveEvents(root,port);console.log(theme.ok("SAM event door on 127.0.0.1:"+port));await new Promise(()=>{});});
-program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth)")
+program.command("webhook-serve").description("Run a webhook trigger channel (loopback, shared-secret auth; an unknown, disabled, or folded channel name refuses, naming the webhook channels with a fold correction when exactly one matches)")
  .requiredOption("--channel <name>","Webhook channel name")
  .option("--port <number>","Loopback port","4391")
  .option("--dashboard-url <url>","SAM dashboard base URL",process.env.SAM_DASHBOARD_URL??"http://127.0.0.1:4317")
@@ -760,8 +758,7 @@ program.command("webhook-serve").description("Run a webhook trigger channel (loo
  .option("--dashboard-token <token>","Dashboard token (overrides log discovery)",process.env.SAM_DASHBOARD_TOKEN??"")
  .action(async(o:{channel:string;port:string;dashboardUrl:string;dashboardLog:string;dashboardToken:string})=>{
   const root=program.opts().workspace as string;
-  const channel=channels(root).find(c=>c.enabled&&c.kind==="webhook"&&c.name===o.channel);
-  if(!channel)throw new Error("No enabled webhook channel with that name");
+  const channel=runnerChannel(root,"webhook",o.channel);
   const secret=process.env[channel.tokenEnv];
   if(!secret||secret.length<24)throw new Error("Channel secret missing or too short in environment: "+channel.tokenEnv);
   const logPath=o.dashboardLog||join(resolve(root),"dashboard.log");

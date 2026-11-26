@@ -324,6 +324,45 @@ export function channelNameBlocker(root: string, idOrName: string): string | nul
   const fix = matches.length === 1 ? matches[0] : null;
   return "Channel not found: \"" + idOrName + "\". Channels: " + (known.length ? known.map(c => c.name + " (" + c.id + ")").join(", ") : "none registered") + (fix ? ". Did you mean \"" + fix.name + "\" (" + fix.id + ")?" : "");
 }
+/** The ONE source for why a channel RUNNER door cannot pick
+ *  its channel: the telegram bridge, the discord poster, and
+ *  the webhook server each resolved their channel through
+ *  their own inline find filtered by kind + enabled and
+ *  refused a miss with a generic line ("No enabled telegram
+ *  channel configured" / "No enabled discord channel with
+ *  that name") naming no registry, offering no fold
+ *  correction, and unable to distinguish an unknown name
+ *  from a disabled channel or a channel of another kind.
+ *  A pick reads no blocker when an ENABLED channel of the
+ *  kind matches the name exactly, or, when no name is
+ *  given, when any enabled channel of the kind exists (the
+ *  bridge's standing first-enabled default). Anything else
+ *  is refused with the channels OF THAT KIND listed as
+ *  name (id, enabled/disabled) and, when exactly one of
+ *  them matches the bad name folded for case and
+ *  separators, that correction. channels() and the store
+ *  stay permissive by design. Null means the pick works. */
+export function channelRunnerBlocker(root: string, kind: Channel["kind"], name?: string): string | null {
+  const ofKind = channels(root).filter(c => c.kind === kind);
+  const enabled = ofKind.filter(c => c.enabled);
+  if (name === undefined ? enabled.length > 0 : enabled.some(c => c.name === name)) return null;
+  const listed = ofKind.length ? ofKind.map(c => c.name + " (" + c.id + ", " + (c.enabled ? "enabled" : "disabled") + ")").join(", ") : "none registered";
+  const target = name ? normalizeChannelName(name) : "";
+  const matches = target ? ofKind.filter(c => normalizeChannelName(c.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  const head = name === undefined ? "No enabled " + kind + " channel configured." : "No enabled " + kind + " channel: \"" + name + "\".";
+  return head + " " + kind[0].toUpperCase() + kind.slice(1) + " channels: " + listed + (fix ? ". Did you mean \"" + fix.name + "\" (" + fix.id + ", " + (fix.enabled ? "enabled" : "disabled") + ")?" : "");
+}
+/** Resolve the channel a runner door runs on, or throw the
+ *  ONE source's refusal before anything starts: the named
+ *  enabled channel of the kind, or the first enabled one
+ *  when no name is given. */
+export function runnerChannel(root: string, kind: Channel["kind"], name?: string): Channel {
+  const blocker = channelRunnerBlocker(root, kind, name);
+  if (blocker) throw Error(blocker);
+  const enabled = channels(root).filter(c => c.kind === kind && c.enabled);
+  return (name === undefined ? enabled[0] : enabled.find(c => c.name === name))!;
+}
 export function addChannel(root: string, kind: Channel["kind"], name: string, profile: string, tokenEnv: string, ownerIds: number[] = []): Channel {
   if (kind !== "telegram" && kind !== "webhook" && kind !== "discord") throw Error("Invalid channel kind");
   if (!namePattern.test(name) || !profilePattern.test(profile) || !envPattern.test(tokenEnv)) throw Error("Invalid channel name, profile, or environment variable");
