@@ -76,6 +76,35 @@ export function isEngineProvider(value: unknown): value is EngineProvider {
   return value === "claude-code" || value === "codex";
 }
 
+export function normalizeEngineProviderName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why an engine provider door cannot
+ *  name this provider: the value names no provider in
+ *  ENGINE_PROVIDERS, so the doors that resolve it (the CLI
+ *  `engine provider` door, setEngineProvider itself, and
+ *  the config wizard's engine section) each improvised
+ *  the identical "Invalid engine provider: X (valid: ...)"
+ *  text - the wizard in its own variant wording - with no
+ *  fold correction, while every sibling naming door reads
+ *  its registry through a ONE source. A value reads no
+ *  blocker when it is an exact provider id. Anything else
+ *  is refused with the valid ids listed and, when exactly
+ *  one provider id matches the bad value folded for case
+ *  and separators, that correction ("Claude Code" or
+ *  "claude_code" -> "claude-code"). The "Invalid engine
+ *  provider" prefix is kept: existing readers match it.
+ *  isEngineProvider and engineProviderDef stay permissive
+ *  by design (store readers fall back through them).
+ *  Null means the provider can be named. */
+export function engineProviderBlocker(value: unknown): string | null {
+  if (isEngineProvider(value)) return null;
+  const target = normalizeEngineProviderName(typeof value === "string" ? value : "");
+  const matches = target ? ENGINE_PROVIDERS.filter(p => normalizeEngineProviderName(p.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid engine provider: \"" + String(value) + "\" (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + ")" + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
 /** The binary for one provider: Claude Code rides the existing
  *  engineBinary (SAM_ENGINE_BIN, else claude on PATH); Codex resolves
  *  SAM_CODEX_BIN, else `codex` on PATH through the bin-path helpers
@@ -395,7 +424,8 @@ export function engineDisconnectedLedgerSummary(label: string): string {
 }
 
 export function setEngineProvider(root: string, provider: EngineProvider): EngineProviderRecord {
-  if (!isEngineProvider(provider)) throw new Error("Invalid engine provider: " + String(provider) + " (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + ")");
+  const providerBlocker = engineProviderBlocker(provider);
+  if (providerBlocker) throw new Error(providerBlocker);
   const record: EngineProviderRecord = { provider, updatedAt: new Date().toISOString() };
   let db: Database.Database;
   try { db = openConnectionStore(root); } catch (error) { failEngineConnectionStore(root, "write", error); }

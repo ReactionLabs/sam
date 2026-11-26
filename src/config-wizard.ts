@@ -7,7 +7,7 @@ import { channels, addChannel, channelProfileBlocker, type Channel } from "./cha
 import { connectors, connectorCredentialPresent } from "./connectors.js";
 import { parseSamConfig, configReadiness } from "./config.js";
 import { modelRoutingTable } from "./model-routing.js";
-import { connectEngine, engineConnectStatus, engineProviderDef, isEngineProvider, setEngineProvider, ENGINE_PROVIDERS, type EngineAuthRunner, type EngineConnection, type EngineProvider, type EngineProviderStatus } from "./engine-connect.js";
+import { connectEngine, engineConnectStatus, engineProviderBlocker, engineProviderDef, isEngineProvider, setEngineProvider, ENGINE_PROVIDERS, type EngineAuthRunner, type EngineConnection, type EngineProvider, type EngineProviderStatus } from "./engine-connect.js";
 import { sensesStatus } from "./senses.js";
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { readActivity, recordActivity } from "./activity.js";
@@ -636,7 +636,7 @@ async function wizardSection(root: string, io: WizardIo, id: ConfigSectionId, en
   // pick rides the same store the CLI's `engine provider` verb uses.
   const pick = (await io.ask("Engine provider [" + ENGINE_PROVIDERS.map(p => p.id).join("/") + ", or Enter to keep " + status.provider + "]: ")).trim().toLowerCase();
   if (pick) {
-    if (!isEngineProvider(pick)) { io.print("Refused: \"" + pick + "\" is not an engine provider (valid: " + ENGINE_PROVIDERS.map(p => p.id).join(", ") + "). The selection is unchanged."); return; }
+    if (!isEngineProvider(pick)) { io.print("Refused: " + (engineProviderBlocker(pick) ?? "Invalid engine provider") + ". The selection is unchanged."); return; }
     try { setEngineProvider(root, pick); } catch (err) { io.print("Refused: " + (err instanceof Error ? err.message : String(err))); return; }
     io.print("Saved: " + engineProviderDef(pick).label + " is now the coding-engine provider (a config choice only - nothing was connected or removed).");
     status = engineConnectStatus(root, env);
