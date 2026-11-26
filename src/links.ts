@@ -244,21 +244,43 @@ export function updateLinkGroup(root:string,id:string,patch:Partial<LinkGroup>):
  updateLinkRow(root,next);
  return next;
 }
-function validMember(root:string,name:string):boolean{
- if(name==="sam")return true;
- if(!/^[a-z][a-z0-9._-]{0,63}$/.test(name))return false;
- const db=new ChatStore(root);try{return db.agents().some(a=>a.name===name);}finally{db.close();}
+function normalizeLinkProfileName(name:string):string{
+ return name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+}
+/** The ONE source carrying the link door's profile refusal
+ *  text (per-field audit, 2026-11-25): createLink and
+ *  addLinkMember checked members through a boolean helper
+ *  and refused with the bare "Unknown profile: X" - it
+ *  named no registry and offered no fold correction, while
+ *  every sibling profile door names both. linkProfileBlocker
+ *  carries the refusal text (valid profiles listed, fold
+ *  correction when exactly one matches); both member checks
+ *  throw it, so the operator CLI links doors and the ONE
+ *  gate executor's spawn-link path (which rides createLink)
+ *  all refuse in the same words before anything is linked.
+ *  The gate already lived at this store (both checks threw
+ *  here, and createLink's callers rely on that), so nothing
+ *  about permissiveness changes - only the refusal's shape. */
+export function linkProfileBlocker(root:string,profile:string):string|null{
+ const db=new ChatStore(root);
+ let names:string[];
+ try{names=["sam",...db.agents().map(a=>a.name).filter(n=>n!=="sam")];}finally{db.close();}
+ if(names.includes(profile))return null;
+ const target=normalizeLinkProfileName(profile??"");
+ const matches=target?names.filter(n=>normalizeLinkProfileName(n)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Unknown profile \""+profile+"\" in link detail. Valid profiles: "+names.join(", ")+(fix?". Did you mean \""+fix+"\"?":"");
 }
 export function createLink(root:string,name:string,members:string[]):LinkGroup{
  if(!name.trim()||name.length>80)throw new Error("Invalid link name");
  const unique=[...new Set(members)];
  if(unique.length<2)throw new Error("A link needs at least two members");
- for(const member of unique)if(!validMember(root,member))throw new Error("Unknown profile: "+member);
+ for(const member of unique){const blocker=linkProfileBlocker(root,member);if(blocker)throw new Error(blocker);}
  const group:LinkGroup={id:randomUUID(),name:name.trim(),members:unique,created_at:new Date().toISOString()};
  insertLinkRow(root,group);return group;
 }
 export function addLinkMember(root:string,id:string,member:string):LinkGroup{
- if(!validMember(root,member))throw new Error("Unknown profile: "+member);
+ const blocker=linkProfileBlocker(root,member);if(blocker)throw new Error(blocker);
  const group=findLinkRow(root,id);
  if(!group)throw new Error("Link not found");
  if(!group.members.includes(member)){group.members.push(member);updateLinkRow(root,group);}
