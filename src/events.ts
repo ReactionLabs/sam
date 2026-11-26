@@ -237,6 +237,38 @@ export function eventBindings(root: string): EventBinding[] {
   finally { db.close(); }
 }
 
+function normalizeEventProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The profile gate for the event bind door (per-field audit,
+ *  2026-11-25): every other profile-naming creation door reads
+ *  the profile registry through a ONE source in its owning
+ *  module before writing anything, but CLI `events bind
+ *  <profile>` carried a one-off inline check in cli.ts whose
+ *  refusal was the bare "Unknown profile: X" - it named no
+ *  registry (no valid-profiles list) and offered no fold
+ *  correction, so a folded name ("Second Shift" for
+ *  "second-shift") was refused with nothing to act on while
+ *  every sibling door names the correction. eventProfileBlocker
+ *  is now the ONE source carrying the refusal text (valid
+ *  profiles listed, fold correction when exactly one matches);
+ *  the CLI bind door throws it before binding anything.
+ *  bindEvent stays permissive by design: a profile removed
+ *  after a binding names it keeps its stored binding, and
+ *  the CLI is its only creation caller, so the gate lives
+ *  at the door. */
+export function eventProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeEventProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeEventProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in event binding. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function bindEvent(root: string, input: EventBinding): EventBinding {
   if (!NAME_RE.test(input.name)) throw new Error("Invalid event name");
   if (!NAME_RE.test(input.profile)) throw new Error("Invalid profile");
