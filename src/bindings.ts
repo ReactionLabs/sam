@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { channels, type Channel } from "./channels.js";
+import { ChatStore } from "./chats.js";
 import { readActivity, recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
@@ -211,6 +212,36 @@ function updateBindingRow(root: string, item: Binding): void {
   try { db.prepare("UPDATE bindings SET data = ? WHERE id = ?").run(JSON.stringify(item), item.id); }
   finally { db.close(); }
 }
+function normalizeBindingProfileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The profile gate for the channel bind door (per-field audit,
+ *  2026-11-25): every other profile-naming creation door reads
+ *  the profile registry through a ONE source in its owning
+ *  module before writing anything, but CLI `channels bind
+ *  --profile` carried a one-off inline check in cli.ts with its
+ *  own refusal text and no fold correction - a folded name
+ *  ("Second Shift" for "second-shift") was refused with only
+ *  the bare list, while every sibling door names the correction.
+ *  bindingProfileBlocker is now the ONE source carrying the
+ *  refusal text (valid profiles listed, fold correction when
+ *  exactly one matches); the CLI bind door throws it before
+ *  setting anything. setBinding stays permissive by design:
+ *  a profile removed after a binding names it keeps its stored
+ *  binding (the resolver falls back per its own rules), and
+ *  the CLI is its only caller, so the gate lives at the door. */
+export function bindingProfileBlocker(root: string, profile: string): string | null {
+  const db = new ChatStore(root);
+  let names: string[];
+  try { names = ["sam", ...db.agents().map(a => a.name).filter(n => n !== "sam")]; } finally { db.close(); }
+  if (names.includes(profile)) return null;
+  const target = normalizeBindingProfileName(profile ?? "");
+  const matches = target ? names.filter(n => normalizeBindingProfileName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown profile \"" + profile + "\" in channel binding. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function validPeer(peer: string): string {
   const trimmed = peer.trim();
   if (!trimmed || trimmed.length > 128 || /[\u0000-\u001f\u007f]/.test(trimmed)) throw Error("Invalid peer: give the sender id as it appears on the channel (1-128 printable characters)");
