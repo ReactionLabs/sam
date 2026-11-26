@@ -4,7 +4,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
 import type { TurnRoute } from "./budgets.js";
-import { listProviders, resolveTurnConnection, type TurnConnection } from "./providers.js";
+import { providerPinBlocker, resolveTurnConnection, type TurnConnection } from "./providers.js";
 import { ChatStore } from "./chats.js";
 import { errorReason } from "./error-reason.js";
 
@@ -287,8 +287,8 @@ function findRoutesRow(db: Database.Database, profile: string): FallbackRoute[] 
 function validateRoute(root: string, route: FallbackRoute, env: NodeJS.ProcessEnv): FallbackRoute {
   if (!ID_RE.test(route.provider)) throw new Error("Invalid provider id");
   if (!MODEL_RE.test(route.model)) throw new Error("Invalid model");
-  if (!listProviders(root, env).some(p => p.id === route.provider))
-    throw new Error("Unknown provider \"" + route.provider + "\". Configured providers: " + listProviders(root, env).map(p => p.id).join(", "));
+  const providerBlocker = providerPinBlocker(root, route.provider, env);
+  if (providerBlocker) throw new Error(providerBlocker);
   return { provider: route.provider, model: route.model };
 }
 

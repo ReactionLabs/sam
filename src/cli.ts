@@ -93,7 +93,7 @@ import { configActsScorecardText } from "./config-acts.js";
 import { agentRepinConnectorLedgerSummary, agentRepinInstructionsLedgerSummary, agentRepinModelLedgerSummary, agentRepinProfileBlocker, agentRepinProviderLedgerSummary, agentRepinScorecardText } from "./agent-repins.js";
 import { loadWorkspaceEnv, runSetup, terminalSetupIo } from "./setup.js";
 import { authProbeHistoryScorecardText, authStatus, authStatusText, probeAuth } from "./auth-status.js";
-import { addProvider, listProviders, providerAddLedgerSummary, providerHistoryScorecardText, providerRemoveLedgerSummary, removeProvider } from "./providers.js";
+import { addProvider, listProviders, providerAddLedgerSummary, providerHistoryScorecardText, providerPinBlocker, providerRemoveLedgerSummary, removeProvider } from "./providers.js";
 import { addFallbackRoute, clearFallbackRoutes, failoverHistoryScorecardText, failoverProfileBlocker, failoverRouteLedgerSummary, fallbackRoutes } from "./failover.js";
 import { parseRelayRoute, relayProfileBlocker, relayPrompt, relayTargetsForProfile } from "./relay.js";
 import { startCodexLogin, codexAuthState } from "./codex-auth.js";
@@ -603,13 +603,13 @@ agentCmd.command("set-model").argument("<name>").argument("<model>").description
     output(updated);
   }finally{db.close();}
 });
-agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is re-pinned, naming the registry)").action((name:string,provider:string)=>{
+agentCmd.command("set-provider").argument("<name>").argument("<provider>").description("Pin a profile to a configured provider id (sam providers list); use 'none' to return the profile to the environment provider. The model pin, if any, still names the model on that provider; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is re-pinned, naming the registry) and the provider must be a configured provider id (an unknown provider refuses before anything is re-pinned, naming the configured providers with a fold correction when exactly one matches)").action((name:string,provider:string)=>{
   const root=program.opts().workspace as string;
   const profileBlocker=agentRepinProfileBlocker(root,name);
   if(profileBlocker)throw new Error(profileBlocker);
   if(name==="sam")throw new Error("Profile \"sam\" is the core profile and carries no pin row; its provider is the environment provider");
   const providerId=provider==="none"?null:provider;
-  if(providerId&&!listProviders(root).some(p=>p.id===providerId))throw new Error("Unknown provider \""+providerId+"\". Configured providers: "+listProviders(root).map(p=>p.id).join(", "));
+  if(providerId){const providerBlocker=providerPinBlocker(root,providerId);if(providerBlocker)throw new Error(providerBlocker);}
   const db=new ChatStore(root);
   try{
     const updated=db.setAgentProvider(name,providerId);
@@ -620,7 +620,7 @@ agentCmd.command("set-provider").argument("<name>").argument("<provider>").descr
 });
 agentCmd.command("failover-history").description("Failover history as plain text with no clock reading - verdict, the hop count, the routes-added count, the failed count with its read / write split, the distinct-chat count as a number only, and the total (never a stamp, an actor, a chat id, a provider or model name, a reason, or a verbatim summary), the trending surface a daily script job P3-diffs, so a quiet day stays silent and a store failure or a malformed line is the news (this is the sam-failover-history script job's stdout; a pure read over the same activity ledger the turn, route, and store seams ledger: creates nothing, spends no model call, routes nothing, opens no store; exits 0 always, the verdict lives in the text)").action(()=>output(failoverHistoryScorecardText(program.opts().workspace)));
 agentCmd.command("fallbacks").argument("<name>").description("Failover routes for a profile, tried in order after the primary provider+model when a turn fails before any tool has run").action((name:string)=>output({profile:name,fallbacks:fallbackRoutes(program.opts().workspace,name)}));
-agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argument("<model>").description("Append a failover route (configured provider id + model) for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is added, naming the registry). The turn uses it only when the previous route fails before any tool runs").action((name:string,provider:string,model:string)=>{
+agentCmd.command("add-fallback").argument("<name>").argument("<provider>").argument("<model>").description("Append a failover route (configured provider id + model) for a profile; the profile must be a registered profile (sam or a registered agent - an unknown profile refuses before anything is added, naming the registry) and the provider must be a configured provider id (an unknown provider refuses before anything is added, naming the configured providers with a fold correction when exactly one matches). The turn uses it only when the previous route fails before any tool runs").action((name:string,provider:string,model:string)=>{
   const root=program.opts().workspace as string;
   const profileBlocker=failoverProfileBlocker(root,name);
   if(profileBlocker)throw new Error(profileBlocker);

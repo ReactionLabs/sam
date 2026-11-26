@@ -384,6 +384,42 @@ export function listProviders(root: string, env: NodeJS.ProcessEnv = process.env
   return [envProvider(env), ...readFileProviders(root).map(row => toPublic(env, row))];
 }
 
+// The provider pin refusal (gap found 2026-11-26, hourly run
+// 04:04 EST): two doors named a provider against this
+// registry and each improvised the same refusal - the CLI
+// agents set-provider door checked listProviders inline and
+// failover's validateRoute threw the identical string -
+// "Unknown provider \"X\". Configured providers: <ids>",
+// with no fold correction, so a folded id ("Open AI" or
+// "OPENAI" for "openai") dead-ended with nothing to act
+// on, while the sibling connector pin field reads its
+// registry through connectorPinBlocker, the ONE source in
+// connectors.ts. providerPinBlocker is the ONE source
+// carrying this refusal text: a value reads no blocker
+// when it names a configured provider id exactly; anything
+// else is refused with the configured ids listed and a
+// fold correction when exactly one configured id matches
+// folded for case and separators. Both doors throw it
+// before anything is pinned or routed. The ChatStore
+// provider setter and resolveTurnConnection stay
+// permissive by design (a provider removed after a profile
+// names it keeps its stored pin and fails at turn time by
+// its own named seam, the provider-unavailable class), so
+// the gate lives at the naming doors, not in the stores.
+export function normalizeProviderPinName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+export function providerPinBlocker(root: string, value: string | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  const known = listProviders(root, env);
+  if (known.some(p => p.id === value)) return null;
+  const target = normalizeProviderPinName(value);
+  const matches = target ? known.filter(p => normalizeProviderPinName(p.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown provider \"" + value + "\" in provider pin. Configured providers: " + known.map(p => p.id).join(", ") + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
 export function addProvider(root: string, input: { id: string; endpoint: string; keyEnv: string; model: string; cheapModel?: string | null; deepModel?: string | null }, env: NodeJS.ProcessEnv = process.env): ConfiguredProvider {
   const id = input.id.trim();
   if (!ID_RE.test(id)) throw new Error("Invalid provider id (lowercase, start with a letter, max 32)");
