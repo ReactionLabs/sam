@@ -238,11 +238,45 @@ export function updateDraft(root: string, id: string, patch: Partial<Draft>): Dr
 // NOT here: a contact can be marked between proposal and
 // approval, and that refusal stays an execution-time landing
 // (drafts.test.ts pins it).
+function foldDraftChannelName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a draft channel name cannot be
+ *  used: the name is not one of the five channels in this
+ *  module's CHANNELS registry, so a draft filed under it
+ *  would land in no channel bucket the scorecard, the
+ *  dashboard, or the owner ever reads. An absent channel
+ *  reads no blocker (createDraft's "message" default), and
+ *  an exact channel - measured trimmed and lowercased,
+ *  exactly as draftShapeBlocker measures it - reads none
+ *  either. Anything else is refused with the five channels
+ *  named and, when exactly one channel matches the bad
+ *  name folded for case and separators ("e-mail",
+ *  "e mail" -> "email"), that channel named as the
+ *  correction. draftShapeBlocker returns this text for its
+ *  channel field, so the CLI `drafts create` door,
+ *  createDraft at write time, and the ONE gate's
+ *  validateDraftDetail at proposal time all refuse in the
+ *  ONE source's words before anything is created or
+ *  proposed. The "Invalid draft channel" prefix is kept:
+ *  its readers match on it. CHANNELS itself and
+ *  parseDraftSummary stay permissive by design - the
+ *  scorecard's bucket parser reads stored ledger text raw
+ *  and never refuses a person. */
+export function draftChannelBlocker(channel: unknown): string | null {
+  if (channel === undefined || channel === null) return null;
+  const measured = typeof channel === "string" ? channel.trim().toLowerCase() : "";
+  if (CHANNELS.includes(measured)) return null;
+  const target = typeof channel === "string" ? foldDraftChannelName(channel) : "";
+  const matches = target ? CHANNELS.filter(c => foldDraftChannelName(c) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid draft channel \"" + String(channel) + "\". Channels: " + CHANNELS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export function draftShapeBlocker(input: { to?: unknown; channel?: unknown; subject?: unknown; body?: unknown }): string | null {
   const to = typeof input.to === "string" ? input.to.trim() : "";
   if (!to || to.length > 120) return "Invalid draft recipient";
-  const channel = input.channel === undefined || input.channel === null ? "message" : typeof input.channel === "string" ? input.channel.trim().toLowerCase() : "";
-  if (!CHANNELS.includes(channel)) return "Invalid draft channel";
+  const channelBlocker = draftChannelBlocker(input.channel);
+  if (channelBlocker) return channelBlocker;
   if (input.subject !== undefined && input.subject !== null) {
     if (typeof input.subject !== "string" || input.subject.trim().length > 200) return "Invalid draft subject";
   }

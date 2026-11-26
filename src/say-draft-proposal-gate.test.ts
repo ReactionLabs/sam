@@ -31,7 +31,7 @@ test("draft gate: a shape-breaking detail refuses at proposal in the ONE source'
   try {
     const detail = JSON.stringify({ to: "Rick Ruiz", channel: "pigeon", body: "hi" });
     const blocker = draftShapeBlocker({ to: "Rick Ruiz", channel: "pigeon", body: "hi" });
-    assert.equal(blocker, "Invalid draft channel");
+    assert.equal(blocker, "Invalid draft channel \"pigeon\". Channels: email, text, message, letter, other");
     let err = "";
     try { proposeAction(root, { actor: "sam", kind: "draft", title: "Bad channel", detail }); } catch (e) { err = e instanceof Error ? e.message : String(e); }
     assert.equal(err, blocker);
