@@ -727,10 +727,36 @@ export function codeCommandNames(): string[] {
   return [...NPM_SCRIPT_COMMANDS, ...Object.keys(GIT_COMMANDS), "git-clone", ...Object.keys(AGENT_REACH_COMMANDS)];
 }
 
+export function normalizeCodeCommandName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source carrying the code-command refusal text.
+ *  Every door that resolves a code command name rides
+ *  codeCommandSpec (the CLI `code spec` / `code run` doors
+ *  and runCodeCommand, the sam_code chat tool's run action),
+ *  and codeCommandSpec throws this before any code root is
+ *  required - an exact allowlisted name reads no blocker;
+ *  anything else is refused with the allowlist named, the
+ *  standing safety sentence kept, and a fold correction when
+ *  exactly one allowlisted command matches folded for case
+ *  and separators, keeping the "Unknown code command" prefix
+ *  its readers match. codeCommandNames stays permissive by
+ *  design (the listing door reads it raw). */
+export function codeCommandBlocker(name: unknown): string | null {
+  if (typeof name === "string" && codeCommandNames().includes(name)) return null;
+  const target = normalizeCodeCommandName(typeof name === "string" ? name : "");
+  const matches = target ? codeCommandNames().filter(n => normalizeCodeCommandName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown code command '" + String(name) + "'. Allowlisted commands: " + codeCommandNames().join(", ") + ". There is no way to run anything else - no arbitrary commands, flags, or shell." + (fix ? " Did you mean '" + fix + "'?" : "");
+}
+
 /** Build the fixed argv for one allowlisted command NAME. The caller
  *  (model or CLI) supplies only the name; a missing package script or a
  *  non-git root refuses here, naming what IS available. */
 export function codeCommandSpec(root: string, name: string, params?: { url?: string; destination?: string }): CodeCommandSpec {
+  const nameBlocker = codeCommandBlocker(name);
+  if (nameBlocker) throw new Error(nameBlocker);
   if (name === "git-clone") {
     if (!params?.url || !params.destination) throw new Error("git-clone needs a url and a destination inside the code root. The argv is built from those two fields (no shell, no push).");
     return gitCloneSpec(root, params.url, params.destination);
@@ -748,7 +774,7 @@ export function codeCommandSpec(root: string, name: string, params?: { url?: str
   if (git) return { file: "git", args: git.args, cwd: base, description: git.description };
   const reach = AGENT_REACH_COMMANDS[name];
   if (reach) return { file: "agent-reach", args: reach.args, cwd: base, description: reach.description };
-  throw new Error("Unknown code command '" + name + "'. Allowlisted commands: " + codeCommandNames().join(", ") + ". There is no way to run anything else - no arbitrary commands, flags, or shell.");
+  throw new Error(codeCommandBlocker(name) ?? "Unknown code command '" + name + "'");
 }
 
 export type CodeRunner = (file: string, args: string[], cwd: string, timeoutMs: number) => Promise<{ exitCode: number | null; output: string; timedOut?: boolean }>;
