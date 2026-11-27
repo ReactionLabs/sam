@@ -63,7 +63,7 @@ export const LOADER_TOOL_DEF: Record<string, unknown> = {
   type: "function",
   function: {
     name: LOADER_TOOL_NAME,
-    description: "Load additional tools into this chat session by their exact names from the deferred tools list in your instructions. Loaded tools become callable from your next step onward and stay loaded for the whole chat - loading a tool that is already loaded is a no-op that changes nothing, so never load the same tool twice. Load only what the task needs, then use it.",
+    description: "Load additional tools into this chat session by their exact names from the deferred tools list in your instructions. Names are exact: a name that differs only in case or separators loads nothing, and the reply names the exact name it should have been when exactly one tool matches it folded that way; a name with no match is not a tool in this chat. Loaded tools become callable from your next step onward and stay loaded for the whole chat - loading a tool that is already loaded is a no-op that changes nothing, so never load the same tool twice. Load only what the task needs, then use it.",
     parameters: { type: "object", properties: { names: { type: "array", items: { type: "string" } } }, required: ["names"], additionalProperties: false },
   },
 };
@@ -257,13 +257,61 @@ export function loaderLoopFallbackAnswer(executed: string[]): string {
  *  whose every valid name is already loaded for this chat is a no-op -
  *  it spends no budget, executes nothing, and says plainly that the
  *  tools are already there to be called. */
-export function alreadyLoadedAck(already: string[], unknown: string[]): Record<string, unknown> {
+export function alreadyLoadedAck(already: string[], unknown: string[], validNames?: Iterable<string>): Record<string, unknown> {
+  const corrections = validNames ? loaderNameCorrections(unknown, validNames) : {};
+  const unknownNote = loaderUnknownNote(unknown, corrections);
   return {
     status: "already-loaded",
     alreadyAvailable: already,
     unknown,
-    note: "These tools are already loaded for this chat and stay loaded - loading them again does nothing. Call the tool itself on your next step.",
+    ...(Object.keys(corrections).length ? { corrections } : {}),
+    note: "These tools are already loaded for this chat and stay loaded - loading them again does nothing. Call the tool itself on your next step." + (unknownNote ? " " + unknownNote : ""),
   };
+}
+
+function foldLoaderName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for what an unknown loader name should
+ *  have been: sam_load_tools takes tool names the model
+ *  types, and both chat loops (own-tools and connector)
+ *  plus the repeat-load acknowledgement report the names
+ *  that are not tools in the chat. Those reports carried
+ *  the bare names with no correction, so a folded name
+ *  ("Sam-Memory-Search", "SAM_MEMORY_SEARCH",
+ *  "sam memory search") loaded nothing and taught
+ *  nothing - the model guessed again, which is the seam
+ *  the loader-loop guard watches trip. When exactly one
+ *  valid tool name matches the unknown name folded for
+ *  case and separators, the correction names it; a name
+ *  with no fold match gets no entry here and is reported
+ *  by loaderUnknownNote as not a tool in this chat -
+ *  never an invented name. */
+export function loaderNameCorrections(unknown: string[], validNames: Iterable<string>): Record<string, string> {
+  const valid = [...validNames];
+  const out: Record<string, string> = {};
+  for (const name of unknown) {
+    const target = foldLoaderName(name);
+    if (!target) continue;
+    const matches = valid.filter(v => foldLoaderName(v) === target);
+    if (matches.length === 1) out[name] = matches[0];
+  }
+  return out;
+}
+
+/** The sentence a loader reply carries for its unknown
+ *  names: each name is either corrected (loaderName
+ *  Corrections found exactly one fold match) or named as
+ *  not a tool in this chat, and the rule is stated once -
+ *  tool names are exact, from the deferred tools list.
+ *  Null when there are no unknown names. */
+export function loaderUnknownNote(unknown: string[], corrections: Record<string, string>): string | null {
+  if (!unknown.length) return null;
+  const parts = unknown.map(n => corrections[n]
+    ? "\"" + n + "\" is not a tool name - did you mean \"" + corrections[n] + "\"? Load it by its exact name."
+    : "\"" + n + "\" is not a tool in this chat.");
+  return parts.join(" ") + " Tool names are exact: use the names from the deferred tools list in your instructions.";
 }
 
 /** Preparation-loop guard (Defect 1 generalization, 2026-11-14): the

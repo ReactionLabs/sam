@@ -7,7 +7,7 @@ import { proposeAction, knownProfileNames, settleAutoApprovals } from "./actions
 import { queueBackgroundTask } from "./background.js";
 import { queueCodingTask } from "./coding.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, orchestrationContinuedHireLedgerSummary, orchestrationContinuedTeamLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderNameCorrections, loaderUnknownNote, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import { recordActivity, readActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
 import { REASONING_BLOCKED_REPLY, answerDirectlyNote, isReasoningNarration, reasoningBlockedLedgerSummary, reasoningNarrationSignals } from "./reply-guard.js";
@@ -1113,7 +1113,7 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
     const validNames=new Set(allDefs.map(toolNameOf));
     const loadedNowSet=currentLoaded();
     const fresh=wantNames.filter(n=>validNames.has(n)&&!loadedNowSet.has(n));
-    if(!fresh.length){const again=wantNames.filter(n=>validNames.has(n));for(const n of again){ephemeralLoaded.delete(n);ephemeralLoaded.add(n);}if(chatId&&again.length)touchToolLoads(root,chatId,again);outputs.set(call.id,alreadyLoadedAck(again,wantNames.filter(n=>!validNames.has(n))));continue;}
+    if(!fresh.length){const again=wantNames.filter(n=>validNames.has(n));for(const n of again){ephemeralLoaded.delete(n);ephemeralLoaded.add(n);}if(chatId&&again.length)touchToolLoads(root,chatId,again);outputs.set(call.id,alreadyLoadedAck(again,wantNames.filter(n=>!validNames.has(n)),validNames));continue;}
    }
    if(callsUsed>=effCalls){if(ceilingMode){guardrailed=true;guardrailReason="calls";outputs.set(call.id,guardrailStubContent(executed,ceiling as ToolBudget));}else{exhausted=true;outputs.set(call.id,budgetStubContent(executed,budget.maxCalls));}skipped.push(call.name);continue;}
    // A deferred tool called before loading is stubbed, not executed, and
@@ -1142,7 +1142,8 @@ async function ownToolsChatLoop(root:string,actor:string,provider:OpenAICompatib
     let loadedNow:string[]=[];const unknown:string[]=[];
     if(chatId){const r=recordToolLoad(root,chatId,names,valid);loadedNow=r.loaded;unknown.push(...r.unknown);}
     else for(const n of names){if(!valid.has(n))unknown.push(n);else if(!ephemeralLoaded.has(n)){ephemeralLoaded.add(n);loadedNow.push(n);}}
-    outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
+    const corrections=loaderNameCorrections(unknown,valid);const unknownNote=loaderUnknownNote(unknown,corrections);
+    outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,...(Object.keys(corrections).length?{corrections}:{}),note:"Loaded tools are callable from your next step onward and stay loaded for this chat."+(unknownNote?" "+unknownNote:"")});
    }else{
     sigById.set(call.id,failureSignature(call.name,call.args));
     pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,actor,call.name,call.args??{},runTurn,chatId,userMessageId);}catch(e){return {error:toolFailureError(e)};}}});

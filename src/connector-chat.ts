@@ -2,7 +2,7 @@ import { connectors, connectorCredentialPresent, testConnector, readConnectorToo
 import { OpenAICompatibleProvider } from "./openai-compatible.js";
 import { ownToolsFor, executeOwnToolAsync, skillCatalogForPrompt, toolFailureError } from "./own-tools.js";
 import { toolBudget, budgetStubContent, budgetLedgerSummary, budgetFallbackAnswer, trimHistoryForRetry, turnRetrySummary, guardrailStubContent, guardrailLedgerSummary, guardrailFallbackAnswer, budgetContinuedSummary, steerLedgerSummary, stopMidTurnLedgerSummary, largeTurnSummary, repeatLedgerSummary, LARGE_TURN_CALLS, type SteerProvider, type ToolBudget, type TurnEndReason } from "./budgets.js";
-import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
+import { LOADER_TOOL_DEF, LOADER_TOOL_NAME, LOADER_LOOP_LIMIT, PREPARATION_CALLS, alreadyLoadedAck, deferredCatalogLine, isPreparationOnlyRound, loadedTools, loaderDisabledStubContent, loaderNameCorrections, loaderUnknownNote, loaderLoopFallbackAnswer, loaderLoopNudge, notLoadedStubContent, partitionTools, prepLoopLedgerSummary, prepLoopSteer, recordToolLoad, steerSystemNote, stopFallbackAnswer, stopSystemNote, toolNameOf, REQUEST_MESSAGE_CAP, historyTrimLedgerSummary, trimRoundBlocks, touchToolLoads } from "./tool-tiers.js";
 import type { SpawnPoolContext } from "./subagents.js";
 import { recordActivity } from "./activity.js";
 import { TurnInvalidatedError, closeReadsAsToolLedger, deadlineCloseNote, ownerAskForClose, turnDeadlineFallbackAnswer, turnDeadlineLedgerSummary, type TurnControl } from "./turn-control.js";
@@ -248,7 +248,7 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
     const validNames=new Set(allDefs.map(toolNameOf));
     const loadedNowSet=currentLoaded();
     const fresh=wantNames.filter(n=>validNames.has(n)&&!loadedNowSet.has(n));
-    if(!fresh.length){const again=wantNames.filter(n=>validNames.has(n));for(const n of again){ephemeralLoaded.delete(n);ephemeralLoaded.add(n);}if(sessionChatId&&again.length)touchToolLoads(root,sessionChatId,again);outputs.set(call.id,alreadyLoadedAck(again,wantNames.filter(n=>!validNames.has(n))));continue;}
+    if(!fresh.length){const again=wantNames.filter(n=>validNames.has(n));for(const n of again){ephemeralLoaded.delete(n);ephemeralLoaded.add(n);}if(sessionChatId&&again.length)touchToolLoads(root,sessionChatId,again);outputs.set(call.id,alreadyLoadedAck(again,wantNames.filter(n=>!validNames.has(n)),validNames));continue;}
    }
    if(callsUsed>=effCalls){if(ceilingMode){guardrailed=true;guardrailReason="calls";outputs.set(call.id,guardrailStubContent(executed,ceiling as ToolBudget));}else{exhausted=true;outputs.set(call.id,budgetStubContent(executed,budget.maxCalls));}skipped.push(call.name);continue;}
    // A deferred tool called before loading is stubbed, not executed, and
@@ -274,7 +274,8 @@ async function connectorChatLoop(root:string,provider:OpenAICompatibleProvider,m
     let loadedNow:string[]=[];const unknown:string[]=[];
     if(sessionChatId){const r=recordToolLoad(root,sessionChatId,names,valid);loadedNow=r.loaded;unknown.push(...r.unknown);}
     else for(const n of names){if(!valid.has(n))unknown.push(n);else if(!ephemeralLoaded.has(n)){ephemeralLoaded.add(n);loadedNow.push(n);}}
-    outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,note:"Loaded tools are callable from your next step onward and stay loaded for this chat."});
+    const corrections=loaderNameCorrections(unknown,valid);const unknownNote=loaderUnknownNote(unknown,corrections);
+    outputs.set(call.id,{status:"loaded",loaded:loadedNow,alreadyAvailable:names.filter(n=>valid.has(n)&&!loadedNow.includes(n)&&!unknown.includes(n)),unknown,...(Object.keys(corrections).length?{corrections}:{}),note:"Loaded tools are callable from your next step onward and stay loaded for this chat."+(unknownNote?" "+unknownNote:"")});
    }else if(own&&call.name.startsWith("sam_")){
     sigById.set(call.id,failureSignature(call.name,call.args));
     pending.push({id:call.id,run:async()=>{try{return await executeOwnToolAsync(root,own.actor,call.name,call.args??{},own.runTurn,own.chatId,own.userMessageId);}catch(e){return {error:toolFailureError(e)};}}});
