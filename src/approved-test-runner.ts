@@ -6,7 +6,36 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdir
 import { join, resolve } from "node:path";
 import { errorReason } from "./error-reason.js";
 
-export type TestKind="build"|"test";
+export const testKinds = ["build","test"] as const;
+export type TestKind = typeof testKinds[number];
+export function foldTestKindName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why an approved-run door cannot name
+ *  this run kind: the kind is a registry name (testKinds)
+ *  a person types at the CLI `run request --kind` door,
+ *  and the ONE seam every request rides, requestTestRun,
+ *  refused it with the bare "Only build and test are
+ *  allowed" - echoing no value and offering no fold
+ *  correction, so a folded name ("Build", "bu-ild")
+ *  dead-ended. An exact kind reads no blocker. Anything
+ *  else is refused with the value echoed, the kinds named
+ *  as the registry, and, when exactly one kind matches
+ *  the bad value folded for case and separators, that
+ *  correction. The "Only build and test are allowed"
+ *  prefix is kept: its readers match it. requestTestRun
+ *  throws this text before anything is opened. The
+ *  stored-request reader in executeApprovedTestRun stays
+ *  permissive by design - a stored request's kind is
+ *  validated against its digest exactly as before. Null
+ *  means the kind can be named. */
+export function testKindBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (testKinds as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldTestKindName(value) : "";
+  const matches = target ? testKinds.filter(c => foldTestKindName(c) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Only build and test are allowed: \"" + String(value) + "\". Run kinds: " + testKinds.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 type Request={version:1;id:string;kind:TestKind;workspace:string;digest:string;createdAt:number};
 const sha=(s:string)=>createHash("sha256").update(s).digest("hex");
 const validId=(id:string)=>/^[0-9a-f]{8}-[0-9a-f-]{27}$/.test(id);
@@ -144,10 +173,11 @@ export function recentExecutionAuditLogs(root:string):string[]{
   return raw.slice(-16000).split("\n").filter(Boolean).slice(-20).map(line=>line.slice(0,800));
 }
 export function requestTestRun(root:string,kind:string){
-  if(kind!=="build" && kind!=="test")throw new Error("Only build and test are allowed");
+  const kindBlocker=testKindBlocker(kind); if(kindBlocker)throw new Error(kindBlocker);
+  const cleanKind=kind as TestKind;
   const {resolved,sam}=safeRoot(root);
-  const id=randomUUID(),digest=actionDigest(kind,resolved);
-  const request:Request={version:1,id,kind,workspace:resolved,digest,createdAt:Date.now()};
+  const id=randomUUID(),digest=actionDigest(cleanKind,resolved);
+  const request:Request={version:1,id,kind:cleanKind,workspace:resolved,digest,createdAt:Date.now()};
   const fd=openSync(requestPath(sam,id),"wx",0o600);
   try{writeFileSync(fd,JSON.stringify(request));}finally{closeSync(fd);}
   audit(resolved,{event:"requested",id,kind,digest});

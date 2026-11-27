@@ -250,7 +250,7 @@ edits.command("apply").requiredOption("--id <uuid>","Proposal ID")
   .requiredOption("--confirm <sha256>","Exact digest printed by edit propose")
   .action((options:{id:string;confirm:string})=>output(applyEdit(program.opts().workspace,options.id,options.confirm)));
 const testRuns=program.command("run").description("Explicitly approved local build/test only; executes trusted project code without OS sandbox");
-testRuns.command("request").requiredOption("--kind <build-or-test>","build or test")
+testRuns.command("request").requiredOption("--kind <build-or-test>","build or test").description("Request one approved build or test run; the kind must be a registered run kind (build or test - a folded kind refuses before anything is created, naming the kinds with the fold correction)")
   .action((options:{kind:string})=>output(requestTestRun(program.opts().workspace,options.kind)));
 testRuns.command("execute").requiredOption("--id <uuid>","Run request ID")
   .requiredOption("--confirm <sha256>","Exact digest from run request")
