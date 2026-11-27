@@ -7,7 +7,9 @@ import { normalizeMessageSource, type StoredMessageSource } from "./message-prov
 import { recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
-export interface TeamEvent { id:string; chat_id:string; agent:string; kind:"message"|"tool"|"result"|"assignment"; content:string; created_at:string }
+export const teamEventKinds = ["message", "tool", "result", "assignment"] as const;
+export type TeamEventKind = (typeof teamEventKinds)[number];
+export interface TeamEvent { id:string; chat_id:string; agent:string; kind:TeamEventKind; content:string; created_at:string }
 export interface ChatRecord { id:string; title:string; created_at:string; updated_at:string; parent_chat_id?:string|null; pinned?:number; agent_name?:string|null; visitor?:number; archived?:number }
 export interface AgentProfile { id:string; name:string; instructions:string; created_at:string; model:string|null; connector_id:string|null; provider:string|null }
 export interface ChatMessage { id:string; chat_id:string; role:"user"|"assistant"; content:string; created_at:string; reaction:string|null; partial:number; source:StoredMessageSource }
@@ -98,7 +100,7 @@ export function isChatStoreLedgered(error: unknown): boolean {
     && (error as { chatStoreLedgered?: boolean }).chatStoreLedgered === true;
 }
 
-const CHAT_STORE_VALIDATION = [/^Chat title must be 1 to 120 characters$/, /^Invalid agent profile$/, /^Invalid branch title$/, /^Parent chat not found$/, /^Agent limit reached$/, /^Invalid pin state$/, /^Invalid archive state$/, /^Chat not found$/, /^Invalid chat message$/, /^Invalid reaction:/, /^Invalid compaction$/, /^Invalid team event$/];
+const CHAT_STORE_VALIDATION = [/^Chat title must be 1 to 120 characters$/, /^Invalid agent profile$/, /^Invalid branch title$/, /^Parent chat not found$/, /^Agent limit reached$/, /^Invalid pin state$/, /^Invalid archive state$/, /^Chat not found$/, /^Invalid chat message$/, /^Invalid reaction:/, /^Invalid compaction$/, /^Invalid team event/];
 
 function isChatStoreValidation(error: unknown): boolean {
   return error instanceof Error && CHAT_STORE_VALIDATION.some(re => re.test(error.message));
@@ -410,7 +412,9 @@ export class ChatStore {
   }
   addEvent(id:string,agent:string,kind:TeamEvent["kind"],content:string):TeamEvent{
     return this.touch("write", () => {
-      if(!/^[a-z][a-z0-9._-]{0,63}$/.test(agent)||!["message","tool","result","assignment"].includes(kind)||!content.trim()||content.length>12000)throw new Error("Invalid team event");
+      const kindBlocker = teamEventKindBlocker(kind);
+      if (kindBlocker) throw new Error(kindBlocker);
+      if(!/^[a-z][a-z0-9._-]{0,63}$/.test(agent)||!content.trim()||content.length>12000)throw new Error("Invalid team event");
       const item:TeamEvent={id:randomUUID(),chat_id:id,agent,kind,content,created_at:new Date().toISOString()};
       this.db.transaction(()=>{
         if(!this.db.prepare("SELECT 1 FROM chats WHERE id=?").get(id))throw new Error("Chat not found");
@@ -449,6 +453,41 @@ export function chatProfileBlocker(root: string, profile: string): string | null
   const matches = target ? names.filter(n => normalizeChatProfileName(n) === target) : [];
   const fix = matches.length === 1 ? matches[0] : null;
   return "Unknown profile \"" + profile + "\" in chat detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
+function foldTeamEventKindName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a team event cannot be recorded
+ *  under this kind: the name is not one of the four kinds in
+ *  the teamEventKinds registry, so the event would sit in a
+ *  chat's thread under a kind no reader renders or counts
+ *  as itself. ChatStore.addEvent is the ONE seam every kind
+ *  rides (the CLI `chats event --kind` door casts the
+ *  person's raw kind straight into it; the team runtime and
+ *  orchestration writers name theirs there too, by
+ *  construction exact), and it refused an unknown kind with
+ *  the bare "Invalid team event" - the same text that also
+ *  covers a bad agent shape and bad content, so the bad
+ *  value was never echoed, none of the kinds named, and no
+ *  fold correction offered. addEvent now throws this source
+ *  before the remaining validation (which keeps the bare
+ *  text), and the CLI door throws it before opening the
+ *  store. The "Invalid team event" prefix is kept: the chat
+ *  store's validation classification matches it, so a bad
+ *  kind stays a validation error and never ledgers as a
+ *  store failure. When exactly one kind matches the bad
+ *  name folded for case and separators, the refusal names
+ *  it ("Assign-ment" -> "assignment"). Null means the kind
+ *  can be named. Stored event kinds stay permissive by
+ *  design: read back as stored, the events reader never
+ *  re-validates them. */
+export function teamEventKindBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (teamEventKinds as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldTeamEventKindName(value) : "";
+  const matches = target ? teamEventKinds.filter(k => foldTeamEventKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid team event kind \"" + String(value) + "\". Kinds: " + teamEventKinds.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
 
 /** The ONE source for why a chat event cannot be recorded
