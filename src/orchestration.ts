@@ -47,6 +47,7 @@ export const ORCH_MAX_LANE_ATTEMPTS = 2;
 const ORCH_CONCURRENCY = 2;
 
 export type LaneKind = "research" | "build" | "verify" | "coordinate" | "general";
+export const LANE_KINDS: readonly LaneKind[] = ["research", "build", "verify", "coordinate", "general"];
 export type LaneStatus = "planned" | "assigned" | "working" | "verifying" | "done" | "failed" | "replaced";
 export type LaneVerdict = "verified" | "unverified" | "rejected";
 export type JobStatus = "planned" | "running" | "done" | "partial" | "blocked";
@@ -381,13 +382,47 @@ export function laneBudget(spec: LaneSpec): { rounds: number; maxCalls: number }
   return { rounds: b.rounds, maxCalls: b.maxCalls };
 }
 
+function foldLaneKindName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why a lane kind name cannot be used:
+ *  the name is not one of the kinds in this module's
+ *  LANE_KINDS registry, so a lane bound to it has no budget,
+ *  no role, and no hand - it cannot be planned. An exact
+ *  kind reads no blocker. Anything else is refused with the
+ *  lane named, the five kinds named as the registry, and,
+ *  when exactly one kind matches the bad name folded for
+ *  case and separators ("Research" -> "research";
+ *  "co-ordinate", "co_ordinate" -> "coordinate"), that kind
+ *  named as the correction. validateSpec throws this text -
+ *  the seam every orchestration route rides (planJob's walk
+ *  for the CLI `orchestrate plan` / `orchestrate run` doors
+ *  and the sam_orchestrate chat tool, and openWorkerLane for
+ *  a coordinator's mid-job hire) - so every door refuses in
+ *  the ONE source's words before any job or lane is created.
+ *  The "has an unknown kind" shape is kept: it is the shape
+ *  the refusal has always carried. Stored-kind readers stay
+ *  permissive by design - a stored lane record's kind is
+ *  read back as stored, so a kind removed after a lane names
+ *  it leaves the record readable. */
+export function laneKindBlocker(kind: unknown, name?: unknown): string | null {
+  if (typeof kind === "string" && (LANE_KINDS as readonly string[]).includes(kind)) return null;
+  const target = typeof kind === "string" ? foldLaneKindName(kind) : "";
+  const matches = target ? LANE_KINDS.filter(k => foldLaneKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  const lane = typeof name === "string" && name.trim() ? name.trim() : "?";
+  return "Lane " + lane + " has an unknown kind \"" + String(kind) + "\". Kinds: " + LANE_KINDS.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 function validateSpec(spec: LaneSpec, profileTools: string[]): void {
   if (!spec.name?.trim() || !/^[a-z][a-z0-9-]{0,40}$/.test(spec.name.trim())) throw new Error("Lane needs a simple name (lowercase, dashes): " + (spec.name ?? ""));
   laneBudget(spec);
   for (const field of ["goal", "doneLooksLike", "notDoneLooksLike", "landsAt"] as const) {
     if (!spec[field]?.trim()) throw new Error("Lane " + spec.name + " is missing its done-shape: " + field + " is required (end goal / what done looks like / what done does not look like / where it lands)");
   }
-  if (!["research", "build", "verify", "coordinate", "general"].includes(spec.kind)) throw new Error("Lane " + spec.name + " has an unknown kind: " + spec.kind);
+  const kindBlocker = laneKindBlocker(spec.kind, spec.name);
+  if (kindBlocker) throw new Error(kindBlocker);
   laneTools(spec.kind, spec.tools, profileTools);
 }
 
