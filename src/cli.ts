@@ -135,7 +135,7 @@ import { correctionFailedHistoryScorecardText, correctionProfileBlocker, correct
 import { providerRetryScorecardText } from "./provider-retry.js";
 import { doorFailedHistoryScorecardText, listDoors } from "./mini-door.js";
 import { doorHistoryScorecardText, runRedTeamPack, screenDoorMessage } from "./door-guard.js";
-import { missionStatuses, type MissionStatus } from "./kernel.js";
+import { missionStatusBlocker, type MissionStatus } from "./kernel.js";
 import { modelRoutingTable } from "./model-routing.js";
 import { connectors, connectorFailedHistoryScorecardText, connectorPinBlocker, connectorPinId } from "./connectors.js";
 import { dashboardConfigFailedHistoryScorecardText } from "./dashboard-config.js";
@@ -905,8 +905,8 @@ mission.command("inspect").argument("<code>").action((code:string)=>{
     output({mission:m,events:db.events(m.id)});
   }finally{db.close();}
 });
-mission.command("transition").argument("<code>").argument("<status>").description("Development-only manual state transition").action((code:string,status:string)=>{
-  if(!missionStatuses.includes(status as MissionStatus))throw new Error("Invalid status: "+status);
+mission.command("transition").argument("<code>").argument("<status>").description("Development-only manual state transition; the status must name a mission status exactly (an unknown or folded name refuses before anything is touched, naming the statuses with a fold correction when exactly one matches)").action((code:string,status:string)=>{
+  const statusBlocker=missionStatusBlocker(status);if(statusBlocker)throw new Error(statusBlocker);
   const db=store();try{output(db.transition(code,status as MissionStatus));}finally{db.close();}
 });
 const task=program.command("task").description("Plan and inspect mission tasks (execution requires a worker runtime)");

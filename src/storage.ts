@@ -3,7 +3,7 @@ import { openDatabase } from "./sqlite.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { canTransition, missionStatuses, type MissionStatus } from "./kernel.js";
+import { canTransition, missionStatusBlocker, type MissionStatus } from "./kernel.js";
 
 export interface Mission { id:string; code:string; objective:string; status:MissionStatus; created_at:string; updated_at:string }
 export interface MissionEvent { id:number; mission_id:string; sequence:number; type:string; payload:string; created_at:string }
@@ -44,7 +44,7 @@ export class MissionStore {
   get(code:string):Mission|undefined { return this.db.prepare("SELECT * FROM missions WHERE code=? OR id=?").get(code,code) as Mission|undefined; }
   events(id:string):MissionEvent[] { return this.db.prepare("SELECT * FROM mission_events WHERE mission_id=? ORDER BY sequence").all(id) as MissionEvent[]; }
   transition(code:string,to:MissionStatus):Mission {
-    if(!missionStatuses.includes(to)) throw new Error("Unknown status: "+to);
+    const statusBlocker=missionStatusBlocker(to); if(statusBlocker) throw new Error(statusBlocker);
     return this.db.transaction(()=>{
       const mission=this.get(code);
       if(!mission) throw new Error("Mission not found: "+code);
