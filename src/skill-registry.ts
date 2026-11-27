@@ -248,6 +248,44 @@ export function updateInstalledSkill(root: string, name: string, patch: Partial<
 interface TreeEntry { path: string; type: string; mode?: string; size?: number }
 interface Candidate { dir: string; skillMdPath: string; name: string; markdown: string }
 
+export function normalizeSkillRefName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source carrying the skill-ref refusal
+ *  (refusal-class sweep, 2026-11-27): every door that picks
+ *  a skill out of a repo - `skills install owner/repo@skill`
+ *  on the CLI, the approval-gate skill path, and
+ *  scanSkillRef, all riding fetchSkillCandidates - improvised
+ *  the bare "Skill not found in owner/repo: X" after the full
+ *  download, naming NONE of the candidates the repo actually
+ *  holds and offering NO fold correction, so a folded name
+ *  ("My-Skill", "my_skill", a folded directory name)
+ *  dead-ended at the door that picks which skill SAM
+ *  installs. skillRefBlocker carries the refusal (value
+ *  echoed, the source named, the repo's candidate names
+ *  named as the registry, keeping the "Skill not found in"
+ *  prefix, fold correction when exactly one candidate
+ *  matches folded for case and separators on its name OR
+ *  its directory basename - the selection's own two keys);
+ *  fetchSkillCandidates throws it before any file is
+ *  fetched for install or any candidate is scanned. The
+ *  registry is dynamic per repo (the candidates just
+ *  fetched), so the exactly-one-match rule is what keeps a
+ *  correction unambiguous. A ref with no skill part, and a
+ *  skill part naming a candidate exactly by name or by
+ *  directory basename, read no blocker. Null means the
+ *  pick works. */
+export function skillRefBlocker(source: string, skill: string | undefined, candidates: readonly Pick<Candidate, "name" | "dir">[]): string | null {
+  if (!skill) return null;
+  const dirBase = (c: Pick<Candidate, "name" | "dir">) => c.dir ? c.dir.split("/").pop() ?? "" : "";
+  if (candidates.some(c => c.name === skill || dirBase(c) === skill)) return null;
+  const target = normalizeSkillRefName(skill);
+  const matches = target ? candidates.filter(c => normalizeSkillRefName(c.name) === target || normalizeSkillRefName(dirBase(c)) === target) : [];
+  const fix = matches.length === 1 ? matches[0]! : null;
+  const known = candidates.map(c => c.name);
+  return "Skill not found in " + source + ": \"" + skill + "\". Skills in " + source + ": " + (known.length ? known.join(", ") : "none found") + (fix ? ". Did you mean \"" + fix.name + "\"?" : "");
+}
+
 interface FetchedSkills { source: string; owner: string; repo: string; entries: TreeEntry[]; selected: Candidate[] }
 
 // Fetch and select the install candidates for a ref WITHOUT writing
@@ -270,8 +308,9 @@ async function fetchSkillCandidates(ref: string): Promise<FetchedSkills> {
     candidates.push({ dir: path === "SKILL.md" ? "" : path.slice(0, -"/SKILL.md".length), skillMdPath: path, name: meta.name, markdown });
   }
   if (!candidates.length) throw new Error("No valid SKILL.md found in " + source);
+  const refBlocker = skillRefBlocker(source, skill, candidates);
+  if (refBlocker) throw new Error(refBlocker);
   const selected = skill ? candidates.filter(c => c.name === skill || (c.dir && c.dir.split("/").pop() === skill)) : candidates;
-  if (skill && !selected.length) throw new Error("Skill not found in " + source + ": " + skill);
   return { source, owner, repo, entries, selected };
 }
 
