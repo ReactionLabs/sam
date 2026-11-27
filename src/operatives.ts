@@ -5,7 +5,38 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
 /** Operatives are capability declarations, never credentials or executable commands. */
-export type OperativeState = "available" | "paused" | "offline";
+export const operativeStates = ["available", "paused", "offline"] as const;
+export type OperativeState = typeof operativeStates[number];
+export function foldOperativeStateName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why an operative door cannot name
+ *  this state: the state is a registry name
+ *  (operativeStates) a person types at the CLI
+ *  `operative state` door, and the ONE seam every state
+ *  change rides, OperativeRegistry.setState, refused it
+ *  with the bare "Invalid operative state" - echoing no
+ *  value, naming none of the three states, and offering
+ *  no fold correction, so a folded name ("Available",
+ *  "off-line", "off_line") dead-ended. An exact state
+ *  reads no blocker. Anything else is refused with the
+ *  value echoed, the states named as the registry, and,
+ *  when exactly one state matches the bad value folded
+ *  for case and separators, that correction. The
+ *  "Invalid operative state" prefix is kept: its
+ *  readers match it. Both doors throw this text before
+ *  any operative is touched. Stored-state readers stay
+ *  permissive by design - a stored operative's state is
+ *  read back as stored, and the SQL CHECK constraint
+ *  mirrors the registry and is untouched. Null means
+ *  the state can be named. */
+export function operativeStateBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (operativeStates as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldOperativeStateName(value) : "";
+  const matches = target ? operativeStates.filter(s => foldOperativeStateName(s) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid operative state \"" + String(value) + "\". States: " + operativeStates.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export interface Operative {
   id:string; name:string; adapter:string; capabilities:string[];
   state:OperativeState; max_concurrency:number; active_assignments:number;
@@ -59,7 +90,7 @@ export class OperativeRegistry {
     return (this.db.prepare("SELECT * FROM operatives ORDER BY name").all() as Row[]).map(decode);
   }
   setState(id:string,state:OperativeState):boolean {
-    if(!["available","paused","offline"].includes(state))throw new Error("Invalid operative state");
+    const stateBlocker=operativeStateBlocker(state);if(stateBlocker)throw new Error(stateBlocker);
     return this.db.prepare("UPDATE operatives SET state=?,last_seen_at=? WHERE id=?")
       .run(state,state==="available"?new Date().toISOString():null,id).changes===1;
   }

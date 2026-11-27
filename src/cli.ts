@@ -81,7 +81,7 @@ import { recallFailedHistoryScorecardText } from "./recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
 import { ApprovalStore, riskClassBlocker, type RiskClass } from "./approvals.js";
-import { OperativeRegistry, type OperativeState } from "./operatives.js";
+import { OperativeRegistry, operativeStateBlocker, type OperativeState } from "./operatives.js";
 import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentProfileBlocker, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
 import { getJob, listJobs, listLanes, orchestrate, orchestrationFailedHistoryScorecardText, orchestrationProfileBlocker, orchestrationScorecardText, planJob, remainingPool } from "./orchestration.js";
@@ -1123,7 +1123,8 @@ operative.command("status").description("Each operative with its liveness (fresh
   const reg=new OperativeRegistry(dbPath());
   try{output(reg.list().map(o=>({...o,liveness:operativeLiveness(o)})));}finally{reg.close();}
 });
-operative.command("state").argument("<id>").argument("<state>").action((id:string,state:string)=>{
+operative.command("state").argument("<id>").argument("<state>").description("Set an operative's state; the state must name an operative state exactly (available, paused, or offline - an unknown or folded name refuses before anything is touched, naming the states with a fold correction when exactly one matches)").action((id:string,state:string)=>{
+  const stateBlocker=operativeStateBlocker(state);if(stateBlocker)throw new Error(stateBlocker);
   const reg=new OperativeRegistry(dbPath()); try{output({updated:reg.setState(id,state as OperativeState)});}finally{reg.close();}
 });
 operative.command("heartbeat").argument("<id>").action((id:string)=>{
