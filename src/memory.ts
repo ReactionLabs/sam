@@ -165,7 +165,7 @@ export function memoryStoreLedgerRoot(path: string): string | null {
   return basename(dir) === ".sam" ? dirname(dir) : null;
 }
 
-const MEMORY_STORE_VALIDATION = [/^Invalid memory kind/, /^Memory requires content and provenance$/, /^Memory exceeds size limit$/, /^Memory record exceeds the hot-memory budget/, /^Invalid memory scope$/, /^Invalid memory alias/, /^Invalid result limit$/];
+const MEMORY_STORE_VALIDATION = [/^Invalid memory kind/, /^Memory requires content and provenance$/, /^Memory exceeds size limit$/, /^Memory record exceeds the hot-memory budget/, /^Invalid memory scope/, /^Invalid memory alias/, /^Invalid result limit$/];
 
 function isMemoryStoreValidation(error: unknown): boolean {
   if (error instanceof MemorySuppressedError) return true;
@@ -183,6 +183,63 @@ function failMemoryStore(root: string | null, phase: MemoryStorePhase, error: un
 // Isolation is the default; sharing exists only where a link was made.
 export function isMemoryScope(value:string):boolean{
   return value==="core"||/^profile:[a-z][a-z0-9._-]{0,63}$/.test(value)||/^link:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+/** The three scope forms, named as the registry every
+ *  scope refusal reads: the core scope, one profile's
+ *  private scope, and one link group's shared scope. */
+export const memoryScopeForms = ["core", "profile:<name>", "link:<id>"] as const;
+/** The folded form of a scope a person or a model typed,
+ *  when it resolves to exactly one valid scope, or null
+ *  when it does not: "core" in any case is the core scope;
+ *  a profile form whose separator or name is folded
+ *  (case, spaces, underscores) folds to the lower-case
+ *  profile scope; a link form folds the same way around
+ *  its id. A folded name that is not a valid profile name
+ *  or a folded id that is not a link id resolves to
+ *  nothing - the correction never invents a scope. */
+export function foldedMemoryScope(value: string): string | null {
+  const trimmed = value.trim();
+  if (trimmed.toLowerCase() === "core") return "core";
+  const profile = /^profile[:\s._-]+(.+)$/i.exec(trimmed);
+  if (profile) {
+    const name = profile[1].trim().toLowerCase().replace(/[\s_]+/g, "-");
+    const candidate = "profile:" + name;
+    return isMemoryScope(candidate) ? candidate : null;
+  }
+  const link = /^link[:\s._-]+([0-9a-f-]{36})$/i.exec(trimmed);
+  if (link) {
+    const candidate = "link:" + link[1].toLowerCase();
+    return isMemoryScope(candidate) ? candidate : null;
+  }
+  return null;
+}
+/** The ONE source for why a memory write cannot land
+ *  under this scope: the scope is none of the three forms
+ *  in memoryScopeForms, so the write would land in a scope
+ *  no reader will ever name - on the isolation boundary
+ *  the whole memory model stands on, a silently misfiled
+ *  record is worse than a refused one. MemoryStore.add is
+ *  the ONE seam every memory write rides (episode flush,
+ *  consolidation flush, saved notes, approved note
+ *  actions, the operator CLI memory door), and it refused
+ *  a bad scope with the bare "Invalid memory scope" -
+ *  echoing no value, naming none of the forms, and
+ *  offering no fold correction, so a folded scope ("Core",
+ *  "Profile:Second Shift", a folded link separator)
+ *  dead-ended even though the intended scope is
+ *  unambiguous. add now throws this source before any
+ *  write (the "Invalid memory scope" prefix is kept:
+ *  MEMORY_STORE_VALIDATION matches on it, now as a prefix
+ *  like the memory kind entry). When the folded value
+ *  resolves to exactly one valid scope, the refusal names
+ *  it. Null means the scope can be named. Stored scope
+ *  readers stay permissive by design: rows are read back
+ *  with the scope they were stored under and never
+ *  re-validated. */
+export function memoryScopeBlocker(value: unknown): string | null {
+  if (typeof value === "string" && isMemoryScope(value)) return null;
+  const fix = typeof value === "string" ? foldedMemoryScope(value) : null;
+  return "Invalid memory scope \"" + String(value) + "\". Scopes: " + memoryScopeForms.join(", ") + (fix && fix !== value ? ". Did you mean \"" + fix + "\"?" : "");
 }
 // The hot-memory budget (Program H, filed requirement 1): hot
 // memory is an INDEX, not an archive - what matters now, in
@@ -252,7 +309,7 @@ export class MemoryStore {
     const words=countWords(input.content);
     if(words>MEMORY_RECORD_MAX_WORDS)throw new Error("Memory record exceeds the hot-memory budget: "+words+" words against the "+MEMORY_RECORD_MAX_WORDS+"-word cap. Memory is an index, not an archive - store the full text as a file and note the pointer instead.");
     const scope=input.scope??"core";
-    if(!isMemoryScope(scope))throw new Error("Invalid memory scope");
+    const scopeBlocker=memoryScopeBlocker(scope); if(scopeBlocker)throw new Error(scopeBlocker);
     // The capture-guard backstop (Program H item A): a standing
     // do-not-store instruction binds at the store itself, so
     // every writer - episode flush, compaction flush, saved
