@@ -38,6 +38,31 @@ export function standingFileDef(name: string): StandingFileDef | null {
   return STANDING_FILES.find(f => f.name === name) ?? null;
 }
 
+function normalizeStandingFileName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+/** The ONE source carrying the standing-file NAME refusal text:
+ *  standingPath and writeStandingFile each improvised the same
+ *  "Unknown standing file" text inline - it echoed the value and
+ *  named the registry but offered NO fold correction, so a
+ *  folded name ("Persona", "PERSONA", "owner ") dead-ended at
+ *  the door that picks which standing file a profile's prompt
+ *  assembles. standingFileBlocker carries the refusal (value
+ *  echoed, the three standing files named as the registry, fold
+ *  correction when exactly one file name matches folded for
+ *  case and separators); both seams throw it before any path
+ *  is built or any file is read or written. The folded
+ *  registry has no collisions, so a correction is never
+ *  ambiguous. standingFileDef stays a permissive lookup for
+ *  internal callers that already hold a canonical name. */
+export function standingFileBlocker(name: unknown): string | null {
+  if (typeof name === "string" && standingFileDef(name)) return null;
+  const target = typeof name === "string" ? normalizeStandingFileName(name) : "";
+  const matches = target ? STANDING_FILES.filter(f => normalizeStandingFileName(f.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0]!.name : null;
+  return "Unknown standing file \"" + String(name) + "\". Standing files: " + STANDING_FILES.map(f => f.name).join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 // The profiles a standing file may belong to: the core "sam" plus every
 // registered agent - the same rule links.ts uses for membership.
 export function knownProfileNames(root: string): string[] {
@@ -88,7 +113,7 @@ function standingDir(root: string, profile: string): string {
 }
 function standingPath(root: string, profile: string, name: string): string {
   const def = standingFileDef(name);
-  if (!def) throw new Error("Unknown standing file \"" + name + "\". Standing files: " + STANDING_FILES.map(f => f.name).join(", "));
+  if (!def) throw new Error(standingFileBlocker(name)!);
   const dir = standingDir(root, profile);
   const path = join(dir, def.name + ".md");
   if (!resolve(path).startsWith(resolve(dir))) throw new Error("Invalid standing file path");
@@ -265,7 +290,7 @@ export function standingFileClearedLedgerSummary(name: string): string {
 export function writeStandingFile(root: string, profile: string, name: string, content: string): StandingFileEntry {
   assertKnownProfile(root, profile);
   const def = standingFileDef(name);
-  if (!def) throw new Error("Unknown standing file \"" + name + "\". Standing files: " + STANDING_FILES.map(f => f.name).join(", "));
+  if (!def) throw new Error(standingFileBlocker(name)!);
   const text = (content ?? "").trim();
   if (!text) throw new Error("Standing file content is empty; use clear to remove a standing file");
   if (text.length > STANDING_FILE_MAX_CHARS) throw new Error("Standing file is " + text.length + " chars; the cap is " + STANDING_FILE_MAX_CHARS);
