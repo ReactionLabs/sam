@@ -1401,7 +1401,73 @@ function readSandboxMarker(dir: string): SandboxMarker | null {
 
 export interface OwnedSandbox { name: string; dir: string; work: string; marker: SandboxMarker }
 
+export function normalizeSandboxName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The names of the sandboxes SAM created under this install,
+ *  read raw (directory entries carrying SAM's own marker) and
+ *  creating nothing: the registry the sandbox name gate reads.
+ *  listSandboxes rides requireOwnSandbox per entry, so the
+ *  gate cannot read the registry through it (recursion); this
+ *  scan is the same set listSandboxes reports. */
+function createdSandboxNames(root: string): string[] {
+  const base = join(resolve(root), ".sam", "sandboxes");
+  let entries;
+  try { entries = readdirSync(base, { withFileTypes: true }); } catch { return []; }
+  const out: string[] = [];
+  for (const entry of entries) {
+    if (entry.isSymbolicLink() || !entry.isDirectory() || !SANDBOX_NAME.test(entry.name)) continue;
+    const marker = readSandboxMarker(join(base, entry.name));
+    if (marker && marker.name === entry.name) out.push(entry.name);
+  }
+  out.sort((a, b) => a.localeCompare(b));
+  return out;
+}
+
+/** The ONE source carrying the sandbox name refusal
+ *  (refusal-class sweep, 2026-11-27): requireOwnSandbox, the
+ *  ONE seam every sandbox USE rides (CLI `code
+ *  sandbox-destroy` / `sandbox-write` / `sandbox-pip`,
+ *  `code python --sandbox`, and the sam_code sandbox actions
+ *  through runPython), improvised its naming refusals in two
+ *  pieces - sandboxPath's shape check died on the bare
+ *  "Invalid sandbox name" echoing no value, and a well-shaped
+ *  unknown name died on "No SAM sandbox named X" naming none
+ *  of the sandboxes SAM created and offering no fold
+ *  correction - so a folded name ("Work", "SoulFind",
+ *  "soul_find") dead-ended at the door that picks which
+ *  sandbox a script runs in or a package lands in.
+ *  sandboxNameBlocker carries the refusal (value echoed, the
+ *  created sandboxes named as the registry, fold correction
+ *  when exactly one created sandbox matches folded for case
+ *  and separators, keeping the "No SAM sandbox named"
+ *  prefix); requireOwnSandbox throws it before any path is
+ *  built, when no directory entry carries the name. A
+ *  directory entry that DOES carry the name falls through to
+ *  the standing safety refusals (symlink, not SAM-created),
+ *  which are about the directory, not the naming. The
+ *  registry is dynamic per install, so the exactly-one-match
+ *  rule is what keeps a correction unambiguous, and the
+ *  registry read creates nothing. sandboxPath stays the
+ *  creation seam (createSandbox's shape refusal is its own,
+ *  pinned by test; creation names no registry). Null means
+ *  the name is a created sandbox. */
+export function sandboxNameBlocker(root: string, value: unknown): string | null {
+  const known = createdSandboxNames(root);
+  if (typeof value === "string" && known.includes(value)) return null;
+  const target = typeof value === "string" ? normalizeSandboxName(value) : "";
+  const matches = target ? known.filter(n => normalizeSandboxName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0]! : null;
+  return "No SAM sandbox named \"" + String(value) + "\". Sandboxes: " + (known.length ? known.join(", ") : "none created") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function requireOwnSandbox(root: string, name: string): OwnedSandbox {
+  const entryExists = typeof name === "string" && SANDBOX_NAME.test(name) && existsSync(join(resolve(root), ".sam", "sandboxes", name));
+  if (!entryExists) {
+    const nameBlocker = sandboxNameBlocker(root, name);
+    if (nameBlocker) throw new Error(nameBlocker);
+  }
   const { base, dir } = sandboxPath(root, name);
   let st;
   try { st = lstatSync(dir); } catch { throw new Error("No SAM sandbox named " + name); }
