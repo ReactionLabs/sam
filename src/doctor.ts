@@ -52,7 +52,40 @@ export interface DoctorOptions {
   probeSocket?: (path: string) => Promise<"missing" | "open" | "refused" | "error">;
 }
 
-const ALLOWLIST_REASON = "not on the doctor fix allowlist (" + DOCTOR_FIX_ALLOWLIST.join(", ") + "). Doctor does not change credentials, stores, env files, or a live daemon.";
+function foldDoctorFixName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why a doctor fix request cannot name
+ *  this fix: the fix id is a registry name
+ *  (DOCTOR_FIX_ALLOWLIST) a person types at the CLI
+ *  `doctor run --fix [id]` door, and the ONE seam every fix
+ *  request rides, runDoctor, refused an off-allowlist id
+ *  with the shared ALLOWLIST_REASON text - it named the two
+ *  allowlisted fixes but echoed no value and offered no
+ *  fold correction, so a folded name ("Remove-Stale-Socket",
+ *  "remove_stale_socket", "Tighten Socket Permissions")
+ *  dead-ended. An exact allowlisted id reads no blocker.
+ *  Anything else is refused with the value echoed, the
+ *  allowlist named, the standing safety sentence kept
+ *  (doctor does not change credentials, stores, env files,
+ *  or a live daemon), and, when exactly one allowlisted fix
+ *  matches the bad value folded for case and separators,
+ *  that correction. The "not on the doctor fix allowlist"
+ *  wording is kept: its readers match it. runDoctor returns
+ *  this text as the same refused note it returns today -
+ *  doctor refusals are data in the report, never throws -
+ *  before any fix is applied. Stored check fixIds stay
+ *  permissive by design: a check may name a
+ *  non-allowlisted fix precisely so doctor can refuse it.
+ *  Null means the fix can be named. */
+export function doctorFixBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (DOCTOR_FIX_ALLOWLIST as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldDoctorFixName(value) : "";
+  const matches = target ? DOCTOR_FIX_ALLOWLIST.filter(f => foldDoctorFixName(f) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown doctor fix \"" + String(value) + "\": not on the doctor fix allowlist (" + DOCTOR_FIX_ALLOWLIST.join(", ") + "). Doctor does not change credentials, stores, env files, or a live daemon." + (fix ? " Did you mean \"" + fix + "\"?" : "");
+}
 
 function check(id: string, status: DoctorStatus, evidence: string, fix = "", fixId: string | null = null): DoctorCheck {
   return { id, status, evidence, fix, fixId };
@@ -336,8 +369,9 @@ export async function runDoctor(root: string, options: DoctorOptions = {}): Prom
   const requested = options.fix;
   const refused: DoctorFixNote[] = [];
   const applied: DoctorFixNote[] = [];
-  if (typeof requested === "string" && !(DOCTOR_FIX_ALLOWLIST as readonly string[]).includes(requested)) {
-    refused.push({ fixId: requested, detail: ALLOWLIST_REASON });
+  const requestedBlocker = typeof requested === "string" ? doctorFixBlocker(requested) : null;
+  if (requestedBlocker) {
+    refused.push({ fixId: requested as string, detail: requestedBlocker });
   } else if (requested === true || typeof requested === "string") {
     const before = await diagnose(root, env, options);
     const wanted = new Set<string>();

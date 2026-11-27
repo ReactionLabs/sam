@@ -1247,8 +1247,8 @@ mcp.command("authorize").argument("<tool>").description("Evaluate the deny-by-de
   });
 
 const doctorCmd=program.command("doctor").description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials");
-doctorCmd.command("run",{isDefault:true}).description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials")
-  .option("--fix [id]","Apply allowlisted fixes. Omit the id to apply every allowlisted fix for a current failure. An id off the allowlist is refused and nothing is changed.")
+doctorCmd.command("run",{isDefault:true}).description("Diagnose stores, the daemon socket, env, CLI/daemon version, and model reachability. --fix applies only an allowlist of reversible socket fixes and never touches credentials. A fix id is refused through doctorFixBlocker, its ONE source: the value echoed, the allowlist named, and a fold correction when exactly one allowlisted fix matches folded for case and separators")
+  .option("--fix [id]","Apply allowlisted fixes. Omit the id to apply every allowlisted fix for a current failure. An id off the allowlist is refused (naming the allowlist, with a fold correction when one matches) and nothing is changed.")
   .action(async(o:{fix?:true|string})=>{
     const report=await runDoctor(resolve(program.opts().workspace),{env:process.env,fix:o.fix===undefined?false:o.fix});
     output(report);
