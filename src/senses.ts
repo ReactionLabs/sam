@@ -70,9 +70,17 @@ export function sensesBinary(env: NodeJS.ProcessEnv = process.env, probe?: Binar
   return null;
 }
 
+/** The sense registry: the two senses the core profile has.
+ *  Every surface that names the senses reads this constant
+ *  (sensesStatus below, the refusal sources further down);
+ *  SenseName derives from it, so the type and the runtime
+ *  registry can never drift. */
+export const senseNames = ["mail", "agenda"] as const;
+export type SenseName = (typeof senseNames)[number];
+
 export function sensesStatus(env: NodeJS.ProcessEnv = process.env): { installed: boolean; binary: string | null; coreOnly: true; senses: string[] } {
   const binary = sensesBinary(env);
-  return { installed: binary !== null, binary, coreOnly: true, senses: ["mail", "agenda"] };
+  return { installed: binary !== null, binary, coreOnly: true, senses: [...senseNames] };
 }
 
 /** The core-only fence, in one place so every surface refuses
@@ -109,7 +117,61 @@ export function clampSenseDays(raw: unknown): number {
   return Math.min(7, Math.max(1, Math.floor(raw)));
 }
 
-export type SenseName = "mail" | "agenda";
+function foldSenseName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a sense cannot be read under this
+ *  name: the name is not one of the two senses in the
+ *  senseNames registry, so no fixed argv exists for it and
+ *  the read would have to invent a command shape - the one
+ *  thing the senses door never does. senseArgv is the ONE
+ *  seam every sense name rides (runSense builds its argv
+ *  there; the CLI senses doors and the sam_senses chat tool
+ *  both ride runSense), and it refused an unknown name with
+ *  "Unknown sense 'X'. Senses: mail, agenda." - the value
+ *  echoed and the registry named, but no fold correction,
+ *  so a folded name ("Mail", "AGENDA", "a_genda")
+ *  dead-ended even though the intended sense is
+ *  unambiguous. senseArgv now throws this source (the
+ *  "Unknown sense" prefix is kept). When exactly one sense
+ *  matches the bad name folded for case and separators,
+ *  the refusal names it. Null means the sense can be
+ *  named. Stored sense names stay permissive by design:
+ *  ledger lines and scorecards read names back as stored
+ *  and never re-validate them. */
+export function senseNameBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (senseNames as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldSenseName(value) : "";
+  const matches = target ? senseNames.filter(s => foldSenseName(s) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown sense \"" + String(value) + "\". Senses: " + senseNames.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
+/** The sam_senses tool's action registry: the sense names
+ *  plus "status" (whether the reader is installed). Built
+ *  from senseNames so the action set and the sense registry
+ *  can never drift apart. */
+export const sensesActions = ["status", ...senseNames] as const;
+
+/** The ONE source for why the sam_senses tool cannot run
+ *  this action: the action is not in the sensesActions
+ *  registry, so the tool would have to guess whether the
+ *  caller wanted the reader's state or one of the reads.
+ *  The tool dispatch in own-tools.ts improvised this
+ *  refusal ("Unknown senses action: X (status, mail,
+ *  agenda)") with no fold correction, so the model's
+ *  "Status" or "Mail" died with no path back; the dispatch
+ *  now returns this source as the tool's error before any
+ *  read is spent. When exactly one action matches the bad
+ *  name folded for case and separators, the refusal names
+ *  it. Null means the action can be named. */
+export function sensesActionBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (sensesActions as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldSenseName(value) : "";
+  const matches = target ? sensesActions.filter(a => foldSenseName(a) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown senses action \"" + String(value) + "\". Actions: " + sensesActions.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 
 /** Build the fixed argv for one sense. The binary and the verb
  *  shape are code; only the bounded parameters vary. */
@@ -123,7 +185,7 @@ export function senseArgv(name: SenseName, opts: { query?: unknown; max?: unknow
     const to = new Date(from.getTime() + days * 24 * 60 * 60 * 1000);
     return ["calendar", "events", "--from", from.toISOString(), "--to", to.toISOString(), "--json"];
   }
-  throw new Error("Unknown sense '" + String(name) + "'. Senses: mail, agenda.");
+  throw new Error(senseNameBlocker(name) ?? "Unknown sense \"" + String(name) + "\". Senses: " + senseNames.join(", "));
 }
 
 export type SenseRunner = (file: string, args: string[], timeoutMs: number) => Promise<{ exitCode: number | null; output: string; timedOut?: boolean }>;
