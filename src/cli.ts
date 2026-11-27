@@ -80,7 +80,7 @@ import { recallMemory } from "./memory-recall.js";
 import { recallFailedHistoryScorecardText } from "./recall.js";
 import { runMemoryToolTurn } from "./memory-tool.js";
 import { AgentLoopJournal } from "./agent-loop-journal.js";
-import { ApprovalStore, type RiskClass } from "./approvals.js";
+import { ApprovalStore, riskClassBlocker, type RiskClass } from "./approvals.js";
 import { OperativeRegistry, type OperativeState } from "./operatives.js";
 import { cancelSubagent, getSubagent, listSubagents, smallSpawnPool, spawnSubagent, subagentProfileBlocker, subagentScorecardText, withSpawnPool } from "./subagents.js";
 import { errorReason } from "./error-reason.js";
@@ -1174,7 +1174,8 @@ assignment.command("renew").argument("<lease-id>").argument("<operative-id>").ar
 });
 
 const approval=program.command("approval").description("Action-bound approval ledger (request and inspect only; deciding requires an owner-authenticated boundary that is not built yet, so there is no decide command)");
-approval.command("request").argument("<mission>").argument("<risk>").argument("<action-json>").option("--ttl <ms>","Approval lifetime in milliseconds").action((code:string,risk:string,actionJson:string,options:{ttl?:string})=>{
+approval.command("request").argument("<mission>").argument("<risk>").argument("<action-json>").description("Request an action-bound approval; the risk must name a risk class exactly (an unknown or folded name refuses before anything is touched, naming the risk classes with a fold correction when exactly one matches)").option("--ttl <ms>","Approval lifetime in milliseconds").action((code:string,risk:string,actionJson:string,options:{ttl?:string})=>{
+  const riskBlocker=riskClassBlocker(risk);if(riskBlocker)throw new Error(riskBlocker);
   output(withDb((db,missions)=>{
     const mission=missionOrThrow(missions,code);
     let action:unknown; try{action=JSON.parse(actionJson);}catch{throw new Error("Action must be valid JSON");}
