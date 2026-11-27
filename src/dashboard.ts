@@ -34,13 +34,46 @@ export type { DashboardConfig } from "./dashboard-config.js";
 // store) lives in dashboard-config.ts: readDashboardConfig is
 // the one read door every surface rides, and a save is a
 // single-row UPSERT through writeDashboardConfig. The
-// validation below is unchanged from the file era - key set,
-// types, the agent-name regex, and the unknown-agent refusal
-// all still stand before any store is touched.
+// key-set and type validation below still stands before any
+// store is touched, and the agent name now rides the ONE
+// source beside it.
+function normalizeDashboardAgentName(name:string):string{
+ return name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+}
+/** The ONE source for why a dashboard config save cannot
+ *  name this default agent: the name is not in the agent
+ *  registry ("sam", the implicit core profile, plus every
+ *  registered agent), so the saved config would route every
+ *  unbound chat, turn, and heartbeat tick to a profile that
+ *  does not exist. Before this source, saveDashboardConfig
+ *  refused in two improvised pieces (a name failing the
+ *  shape regex died on the bare "Invalid dashboard
+ *  configuration", the same text covering extra keys and
+ *  bad types; a well-shaped unknown name died on the bare
+ *  "Unknown agent", echoing no value and naming no agent)
+ *  and the config POST handler swallowed both into a third
+ *  generic text. When exactly one valid agent matches the
+ *  bad name folded for case and separators, the refusal
+ *  names it ("Second Shift" -> "second-shift", "Dip" ->
+ *  "dip"). Null means the name can be saved. The stored
+ *  config readers stay permissive by design:
+ *  readDashboardConfig parses forgiving to the defaults, so
+ *  a config naming an agent removed later still reads. */
+export function dashboardAgentBlocker(root:string,value:unknown):string|null{
+ const db=new ChatStore(root);
+ let names:string[];
+ try{names=["sam",...db.agents().map(a=>a.name).filter(n=>n!=="sam")];}finally{db.close();}
+ if(typeof value==="string"&&names.includes(value))return null;
+ const target=typeof value==="string"?normalizeDashboardAgentName(value):"";
+ const matches=target?names.filter(n=>normalizeDashboardAgentName(n)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Unknown agent \""+String(value)+"\" in dashboard configuration. Valid agents: "+names.join(", ")+(fix?". Did you mean \""+fix+"\"?":"");
+}
 export function saveDashboardConfig(root:string,data:Record<string,unknown>):DashboardConfig{
- if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean"||!(/^[a-z][a-z0-9._-]{0,63}$/.test(data.defaultAgent)))throw Error("Invalid dashboard configuration");
+ if(Object.keys(data).some(k=>!["defaultAgent","showTeamEvents"].includes(k))||typeof data.defaultAgent!=="string"||typeof data.showTeamEvents!=="boolean")throw Error("Invalid dashboard configuration");
+ const blocker=dashboardAgentBlocker(root,data.defaultAgent);
+ if(blocker)throw Error(blocker);
  const config={defaultAgent:data.defaultAgent,showTeamEvents:data.showTeamEvents};
- const db=new ChatStore(root);try{if(config.defaultAgent!=="sam"&&!db.agents().some(a=>a.name===config.defaultAgent))throw Error("Unknown agent");}finally{db.close();}
  writeDashboardConfig(root,config);return config;
 }
 export type Schedule={id:string;name:string;minutes:number;enabled:boolean;lastRun:string|null};
@@ -161,7 +194,7 @@ export async function serveDashboard(root:string,port=4317):Promise<void>{
         const db=new ChatStore(workspace);try{json(201,db.createAgent(body.name,body.instructions,{model,connectorId}));}finally{db.close();}}catch{json(400,{error:"Unable to create agent"});}return;
     }
     if(req.method==="POST"&&req.url===route+"/config"){
-      try{json(200,saveDashboardConfig(workspace,await post()));}catch{json(400,{error:"Invalid configuration"});}return;
+      try{json(200,saveDashboardConfig(workspace,await post()));}catch(e){json(400,{error:e instanceof Error?e.message:"Invalid configuration"});}return;
     }
     const actionRoute=req.url?.match(new RegExp("^"+route+"/actions/([0-9a-f-]{36})/decide$"));
     if(actionRoute&&req.method==="POST"){

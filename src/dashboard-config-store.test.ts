@@ -108,8 +108,8 @@ test("dashboard config store: saveDashboardConfig validation stands, and success
     // keys, bad types, a bad name shape, an unknown agent.
     assert.throws(() => saveDashboardConfig(root, { defaultAgent: "dip", showTeamEvents: true, extra: 1 }), /Invalid dashboard configuration/);
     assert.throws(() => saveDashboardConfig(root, { defaultAgent: "dip", showTeamEvents: "yes" }), /Invalid dashboard configuration/);
-    assert.throws(() => saveDashboardConfig(root, { defaultAgent: "Dip", showTeamEvents: true }), /Invalid dashboard configuration/);
-    assert.throws(() => saveDashboardConfig(root, { defaultAgent: "ghost", showTeamEvents: true }), /Unknown agent/);
+    assert.throws(() => saveDashboardConfig(root, { defaultAgent: "Dip", showTeamEvents: true }), /Unknown agent "Dip" in dashboard configuration\. Valid agents: sam, dip\. Did you mean "dip"\?/);
+    assert.throws(() => saveDashboardConfig(root, { defaultAgent: "ghost", showTeamEvents: true }), /Unknown agent "ghost" in dashboard configuration\. Valid agents: sam, dip/);
     assert.equal(existsSync(join(root, ".sam", "dashboard-config.db")), false);
     assert.deepEqual(readDashboardConfig(root), DEFAULTS);
     // Good saves ride the DB only; the second replaces the first.
