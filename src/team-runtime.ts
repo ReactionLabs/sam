@@ -89,6 +89,34 @@ export async function runResearchTeam(workspace:string,chatId:string,objective:s
 
 export const TEAM_ROLES = ["builder", "researcher", "qa", "reviewer"] as const;
 export type TeamRole = (typeof TEAM_ROLES)[number];
+export function foldTeamRoleName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a team door cannot name this
+ *  role: the role is a registry name (TEAM_ROLES) a
+ *  person types at the CLI `team member add` door, and
+ *  the ONE seam every role rides, addTeamMember, refused
+ *  it with "Role must be one of: ..." - naming the roles
+ *  but echoing no value and offering no fold correction,
+ *  so a folded name ("Builder", "QA", "Re-viewer",
+ *  "research_er") dead-ended. An exact role reads no
+ *  blocker. Anything else is refused with the value
+ *  echoed, the roles named as the registry (the standing
+ *  "Role must be one of:" sentence kept - its readers
+ *  match it), and, when exactly one role matches the bad
+ *  value folded for case and separators, that correction.
+ *  addTeamMember throws this before any member, profile,
+ *  or operative is created. Stored member roles stay
+ *  permissive by design - a stored member's role is read
+ *  back as stored and the run paths never re-validate it.
+ *  Null means the role can be named. */
+export function teamRoleBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (TEAM_ROLES as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldTeamRoleName(value) : "";
+  const matches = target ? TEAM_ROLES.filter(r => foldTeamRoleName(r) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown team role \"" + String(value) + "\". Role must be one of: " + TEAM_ROLES.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export interface StandingMember {
   name: string;
   role: TeamRole;
@@ -363,7 +391,8 @@ export function routeTask(members: readonly StandingMember[], task: string): { w
 
 export function addTeamMember(root: string, input: { name: string; role: string; tools?: string[]; model?: string | null; capabilities?: string[]; maxCalls?: number }): StandingMember {
   if (!nameRe.test(input.name)) throw new Error("Invalid member name");
-  if (!TEAM_ROLES.includes(input.role as TeamRole)) throw new Error("Role must be one of: " + TEAM_ROLES.join(", "));
+  const roleBlocker = teamRoleBlocker(input.role);
+  if (roleBlocker) throw new Error(roleBlocker);
   const known = new Set(profileToolNames());
   const tools = [...new Set(input.tools ?? [])];
   const widened = tools.filter(name => !known.has(name));
