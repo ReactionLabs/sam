@@ -117,6 +117,46 @@ export function teamRoleBlocker(value: unknown): string | null {
   const fix = matches.length === 1 ? matches[0] : null;
   return "Unknown team role \"" + String(value) + "\". Role must be one of: " + TEAM_ROLES.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
+export function foldTeamToolName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a team door cannot name this
+ *  tool: a tool name is a registry name (profileToolNames,
+ *  the own-tools registry) a person types at the CLI
+ *  `team member add --tools` door, and the ONE seam every
+ *  member allowlist rides, addTeamMember, refused an
+ *  unknown tool with the bare "Unknown tool in allowlist:
+ *  X" - echoing the value but naming NONE of the registry
+ *  and offering no fold correction, so a folded name
+ *  ("Sam-Memory-Search", "SAM_MEMORY_SEARCH", "sam memory
+ *  search") dead-ended at the door that decides what a
+ *  team member may call, even though the sibling team
+ *  ROLE door on the same seam carries the fold correction.
+ *  Every exact tool reads no blocker. Anything else is
+ *  refused with the unknown values echoed, the profile
+ *  tools named as the registry (the standing "Unknown
+ *  tool in allowlist" prefix kept), and, for each unknown
+ *  where exactly one tool matches folded for case and
+ *  separators, that correction. addTeamMember throws
+ *  this before any member, profile, or operative is
+ *  created. Stored member tool lists stay permissive by
+ *  design - a stored list is read back as stored and the
+ *  run paths never re-validate it. Null means every tool
+ *  can be named. */
+export function teamToolBlocker(tools: readonly unknown[]): string | null {
+  const names = profileToolNames();
+  const known = new Set(names);
+  const unknown = [...new Set((tools ?? []).map(t => String(t)))].filter(t => !known.has(t));
+  if (!unknown.length) return null;
+  const fixes: string[] = [];
+  for (const value of unknown) {
+    const target = foldTeamToolName(value);
+    const matches = target ? names.filter(n => foldTeamToolName(n) === target) : [];
+    if (matches.length === 1) fixes.push(matches[0]!);
+  }
+  return "Unknown tool in allowlist: " + unknown.join(", ") + ". Tools: " + names.join(", ")
+    + (fixes.length ? ". Did you mean " + fixes.map(f => "\"" + f + "\"").join(", ") + "?" : "");
+}
 export interface StandingMember {
   name: string;
   role: TeamRole;
@@ -393,10 +433,9 @@ export function addTeamMember(root: string, input: { name: string; role: string;
   if (!nameRe.test(input.name)) throw new Error("Invalid member name");
   const roleBlocker = teamRoleBlocker(input.role);
   if (roleBlocker) throw new Error(roleBlocker);
-  const known = new Set(profileToolNames());
   const tools = [...new Set(input.tools ?? [])];
-  const widened = tools.filter(name => !known.has(name));
-  if (widened.length) throw new Error("Unknown tool in allowlist: " + widened.join(", "));
+  const toolBlocker = teamToolBlocker(tools);
+  if (toolBlocker) throw new Error(toolBlocker);
   const maxCalls = input.maxCalls ?? 4;
   if (!Number.isInteger(maxCalls) || maxCalls < 1 || maxCalls > 8) throw new Error("Member call budget must be 1 to 8");
   const role = input.role as TeamRole;
