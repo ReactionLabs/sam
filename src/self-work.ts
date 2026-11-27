@@ -5,12 +5,11 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { listActions, proposeAction } from "./actions.js";
 import { readActivity, recordActivity, type ActivityLine } from "./activity.js";
-import { channels } from "./channels.js";
 import { ChatStore } from "./chats.js";
 import { codeRoot } from "./code.js";
 import { codeRootGitBlocker } from "./git-work.js";
 import { getCodingTask, listCodingTasks, queueCodingTask, type CodingTask } from "./coding.js";
-import { addScheduledJob, heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
+import { addScheduledJob, heartbeatChannelBlocker, heartbeatChannelId, heartbeatJobs, type HeartbeatJob } from "./heartbeat.js";
 import { readSelfAudit, type SelfAudit } from "./self-audit.js";
 import { errorReason } from "./error-reason.js";
 
@@ -1721,15 +1720,29 @@ export function selfWorkStatus(root: string): { installed: boolean; job: Heartbe
  *  worthiness gate and the delivery outbox when a channel is
  *  named. Installing twice refuses - there is one self-work
  *  loop, not a stack of them. A channel is named by id or by
- *  its registry name. */
+ *  its registry name, and the naming is judged by the ONE
+ *  source every heartbeat creation door uses
+ *  (heartbeatChannelBlocker in heartbeat.ts): an unknown
+ *  channel refuses before anything is created, naming the
+ *  registry with ids and the fold correction when exactly
+ *  one registered channel matches the bad name folded for
+ *  case and separators; a name that passes resolves to its
+ *  id through heartbeatChannelId, exactly as the CLI
+ *  heartbeat doors and the brief install door resolve it.
+ *  The self-work job IS a heartbeat job, so its channel
+ *  door carries no refusal text of its own. The already-
+ *  installed check fires first (the duplicate is the
+ *  owner's first problem either way). addScheduledJob and
+ *  the job store stay permissive by design - only this
+ *  door's refusal shape is gated. */
 export function installSelfWork(root: string, opts: { channelId?: string | null; schedule?: string; timezone?: string } = {}): HeartbeatJob {
   const existing = selfWorkJob(root);
   if (existing) throw new Error("The self-work loop is already installed as job '" + existing.name + "' (" + existing.id + ") - remove that heartbeat job first if it should move.");
   let channelId: string | null = null;
   if (opts.channelId) {
-    const found = channels(root).find(c => c.id === opts.channelId || c.name === opts.channelId);
-    if (!found) throw new Error("Unknown channel '" + opts.channelId + "'. Channels: " + (channels(root).map(c => c.name).join(", ") || "none"));
-    channelId = found.id;
+    const channelBlocker = heartbeatChannelBlocker(root, opts.channelId);
+    if (channelBlocker) throw new Error(channelBlocker);
+    channelId = heartbeatChannelId(root, opts.channelId);
   }
   return addScheduledJob(root, {
     name: SELF_WORK_JOB_NAME, profile: "sam",
