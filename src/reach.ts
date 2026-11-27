@@ -125,6 +125,48 @@ function capResult(result: ReachResult): ReachResult {
   return result;
 }
 
+function foldReachName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why a reach call cannot name this
+ *  channel: the name is not in the agent-reach CLI's own live
+ *  channel declaration, so no call can be spent on it. Every
+ *  reach call rides runReach (the sam_reach chat tool and the
+ *  CLI `reach call` door), and this text is the refusal both
+ *  surfaces return - as BAD_INPUT data, never a throw, because
+ *  reach errors are data by design. The bad value is echoed,
+ *  the declared channels are named as the registry, and when
+ *  exactly one declared channel matches the bad name folded
+ *  for case and separators, the refusal names it ("you-tube"
+ *  -> "youtube"). Null means the channel can be named (the
+ *  lookup itself folds case, exactly as before). */
+export function reachChannelBlocker(channels: ReachChannel[], channel: string): string | null {
+  const asked = String(channel ?? "");
+  if (channels.some((c) => c.id.toLowerCase() === asked.toLowerCase())) return null;
+  const target = foldReachName(asked);
+  const matches = target ? channels.filter((c) => foldReachName(c.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown channel " + JSON.stringify(asked) + ". Declared channels: " + (channels.length ? channels.map((c) => c.id).join(", ") : "none declared") + (fix ? ". Did you mean " + JSON.stringify(fix.id) + "?" : "");
+}
+
+/** The ONE source for why a reach call cannot name this
+ *  action on a declared channel: the action is not in the
+ *  channel's own declaration. Same shape as the channel
+ *  refusal above - the bad value echoed, the channel's
+ *  declared actions named as the registry, and a fold
+ *  correction when exactly one matches folded for case and
+ *  separators ("Search" -> "search"). Null means the action
+ *  is declared. */
+export function reachActionBlocker(channel: ReachChannel, action: string): string | null {
+  const asked = String(action ?? "");
+  if (channel.actions.includes(asked)) return null;
+  const target = foldReachName(asked);
+  const matches = target ? channel.actions.filter((a) => foldReachName(a) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Channel " + channel.id + " does not declare action " + JSON.stringify(asked) + ". Its actions: " + (channel.actions.length ? channel.actions.join(", ") : "none declared") + (fix ? ". Did you mean " + JSON.stringify(fix) + "?" : "");
+}
+
 export async function runReach(
   input: { channel: string; action: string; query?: string; limit?: number },
   env: NodeJS.ProcessEnv = process.env,
@@ -136,13 +178,15 @@ export async function runReach(
   } catch (e) {
     return { ok: false, error: { code: "UNAVAILABLE", message: e instanceof Error ? errorReason(e) : "agent-reach unavailable" } };
   }
-  const channel = channels.find((c) => c.id.toLowerCase() === String(input.channel ?? "").toLowerCase());
-  if (!channel) {
-    return { ok: false, error: { code: "BAD_INPUT", message: "Unknown channel " + JSON.stringify(input.channel) + ". Declared channels: " + channels.map((c) => c.id).join(", ") } };
+  const channelBlocker = reachChannelBlocker(channels, String(input.channel ?? ""));
+  if (channelBlocker) {
+    return { ok: false, error: { code: "BAD_INPUT", message: channelBlocker } };
   }
+  const channel = channels.find((c) => c.id.toLowerCase() === String(input.channel ?? "").toLowerCase())!;
   const action = String(input.action ?? "");
-  if (!channel.actions.includes(action)) {
-    return { ok: false, error: { code: "BAD_INPUT", message: "Channel " + channel.id + " does not declare action " + JSON.stringify(action) + ". Its actions: " + channel.actions.join(", ") } };
+  const actionBlocker = reachActionBlocker(channel, action);
+  if (actionBlocker) {
+    return { ok: false, error: { code: "BAD_INPUT", message: actionBlocker } };
   }
   const query = typeof input.query === "string" ? input.query.trim() : "";
   if (!query && !ZERO_ARG_ACTIONS.has(action)) {
