@@ -281,9 +281,39 @@ export function listDoors(root:string,now=Date.now()):DoorAudit[]{
   const file=load(root);
   return file.doors.map(door=>({mini:door.mini,enabled:door.enabled,expired:now>=Date.parse(doorExpiry(door)),created_at:door.created_at,expires_at:doorExpiry(door),keyVersion:door.keyVersion??1,homeLink:!!door.homeLink,mode:door.mode??"owner",sessions:file.sessions.filter(s=>s.mini===door.mini).length}));
 }
+function foldDoorName(name:string):string{
+  return name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-+|-+$/g,"");
+}
+/** The ONE source carrying the mini-door name refusal
+ *  (refusal-class sweep, 2026-11-27): issueDoorKey, the ONE
+ *  seam every door key issue rides, refused a name that is
+ *  not a valid door name with the bare "Mini not found" -
+ *  echoing no value, naming none of the valid names, and
+ *  offering no fold correction, so a folded name ("Dip",
+ *  "Second Shift") dead-ended at the door that ISSUES a
+ *  bearer credential. The valid names are a registry: "sam"
+ *  (the core itself - the main SAM gets a door too, not just
+ *  the minis) plus every registered mini. miniDoorBlocker
+ *  carries the refusal (value echoed, door names named as
+ *  the registry, fold correction when exactly one name
+ *  matches folded for case and separators); the registry is
+ *  dynamic per install, so the exactly-one-match rule is
+ *  what keeps a correction unambiguous. issueDoorKey throws
+ *  it before any key is generated or any door row written.
+ *  disableDoor stays permissive by design (an unknown name
+ *  is a no-op false; it issues nothing). Null means the
+ *  name can be issued a door. */
+export function miniDoorBlocker(root:string,value:unknown):string|null{
+  const names=["sam",...minis(root).map(m=>m.name)];
+  if(typeof value==="string"&&names.includes(value))return null;
+  const target=typeof value==="string"?foldDoorName(value):"";
+  const matches=target?names.filter(n=>foldDoorName(n)===target):[];
+  const fix=matches.length===1?matches[0]!:null;
+  return "Unknown mini \""+String(value)+"\". Minis: "+names.join(", ")+(fix?". Did you mean \""+fix+"\"?":"");
+}
 export function issueDoorKey(root:string,miniName:string,opts?:{homeLink?:boolean;visitor?:boolean}):string{
-  // "sam" is the core itself: the main SAM gets a door too, not just the minis.
-  if(miniName!=="sam"&&!minis(root).some(m=>m.name===miniName))throw new Error("Mini not found");
+  const nameBlocker=miniDoorBlocker(root,miniName);
+  if(nameBlocker)throw new Error(nameBlocker);
   const key=randomBytes(32).toString("hex");
   const now=new Date();
   // Door mode (P12): an owner door is the mini's own person talking; a
