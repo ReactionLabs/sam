@@ -103,7 +103,7 @@ import { authorizeMcpTool } from "./mcp-policy.js";
 import { homedir } from "node:os";
 import { join,resolve } from "node:path";
 import { mkdirSync, readFileSync } from "node:fs";
-import { MissionStore } from "./storage.js";
+import { MissionStore, missionCodeBlocker } from "./storage.js";
 import { listActions, proposeAction, decideAction, settleAutoApprovals, actionProfileBlocker, actionKindBlocker, actionScorecardText, actionFailureScorecardText, proposalScorecardText, decisionScorecardText, neverListHistoryScorecardText, skillScanHoldHistoryScorecardText, reproposalHistoryScorecardText, ACTION_KINDS } from "./actions.js";
 import { loadApprovalPolicy, saveApprovalPolicy, scanNeverList, neverListSummary, classifyProposal, approvalModeLedgerSummary, approvalPolicyFailedHistoryScorecardText, approvalModeBlocker } from "./approval-policy.js";
 import { listContacts, getContact, upsertContact, removeContact, addressBookOrder, writeAddressBook, contactScorecardText, addressBookFailedHistoryScorecardText, contactFailedHistoryScorecardText } from "./contacts.js";
@@ -166,7 +166,7 @@ function withDb<T>(fn:(db:Database.Database,missions:MissionStore)=>T):T {
   finally { db.close(); missions.close(); }
 }
 function missionOrThrow(missions:MissionStore,code:string) {
-  const m=missions.get(code); if(!m) throw new Error("Mission not found: "+code); return m;
+  const m=missions.get(code); if(!m) throw new Error(missionCodeBlocker(missions.list(),code)!); return m;
 }
 function withTasks<T>(fn:(tasks:TaskScheduler,missions:MissionStore)=>T):T {
   return withDb((db,missions)=>fn(new TaskScheduler(db, program.opts().workspace as string),missions));
@@ -899,35 +899,35 @@ mission.command("create").argument("<objective>").action((objective:string)=>{
   const db=store();try{output(db.create(objective));}finally{db.close();}
 });
 mission.command("list").action(()=>{const db=store();try{output(db.list());}finally{db.close();}});
-mission.command("inspect").argument("<code>").action((code:string)=>{
+mission.command("inspect").argument("<code>").description("One mission and its events; the code must name a mission (an unknown or folded code - 'op-1', 'OP1', a bare '1' - refuses before anything is read, naming the existing codes with a fold correction when exactly one matches)").action((code:string)=>{
   const db=store();try{
-    const m=db.get(code);if(!m)throw new Error("Mission not found: "+code);
+    const m=db.get(code);if(!m)throw new Error(missionCodeBlocker(db.list(),code)!);
     output({mission:m,events:db.events(m.id)});
   }finally{db.close();}
 });
-mission.command("transition").argument("<code>").argument("<status>").description("Development-only manual state transition; the status must name a mission status exactly (an unknown or folded name refuses before anything is touched, naming the statuses with a fold correction when exactly one matches)").action((code:string,status:string)=>{
+mission.command("transition").argument("<code>").argument("<status>").description("Development-only manual state transition; the code must name a mission (an unknown or folded code refuses before anything is touched, naming the existing codes with a fold correction when exactly one matches); the status must name a mission status exactly (an unknown or folded name refuses before anything is touched, naming the statuses with a fold correction when exactly one matches)").action((code:string,status:string)=>{
   const statusBlocker=missionStatusBlocker(status);if(statusBlocker)throw new Error(statusBlocker);
   const db=store();try{output(db.transition(code,status as MissionStatus));}finally{db.close();}
 });
 const task=program.command("task").description("Plan and inspect mission tasks (execution requires a worker runtime)");
-task.command("add").argument("<mission>").argument("<objective>")
+task.command("add").argument("<mission>").argument("<objective>").description("Add a task to a mission; the mission code must name a mission (an unknown or folded code refuses before anything is created, naming the existing codes with a fold correction when exactly one matches)")
   .option("--after <task-ids>","Comma-separated dependency task UUIDs")
   .action((code:string,objective:string,options:{after?:string})=>{
     output(withTasks((tasks,missions)=>{
       const mission=missions.get(code);
-      if(!mission)throw new Error("Mission not found: "+code);
+      if(!mission)throw new Error(missionCodeBlocker(missions.list(),code)!);
       const deps=options.after?.split(",").map(x=>x.trim()).filter(Boolean)??[];
       return tasks.add(mission.id,objective,deps);
     }));
   });
-task.command("list").argument("<mission>").action((code:string)=>{
+task.command("list").argument("<mission>").description("A mission's tasks; the mission code must name a mission (an unknown or folded code refuses before anything is read, naming the existing codes with a fold correction when exactly one matches)").action((code:string)=>{
   output(withTasks((tasks,missions)=>{
     const mission=missions.get(code);
-    if(!mission)throw new Error("Mission not found: "+code);
+    if(!mission)throw new Error(missionCodeBlocker(missions.list(),code)!);
     return tasks.list(mission.id);
   }));
 });
-task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network").action(async(code:string)=>{
+task.command("run-offline").argument("<mission>").description("Execute one task with deterministic offline echo only; no model or network; the mission code must name a mission (an unknown or folded code refuses before anything runs, naming the existing codes with a fold correction when exactly one matches)").action(async(code:string)=>{
   const missions=store(), db=openDatabase(dbPath());
   db.pragma("foreign_keys = ON");
   try {

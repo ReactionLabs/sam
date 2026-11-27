@@ -6,6 +6,48 @@ import { dirname } from "node:path";
 import { canTransition, missionStatusBlocker, type MissionStatus } from "./kernel.js";
 
 export interface Mission { id:string; code:string; objective:string; status:MissionStatus; created_at:string; updated_at:string }
+/** The fold a mission code is compared under: case and
+ *  separators dropped, the OP prefix dropped, and the
+ *  numeric part's leading zeros stripped - the registry's
+ *  own alphabet, since canonical codes are zero-padded
+ *  (OP-0001), so "op-1", "OP1", "op_0001", and a bare "1"
+ *  all fold to the same key as OP-0001. A value that is
+ *  not an OP code or a bare number folds to its stripped
+ *  form, which no code's key can equal. */
+export function normalizeMissionCode(value:string):string{
+  const folded=(value??"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+  const digits=folded.startsWith("op")?folded.slice(2):(/^\d+$/.test(folded)?folded:"");
+  return digits?String(Number(digits)):folded;
+}
+/** The ONE source carrying the mission code refusal
+ *  (refusal-class sweep, 2026-11-27): every door that picks
+ *  a mission by code - MissionStore.transition inside the
+ *  store, and the CLI's missionOrThrow / `mission inspect`
+ *  / `task add` / `task list` doors - improvised the same
+ *  bare "Mission not found: X", naming NONE of the codes
+ *  that exist and offering NO fold correction, so a folded
+ *  code ("op-1", "OP1", a bare "1") dead-ended at the door
+ *  that picks which mission a task, a memory, or a
+ *  transition lands on. missionCodeBlocker carries the
+ *  refusal (value echoed, the existing codes named as the
+ *  registry, keeping the "Mission not found" prefix, fold
+ *  correction when exactly one code matches folded); the
+ *  doors throw it before anything is touched. The registry
+ *  is dynamic per install, so the exactly-one-match rule
+ *  is what keeps a correction unambiguous (codes are
+ *  numerically unique, so folded keys never collide).
+ *  MissionStore.get stays permissive by design - it
+ *  resolves a code OR an id for internal callers, and an
+ *  exact code or id reads no blocker here. Null means the
+ *  value names a mission. */
+export function missionCodeBlocker(missions:readonly Pick<Mission,"code"|"id">[],value:unknown):string|null{
+  if(typeof value==="string"&&(missions.some(m=>m.code===value)||missions.some(m=>m.id===value)))return null;
+  const target=typeof value==="string"?normalizeMissionCode(value):"";
+  const matches=target?missions.filter(m=>normalizeMissionCode(m.code)===target):[];
+  const fix=matches.length===1?matches[0]!.code:null;
+  const known=missions.map(m=>m.code).sort((a,b)=>a.localeCompare(b));
+  return "Mission not found: \""+String(value)+"\". Missions: "+(known.length?known.join(", "):"none created")+(fix?". Did you mean \""+fix+"\"?":"");
+}
 export interface MissionEvent { id:number; mission_id:string; sequence:number; type:string; payload:string; created_at:string }
 export class MissionStore {
   private db: Database.Database;
@@ -47,7 +89,7 @@ export class MissionStore {
     const statusBlocker=missionStatusBlocker(to); if(statusBlocker) throw new Error(statusBlocker);
     return this.db.transaction(()=>{
       const mission=this.get(code);
-      if(!mission) throw new Error("Mission not found: "+code);
+      if(!mission) throw new Error(missionCodeBlocker(this.list(),code)!);
       if(!canTransition(mission.status,to)) throw new Error("Invalid transition: "+mission.status+" -> "+to);
       const now=new Date().toISOString();
       this.db.prepare("UPDATE missions SET status=?,updated_at=? WHERE id=? AND status=?").run(to,now,mission.id,mission.status);
