@@ -22,6 +22,45 @@ import { readDashboardConfig } from "./dashboard-config.js";
  *   dashboard rail and this list); the record stays.
  */
 
+/** The sam_manage_chats tool's action registry: the ten
+ *  actions the dispatch in own-tools.ts can run (list,
+ *  create, rename, pin, unpin, branch, archive, unarchive,
+ *  organize, search). The tool definition's enum names the
+ *  same ten; this constant is the runtime source the
+ *  refusal reads, because a type-level enum is invisible
+ *  to a caller whose action arrives as a plain string. */
+export const chatActions = ["list", "create", "rename", "pin", "unpin", "branch", "archive", "unarchive", "organize", "search"] as const;
+export type ChatAction = (typeof chatActions)[number];
+
+function foldChatAction(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source for why the sam_manage_chats tool cannot
+ *  run this action: the action is not in the chatActions
+ *  registry, so the dispatch would have to guess which
+ *  chat operation the caller meant. The dispatch refused
+ *  an unknown action with the bare "Unknown chat action:
+ *  X" - echoing the value but naming none of the ten
+ *  actions and offering no fold correction, so the model's
+ *  "List", "Re-name", or "un_archive" dead-ended even
+ *  though the intended action is unambiguous (the
+ *  sam_senses dispatch got its ONE source in the previous
+ *  sweep run; this dispatch was the remaining bare one on
+ *  the chat-management door). The dispatch now returns
+ *  this source as the tool's error before any chat is
+ *  touched. The standing "Unknown chat action" prefix is
+ *  kept. When exactly one action matches the bad name
+ *  folded for case and separators, the refusal names it.
+ *  Null means the action can be named. */
+export function chatActionBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (chatActions as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldChatAction(value) : "";
+  const matches = target ? chatActions.filter(a => foldChatAction(a) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown chat action \"" + String(value) + "\". Actions: " + chatActions.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function coreActor(root: string): string {
   // The dashboard config's one read door (dashboard-config.ts):
   // this surface used to read the raw JSON file itself, with its
