@@ -79,6 +79,6 @@ test("compileSchedule: intervals, wall clock, natural language, raw cron", () =>
 test("validateTimezone: IANA names pass, junk refuses", () => {
   assert.equal(validateTimezone("America/New_York"), "America/New_York");
   assert.equal(validateTimezone("UTC"), "UTC");
-  assert.throws(() => validateTimezone("Mars/Olympus"), /Unknown timezone/);
-  assert.throws(() => validateTimezone("not a zone"), /Invalid timezone/);
+  assert.throws(() => validateTimezone("Mars/Olympus"), /Unknown timezone "Mars\/Olympus"\. Timezones are IANA names \(like America\/New_York\)$/);
+  assert.throws(() => validateTimezone("not a zone"), /Unknown timezone "not a zone"\. Timezones are IANA names \(like America\/New_York\)$/);
 });

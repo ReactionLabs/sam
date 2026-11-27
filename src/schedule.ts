@@ -81,9 +81,54 @@ export function parseCron(expr: string): CronFields {
   };
 }
 
+let cachedTimezoneNames: string[] | null = null;
+/** The timezone registry: the platform's own IANA list
+ *  (Intl.supportedValuesOf) plus "UTC", which the list
+ *  itself omits but every schedule surface accepts. */
+export function timezoneNames(): string[] {
+  if (!cachedTimezoneNames) cachedTimezoneNames = [...Intl.supportedValuesOf("timeZone"), "UTC"];
+  return cachedTimezoneNames;
+}
+function normalizeTimezoneName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function isKnownTimezone(timezone: unknown): timezone is string {
+  if (typeof timezone !== "string" || !timezone) return false;
+  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); return true; } catch { return false; }
+}
+/** The ONE source for why a schedule cannot name this
+ *  timezone: the name is not in the IANA registry, so the
+ *  job's wall-clock times could never be computed. Before
+ *  this source, validateTimezone - the ONE seam every
+ *  schedule rides (addScheduledJob, the action gate's
+ *  heartbeat detail, compileSchedule's one-shot path,
+ *  nextCronRun, ownerTimezone's env read) - refused in two
+ *  improvised pieces: a name failing the shape regex died
+ *  on "Invalid timezone (use an IANA name like
+ *  America/New_York): X" and a well-shaped unknown name
+ *  died on "Unknown timezone: X", neither offering a fold
+ *  correction, so a separator-folded name ("America/New
+ *  York", "america-new-york") dead-ended. A name Intl
+ *  itself resolves (any case, and aliases like US/Eastern
+ *  or Asia/Kolkata) reads no blocker, exactly as before;
+ *  only an unresolvable name refuses. The registry folded
+ *  for case and separators has zero collisions, so when
+ *  exactly one IANA name matches the bad name folded, the
+ *  refusal names it. The full registry is 419 names, too
+ *  long to print, so the refusal names its form by the
+ *  standing example. Null means the name is a real zone.
+ *  Stored job timezones stay permissive by design:
+ *  jobNextRun falls back per its own rules. */
+export function timezoneBlocker(value: unknown): string | null {
+  if (isKnownTimezone(value)) return null;
+  const target = typeof value === "string" ? normalizeTimezoneName(value) : "";
+  const matches = target ? timezoneNames().filter(n => normalizeTimezoneName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Unknown timezone \"" + String(value) + "\". Timezones are IANA names (like America/New_York)" + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 export function validateTimezone(timezone: string): string {
-  if (typeof timezone !== "string" || !/^[A-Za-z_]+\/[A-Za-z0-9_+-]+$/.test(timezone) && timezone !== "UTC") throw new Error("Invalid timezone (use an IANA name like America/New_York): " + timezone);
-  try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); } catch { throw new Error("Unknown timezone: " + timezone); }
+  const blocker = timezoneBlocker(timezone);
+  if (blocker) throw new Error(blocker);
   return timezone;
 }
 
