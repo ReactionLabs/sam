@@ -12,7 +12,41 @@ import { ChatStore } from "./chats.js";
 // reference for its credential, never the secret itself. Owner allowlisting is
 // fail-closed: an empty owner list means nobody can talk yet. The registry
 // lives in .sam/channels.db (UNIFICATION item 4, tenth store).
-export type Channel = { id:string; kind:"telegram"|"webhook"|"discord"; name:string; profile:string; tokenEnv:string; ownerIds:number[]; enabled:boolean };
+export const channelKinds = ["telegram", "webhook", "discord"] as const;
+export type ChannelKind = (typeof channelKinds)[number];
+export type Channel = { id:string; kind:ChannelKind; name:string; profile:string; tokenEnv:string; ownerIds:number[]; enabled:boolean };
+export function foldChannelKindName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a channel cannot be created
+ *  with this kind: the kind is a registry name
+ *  (channelKinds) that every channel creation names into
+ *  addChannel - the ONE seam every kind rides (the CLI
+ *  channels add / add-discord / add-webhook doors and
+ *  the config wizard each name one) - and addChannel
+ *  refused an unknown kind with the bare "Invalid
+ *  channel kind": the bad value never echoed, none of
+ *  the three kinds named, and no fold correction
+ *  offered, so a folded name ("Telegram", "Web-Hook",
+ *  "disc_ord") dead-ended even though the intended kind
+ *  is unambiguous. An exact kind reads no blocker.
+ *  Anything else is refused with the value echoed, the
+ *  kinds named as the registry, the standing "Invalid
+ *  channel kind" prefix kept (its readers match it),
+ *  and, when exactly one kind matches the bad value
+ *  folded for case and separators, that correction.
+ *  addChannel throws this before any other validation
+ *  or store write. Stored channel kinds stay permissive
+ *  by design - a stored channel's kind is read back as
+ *  stored and the runner doors never re-validate it.
+ *  Null means the kind can be named. */
+export function channelKindBlocker(value: unknown): string | null {
+  if (typeof value === "string" && (channelKinds as readonly string[]).includes(value)) return null;
+  const target = typeof value === "string" ? foldChannelKindName(value) : "";
+  const matches = target ? channelKinds.filter(k => foldChannelKindName(k) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Invalid channel kind \"" + String(value) + "\". Kinds: " + channelKinds.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
 const namePattern = /^[A-Za-z0-9 _.-]{1,64}$/;
 const profilePattern = /^[a-z][a-z0-9._-]{0,63}$/;
 const envPattern = /^SAM_CHANNEL_[A-Z0-9_]{1,64}$/;
@@ -364,7 +398,8 @@ export function runnerChannel(root: string, kind: Channel["kind"], name?: string
   return (name === undefined ? enabled[0] : enabled.find(c => c.name === name))!;
 }
 export function addChannel(root: string, kind: Channel["kind"], name: string, profile: string, tokenEnv: string, ownerIds: number[] = []): Channel {
-  if (kind !== "telegram" && kind !== "webhook" && kind !== "discord") throw Error("Invalid channel kind");
+  const kindBlocker = channelKindBlocker(kind);
+  if (kindBlocker) throw Error(kindBlocker);
   if (!namePattern.test(name) || !profilePattern.test(profile) || !envPattern.test(tokenEnv)) throw Error("Invalid channel name, profile, or environment variable");
   if (!Array.isArray(ownerIds) || ownerIds.length > 64 || ownerIds.some(x => !Number.isSafeInteger(x) || x <= 0)) throw Error("Invalid owner list");
   const items = channels(root);
