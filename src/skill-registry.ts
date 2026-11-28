@@ -419,6 +419,49 @@ export function removeInstalledSkill(root: string, name: string): boolean {
   recordActivity(root, "operator", "skill", skillRemovedLedgerSummary(name, rec.source));
   return true;
 }
+/** The ONE source for why the registry-installed skill
+ *  remove door cannot name this skill: an installed skill
+ *  name is a registry name a person types at the CLI
+ *  `skills remove` door, and that door rode
+ *  removeInstalledSkill alone - its description said only
+ *  that hand-placed skills are never touched - so an
+ *  unknown name, or a folded one ("AlphaSkill" or
+ *  "alpha_skill" for the installed alpha-skill), silently
+ *  returned {removed:false}, naming nothing, and at the
+ *  door that deletes a registry-installed skill's files
+ *  AND its provenance record (the record the curator
+ *  checks) the owner could not tell a fold or a typo from
+ *  a genuinely absent skill, even though every sibling
+ *  registry's remove door (channels, heartbeats, vault,
+ *  minis, team members, contacts) reads its registry
+ *  through a fold-corrected ONE source, and this module's
+ *  own install pick already carries skillRefBlocker with
+ *  normalizeSkillRefName as its fold. An exact installed
+ *  name reads no blocker. Anything else is refused with
+ *  the value echoed, the registry-installed skills named
+ *  as the registry, and, when exactly one installed name
+ *  matches the bad value folded for case and separators
+ *  via normalizeSkillRefName (the install pick's own
+ *  fold), that correction. findInstalledSkill throws
+ *  this before anything is removed. removeInstalledSkill
+ *  keeps its boolean contract (false on a miss) for
+ *  internal callers - the store seam stays permissive by
+ *  design. Null means the skill can be named. */
+export function skillRemoveBlocker(root: string, name: string): string | null {
+  const known = installedSkills(root);
+  if (name && known.some(s => s.name === name)) return null;
+  const target = normalizeSkillRefName(name ?? "");
+  const matches = target ? known.filter(s => normalizeSkillRefName(s.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0]! : null;
+  const registry = known.length ? known.map(s => s.name).join(", ") : "none registered";
+  return "Installed skill not found: \"" + String(name) + "\". Registry-installed skills: " + registry
+    + (fix ? ". Did you mean \"" + fix.name + "\"?" : "");
+}
+export function findInstalledSkill(root: string, name: string): InstalledSkill {
+  const found = installedSkills(root).find(s => s.name === name);
+  if (!found) throw new Error(skillRemoveBlocker(root, name) ?? ("Installed skill not found: " + name));
+  return found;
+}
 // The ONE writer for the skill-installed activity line, so
 // the scorecard's parser below can never drift from the seam
 // it counts. Its shape is byte-identical to what installSkill
