@@ -343,6 +343,57 @@ export function getDraft(root: string, id: string): Draft | null {
   try { return findDraftRow(root, id); }
   catch (error) { failDraft(root, "read", error); }
 }
+function normalizeDraftId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function describeDraft(draft: Draft): string {
+  return draft.id + " (channel " + draft.channel + ", actor " + draft.actor + ", created " + draft.createdAt + ")";
+}
+
+/** The draft gate for the drafts remove door (refusal-class
+ *  census, 2026-11-28): every other registry's remove door
+ *  reads its registry through a fold-corrected ONE source
+ *  before removing anything, but CLI `drafts remove <id>`
+ *  rode removeDraft alone, so an unknown id - or a real id
+ *  typed folded (upper-case, or without its hyphens, the two
+ *  ways a UUID gets copied out of a listing) - silently
+ *  returned {removed:false}, naming nothing, at the door
+ *  that discards a draft. Drafts carry no human name: the id
+ *  IS the key, so the registry this door names is the drafts
+ *  themselves, each described ONLY by the facts that are not
+ *  the owner's outbound words (its id, channel, actor, and
+ *  created stamp) - a draft's recipient, subject, and body
+ *  never enter a refusal, the same discipline the failure
+ *  and scorecard seams keep. draftRemoveBlocker is now the
+ *  ONE source over the drafts registry alone (an exact id
+ *  reads no blocker; anything else refuses with the value
+ *  echoed, the drafts named as the registry, and a fold
+ *  correction when exactly one draft id matches folded for
+ *  case and separators via normalizeDraftId); findDraft
+ *  resolves an exact id or throws it, and the CLI remove
+ *  door resolves through findDraft before anything is
+ *  removed. removeDraft keeps its boolean contract for
+ *  internal callers - the store seam stays permissive by
+ *  design. */
+export function draftRemoveBlocker(root: string, id: string): string | null {
+  const items = listDrafts(root);
+  if (items.some(d => d.id === id)) return null;
+  const registry = items.length ? items.map(describeDraft).join(", ") : "none registered";
+  const target = normalizeDraftId(id ?? "");
+  const matches = target ? items.filter(d => normalizeDraftId(d.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Draft not found: \"" + id + "\". Drafts: " + registry + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
+export function findDraft(root: string, id: string): Draft {
+  const blocker = draftRemoveBlocker(root, id);
+  if (blocker) throw new Error(blocker);
+  const found = listDrafts(root).find(d => d.id === id);
+  if (!found) throw new Error(draftRemoveBlocker(root, id) ?? "Draft not found: \"" + id + "\"");
+  return found;
+}
+
 export function removeDraft(root: string, id: string): boolean {
   if (!id || !storeExists(root)) return false;
   let db: Database.Database;
