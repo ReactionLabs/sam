@@ -299,6 +299,45 @@ export function validateSpawnDetail(root:string,detail:string):SpawnSpec{
   const connectorId=rawConnector?connectorPinId(root,rawConnector):null;
   return {name,person,instructions,model,connectorId,starterHeartbeat:raw.starterHeartbeat===true};
 }
+export function normalizeMiniName(value:string):string{
+ return (value??"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+}
+/** The ONE source for why a mini door cannot pick this
+ *  mini for REMOVAL: the value names no mini in the
+ *  registry, so a door acting on it would act on nothing -
+ *  and the remove door, riding removeMini's boolean alone,
+ *  said exactly that ({removed:false}) and nothing more,
+ *  naming none of the minis the store holds. Minis are
+ *  spawned by name, listed by name, and served through
+ *  doors by name, yet `sam minis remove` took an exact
+ *  name ONLY, accepted no id, and carried no description
+ *  at all (the heartbeat-remove shape). miniDoorBlocker
+ *  is NOT this source: it is the door registry, which
+ *  includes "sam" (the core itself gets a door), and the
+ *  core is not a mini and must never read as removable -
+ *  this registry is the minis alone. A value reads no
+ *  blocker when it names a mini by exact id OR by exact
+ *  name. Anything else is refused with the minis listed
+ *  as name (id) and, when exactly one mini name matches
+ *  the bad value folded for case and separators, that
+ *  correction. The CLI remove door resolves through
+ *  findMini, which throws this text before anything is
+ *  removed. removeMini keeps its boolean contract (false
+ *  on a miss) for internal callers - the store seam stays
+ *  permissive by design. Null means the mini can be named. */
+export function miniRemoveBlocker(root:string,idOrName:string):string|null{
+ const known=minis(root);
+ if(known.some(m=>m.id===idOrName||m.name===idOrName))return null;
+ const target=normalizeMiniName(idOrName??"");
+ const matches=target?known.filter(m=>normalizeMiniName(m.name)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Mini not found: \""+idOrName+"\". Minis: "+(known.length?known.map(m=>m.name+" ("+m.id+")").join(", "):"none registered")+(fix?". Did you mean \""+fix.name+"\" ("+fix.id+")?":"");
+}
+export function findMini(root:string,idOrName:string):Mini{
+ const found=minis(root).find(m=>m.id===idOrName)??minis(root).find(m=>m.name===idOrName);
+ if(!found)throw new Error(miniRemoveBlocker(root,idOrName)??("Mini not found: "+idOrName));
+ return found;
+}
 export function removeMini(root:string,name:string):boolean{
   if(!storeExists(root))return false;
   const target=minis(root).find(m=>m.name===name);
