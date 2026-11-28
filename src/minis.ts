@@ -5,7 +5,7 @@ import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { ChatStore } from "./chats.js";
 import { addHeartbeatJob } from "./heartbeat.js";
-import { connectors } from "./connectors.js";
+import { connectors, connectorPinId, normalizeConnectorPinName } from "./connectors.js";
 import { recordActivity } from "./activity.js";
 import { errorReason } from "./error-reason.js";
 
@@ -231,6 +231,45 @@ export function spawnMini(root:string,input:SpawnMiniInput):Mini{
   return mini;
 }
 export interface SpawnSpec { name:string; person:string; instructions:string; model:string|null; connectorId:string|null; starterHeartbeat:boolean }
+/** The ONE source carrying the spawn door's connector refusal
+ *  text (refusal-class sweep, 2026-11-27): validateSpawnDetail,
+ *  the ONE seam every gated spawn rides (proposal time in
+ *  proposeAction and execution time in decideAction, both for
+ *  a chat proposal and the dashboard gate), checked the pin by
+ *  exact id only and refused with the bare "Cannot spawn: no
+ *  connector with id X exists on this install" - naming none
+ *  of the connectors this install holds and offering no fold
+ *  correction, so a spawn naming its connector the way a
+ *  person does (its registered NAME, "Second Shift" or
+ *  "nines" - the dashboard's own create-agent prompt asks for
+ *  the connector NAME) dead-ended as an unexecutable card,
+ *  even though the sibling CLI spawn door reads the same
+ *  registry through connectorPinBlocker and accepts a name or
+ *  an id. spawnConnectorBlocker is now that ONE source for
+ *  this door: an exact id OR an exact registered name reads
+ *  no blocker (validateSpawnDetail resolves a passing name to
+ *  the connector's id through connectorPinId, the CLI door's
+ *  own resolver, so the stored pin is always the id); anything
+ *  else is refused with the value echoed, the standing
+ *  "Cannot spawn: no connector with id" prefix kept (its
+ *  readers match it, and the mini-store validation class keys
+ *  on the Cannot spawn prefix), the registered connectors
+ *  named as the registry in the connector-pin's own name (id)
+ *  form, and a fold correction when exactly one registered
+ *  name matches folded for case and separators (the
+ *  connector-pin fold, separators stripped). Stored profile
+ *  connector pins stay permissive by design - a connector
+ *  removed after a profile names it keeps its stored pin, and
+ *  the store readers never re-validate it. */
+export function spawnConnectorBlocker(root:string,value:unknown):string|null{
+ if(value===null||value===undefined||value==="")return null;
+ if(typeof value==="string"&&connectorPinId(root,value))return null;
+ const known=connectors(root);
+ const target=typeof value==="string"?normalizeConnectorPinName(value):"";
+ const matches=target?known.filter(c=>normalizeConnectorPinName(c.name)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Cannot spawn: no connector with id \""+String(value)+"\" exists on this install. Valid connectors: "+(known.length?known.map(c=>c.name+" ("+c.id+")").join(", "):"none registered")+(fix?". Did you mean \""+fix.name+"\" ("+fix.id+")?":"");
+}
 /** Proposal-time validation for a kind "spawn" detail (the team build,
  *  Dip 2026-11-10): the owner is never shown a spawn card that cannot
  *  execute. The name must be a fresh profile name - not "sam", not an
@@ -254,8 +293,10 @@ export function validateSpawnDetail(root:string,detail:string):SpawnSpec{
   try{if(db.agents().some(a=>a.name===name))throw new Error("Cannot spawn '" + name + "': a profile with that name already exists");}finally{db.close();}
   const model=typeof raw.model==="string"&&raw.model.trim()?raw.model.trim():null;
   if(model&&model.length>120)throw new Error("Invalid spawn model pin (max 120 chars)");
-  const connectorId=typeof raw.connectorId==="string"&&raw.connectorId.trim()?raw.connectorId.trim():null;
-  if(connectorId&&!connectors(root).some(c=>c.id===connectorId))throw new Error("Cannot spawn: no connector with id " + connectorId + " exists on this install");
+  const rawConnector=typeof raw.connectorId==="string"&&raw.connectorId.trim()?raw.connectorId.trim():null;
+  const connectorBlocker=rawConnector?spawnConnectorBlocker(root,rawConnector):null;
+  if(connectorBlocker)throw new Error(connectorBlocker);
+  const connectorId=rawConnector?connectorPinId(root,rawConnector):null;
   return {name,person,instructions,model,connectorId,starterHeartbeat:raw.starterHeartbeat===true};
 }
 export function removeMini(root:string,name:string):boolean{
