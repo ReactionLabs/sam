@@ -4,7 +4,7 @@ import { join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import { openDatabase } from "./sqlite.js";
 import { readActivity, recordActivity } from "./activity.js";
-import { getVaultCredentialValue, listVaultCredentials, VAULT_NAME_RE, vaultConnectorUseLedgerSummary } from "./vault.js";
+import { getVaultCredentialValue, vaultCredentialBlocker, vaultConnectorUseLedgerSummary } from "./vault.js";
 import { errorReason } from "./telegram.js";
 
 // A connector's credential comes from exactly one of two places:
@@ -362,8 +362,8 @@ export function addConnector(root:string,name:string,url:string,tokenEnv:string)
 // stored empty: this connector's credential lives in the vault only.
 export function addConnectorVault(root:string,name:string,url:string,vaultKey:string):Connector{
  if(!namePattern.test(name))throw Error("Invalid connector name");
- if(!VAULT_NAME_RE.test(vaultKey))throw Error("Invalid vault credential name");
- if(!listVaultCredentials(root).some(c=>c.name===vaultKey))throw Error("No vault credential named \""+vaultKey+"\" - the owner deposits credentials into the vault; SAM never creates one");
+ const vaultBlocker=vaultCredentialBlocker(root,vaultKey);
+ if(vaultBlocker)throw Error(vaultBlocker);
  const endpoint=allowedUrl(url,root), items=connectors(root);
  if(items.length>=32||items.some(c=>c.name===name))throw Error("Connector limit or duplicate name");
  const item:Connector={id:randomUUID(),name,url:endpoint,tokenEnv:"",vaultKey,enabled:true,allowedTools:[...readOnlyTools]};

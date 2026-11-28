@@ -4,7 +4,7 @@ import {
   addConnectorVault, allowlistPairHost, connectors, isLoopbackHost,
   removeConnector, testConnector, updateConnector, type Connector,
 } from "./connectors.js";
-import { listVaultCredentials, VAULT_NAME_RE } from "./vault.js";
+import { vaultCredentialBlocker } from "./vault.js";
 import { errorReason } from "./telegram.js";
 
 /**
@@ -93,8 +93,8 @@ export function validatePairSpec(root: string, spec: PairSpec): PairSpec {
   const profile = typeof spec?.profile === "string" ? spec.profile.trim() : "";
   if (!NAME_RE.test(name)) throw new Error("Invalid pair name: a connector name is 1-64 letters, digits, spaces, or _ . -");
   if (connectors(root).some(c => c.name === name)) throw new Error("A connector named \"" + name + "\" already exists - pairing registers a new connector, it never rebinds an existing one");
-  if (!VAULT_NAME_RE.test(vaultKey)) throw new Error("Invalid vault credential name in pair detail");
-  if (!listVaultCredentials(root).some(c => c.name === vaultKey)) throw new Error("No vault credential named \"" + vaultKey + "\" - the owner deposits credentials into the vault (sam vault set); SAM never creates one");
+  const vaultBlocker = vaultCredentialBlocker(root, vaultKey);
+  if (vaultBlocker) throw new Error(vaultBlocker);
   const profileBlocker = pairProfileBlocker(root, profile);
   if (profileBlocker) throw new Error(profileBlocker);
   let parsed: URL;

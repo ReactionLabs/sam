@@ -265,6 +265,47 @@ export function listVaultCredentials(root: string): VaultCredentialView[] {
   try { return readAll(db).map(viewOf); } finally { db.close(); }
 }
 
+export function normalizeVaultCredentialName(name: string): string {
+  return (name ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+/** The ONE source carrying the vault credential name
+ *  refusal text (refusal-class sweep, 2026-11-27): every
+ *  door that picks a vault credential by name - the pair
+ *  door's validatePairSpec and the registration seam
+ *  addConnectorVault - improvised the same refusal in two
+ *  places ("No vault credential named \"X\" - the owner
+ *  deposits credentials..."), echoing the value but naming
+ *  NONE of the credentials the vault actually holds and
+ *  offering NO fold correction, so a folded name
+ *  ("Bridge_Key", "BRIDGE KEY") dead-ended at the door
+ *  that decides which credential a connector pairing
+ *  binds - after the owner had deposited it under the
+ *  canonical slug. vaultCredentialBlocker is now that ONE
+ *  source: the value echoed, the standing "No vault
+ *  credential named" text kept (its readers in the pair
+ *  tests match it), the deposited credential NAMES named
+ *  as the registry (names only - `sam vault list` already
+ *  prints exactly these names and never a value), and a
+ *  fold correction when exactly one deposited name
+ *  matches folded for case and separators (separators
+ *  stripped, the connector-pin fold: a slug's hyphens are
+ *  separators, so "bridge_key" and "bridge key" both
+ *  fold to the one canonical name; two distinct names
+ *  folding alike offer no correction). A name failing the
+ *  slug shape folds through the same source instead of
+ *  dying on a separate improvised text. An exact name
+ *  reads no blocker. getVaultCredentialValue and the
+ *  other stored-name readers stay permissive by design. */
+export function vaultCredentialBlocker(root: string, value: unknown): string | null {
+  const names = listVaultCredentials(root).map(c => c.name);
+  if (typeof value === "string" && names.includes(value)) return null;
+  const target = typeof value === "string" ? normalizeVaultCredentialName(value) : "";
+  const matches = target ? names.filter(n => normalizeVaultCredentialName(n) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "No vault credential named \"" + String(value) + "\" - the owner deposits credentials into the vault (sam vault set); SAM never creates one. Vault credentials: " + (names.length ? names.join(", ") : "none deposited") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
+}
+
 export function vaultStatus(root: string, env: NodeJS.ProcessEnv = process.env): VaultStatus {
   return { dir: vaultDir(root, env), exists: existsSync(vaultDbPath(root, env)), credentials: listVaultCredentials(root) };
 }
