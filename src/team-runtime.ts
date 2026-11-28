@@ -458,6 +458,49 @@ export function addTeamMember(root: string, input: { name: string; role: string;
   return member;
 }
 
+export function foldTeamMemberName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why the team member remove door
+ *  cannot name this member: a member name is a registry
+ *  name a person types at the CLI `team member remove`
+ *  door, and that door rode removeTeamMember alone - an
+ *  exact name only, no description at all - so an unknown
+ *  or folded name ("Ada", "ADA", "cy_b" for cy-b)
+ *  silently returned {removed:false}, naming nothing, and
+ *  at the door that removes a standing member (and takes
+ *  its operative offline) the owner could not tell a typo
+ *  or a fold from a genuinely absent member, even though
+ *  the sibling doors on the same add seam read their
+ *  registries through teamRoleBlocker and teamToolBlocker
+ *  with the fold correction. Members carry no separate
+ *  id - the name IS the key - so this door's registry is
+ *  the member names alone. An exact member name reads no
+ *  blocker. Anything else is refused with the value
+ *  echoed, the standing members named as the registry,
+ *  and, when exactly one member name matches the bad
+ *  value folded for case and separators, that correction.
+ *  findTeamMember throws this before anything is removed.
+ *  removeTeamMember keeps its boolean contract (false on
+ *  a miss) for internal callers - the store seam stays
+ *  permissive by design. Null means the member can be
+ *  named. */
+export function teamMemberBlocker(root: string, name: string): string | null {
+  const known = readMembers(root);
+  if (known.some(m => m.name === name)) return null;
+  const target = foldTeamMemberName(name ?? "");
+  const matches = target ? known.filter(m => foldTeamMemberName(m.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0]! : null;
+  const registry = known.length ? known.map(m => m.name).join(", ") : "none registered";
+  return "Team member not found: \"" + String(name) + "\". Team members: " + registry
+    + (fix ? ". Did you mean \"" + fix.name + "\"?" : "");
+}
+export function findTeamMember(root: string, name: string): StandingMember {
+  const found = readMembers(root).find(m => m.name === name);
+  if (!found) throw new Error(teamMemberBlocker(root, name) ?? ("Team member not found: " + name));
+  return found;
+}
+
 export function removeTeamMember(root: string, name: string): boolean {
   const items = readMembers(root);
   if (!items.some(m => m.name === name)) return false;
