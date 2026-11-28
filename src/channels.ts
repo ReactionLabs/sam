@@ -331,7 +331,7 @@ export function normalizeChannelName(value: string): string {
 /** The ONE source for why a channel door cannot name this
  *  channel: the value names no channel in the registry, so
  *  the door it rides (channels pair / redeem / bind /
- *  resolve, through findChannel in pairing.ts) dead-ended
+ *  resolve / remove, through findChannel in pairing.ts) dead-ended
  *  with the bare "Channel not found: X" - no registry, no
  *  correction - while every sibling naming door reads its
  *  registry through a ONE source. The heartbeat channel
