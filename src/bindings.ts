@@ -283,6 +283,59 @@ export function updateBinding(root: string, id: string, patch: Partial<Binding>)
   updateBindingRow(root, next);
   return next;
 }
+function normalizeBindingId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function describeBinding(root: string, binding: Binding): string {
+  let channelName = binding.channelId;
+  try {
+    const channel = channels(root).find(c => c.id === binding.channelId);
+    if (channel) channelName = channel.name;
+  } catch { /* the registry description falls back to the channel id */ }
+  return binding.id + " (channel " + channelName + ", peer " + (binding.peer ?? "channel-wide") + ", profile " + binding.profile + ")";
+}
+
+/** The binding gate for the channel unbind door (refusal-class
+ *  census, 2026-11-28): every other registry's remove door
+ *  reads its registry through a fold-corrected ONE source
+ *  before removing anything, but CLI `channels unbind <id>`
+ *  rode removeBinding alone, so an unknown id - or a real id
+ *  typed folded (upper-case, or without its hyphens, the two
+ *  ways a UUID gets copied out of a listing) - silently
+ *  returned {removed:false}, naming nothing, at the door that
+ *  deletes a routing rule. Bindings carry no human name: the
+ *  id IS the key, so the registry this door names is the
+ *  bindings themselves, each described by the facts the owner
+ *  recognises it by (its channel, its peer or channel-wide,
+ *  its profile). bindingRemoveBlocker is now the ONE source
+ *  over the bindings registry alone (an exact id reads no
+ *  blocker; anything else refuses with the value echoed, the
+ *  bindings named as the registry, and a fold correction when
+ *  exactly one binding id matches folded for case and
+ *  separators via normalizeBindingId); findBinding resolves
+ *  an exact id or throws it, and the CLI unbind door resolves
+ *  through findBinding before anything is removed.
+ *  removeBinding keeps its boolean contract for internal
+ *  callers - the store seam stays permissive by design. */
+export function bindingRemoveBlocker(root: string, id: string): string | null {
+  const items = listBindings(root);
+  if (items.some(b => b.id === id)) return null;
+  const registry = items.length ? items.map(b => describeBinding(root, b)).join(", ") : "none registered";
+  const target = normalizeBindingId(id ?? "");
+  const matches = target ? items.filter(b => normalizeBindingId(b.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Binding not found: \"" + id + "\". Bindings: " + registry + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
+export function findBinding(root: string, id: string): Binding {
+  const blocker = bindingRemoveBlocker(root, id);
+  if (blocker) throw new Error(blocker);
+  const found = listBindings(root).find(b => b.id === id);
+  if (!found) throw new Error(bindingRemoveBlocker(root, id) ?? "Binding not found: \"" + id + "\"");
+  return found;
+}
+
 export function removeBinding(root: string, id: string): boolean {
   if (!storeExists(root)) return false;
   const gone = findBindingRow(root, id);
