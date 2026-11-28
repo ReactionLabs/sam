@@ -420,6 +420,48 @@ export function providerPinBlocker(root: string, value: string | null | undefine
   return "Unknown provider \"" + value + "\" in provider pin. Configured providers: " + known.map(p => p.id).join(", ") + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
 }
 
+// The provider remove refusal (gap found 2026-11-28, hourly
+// run 05:04 EST): `sam providers remove <id>` rode
+// removeProvider alone, so an unknown or folded id ("Open
+// AI" or "OPENAI" for the file-configured "openai")
+// silently returned {removed:false}, naming nothing, at the
+// door that deletes a provider's endpoint and key-env
+// registration. providerPinBlocker above is NOT this door's
+// source: its registry is listProviders, which includes the
+// environment provider, and the environment provider is not
+// stored here and must never read as removable.
+// providerRemoveBlocker is the ONE source over the
+// file-configured providers alone: an exact file id reads
+// no blocker; the environment provider's own id (a reserved
+// id or the envProviderId) is refused as the environment
+// provider, not stored here and cannot be removed, naming
+// the file registry; anything else is refused with the
+// value echoed, the file-configured providers named as the
+// registry, and a fold correction when exactly one file id
+// matches folded for case and separators via the pin door's
+// own normalizeProviderPinName. The CLI remove door throws
+// it before anything is removed; removeProvider keeps its
+// boolean contract for internal callers - the store seam
+// stays permissive by design.
+export function providerRemoveBlocker(root: string, value: string | null | undefined, env: NodeJS.ProcessEnv = process.env): string | null {
+  const known = readFileProviders(root);
+  const registry = known.length ? known.map(p => p.id).join(", ") : "none registered";
+  if (value && known.some(p => p.id === value)) return null;
+  if (value && ((RESERVED_PROVIDER_IDS as readonly string[]).includes(value) || value === envProviderId(env)))
+    return "Provider \"" + value + "\" is the environment provider: it is not stored here and cannot be removed. File-configured providers: " + registry;
+  const target = normalizeProviderPinName(value ?? "");
+  const matches = target ? known.filter(p => normalizeProviderPinName(p.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Provider not found: \"" + String(value) + "\". File-configured providers: " + registry
+    + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
+export function findRemovableProvider(root: string, value: string, env: NodeJS.ProcessEnv = process.env): FileProvider {
+  const found = readFileProviders(root).find(p => p.id === value);
+  if (!found) throw new Error(providerRemoveBlocker(root, value, env) ?? ("Provider not found: " + value));
+  return found;
+}
+
 export function addProvider(root: string, input: { id: string; endpoint: string; keyEnv: string; model: string; cheapModel?: string | null; deepModel?: string | null }, env: NodeJS.ProcessEnv = process.env): ConfiguredProvider {
   const id = input.id.trim();
   if (!ID_RE.test(id)) throw new Error("Invalid provider id (lowercase, start with a letter, max 32)");
