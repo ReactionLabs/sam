@@ -68,6 +68,72 @@ export function preferenceProfileBlocker(root: string, profile: string): string 
   const fix = matches.length === 1 ? matches[0] : null;
   return "Unknown profile \"" + profile + "\" in preference detail. Valid profiles: " + names.join(", ") + (fix ? ". Did you mean \"" + fix + "\"?" : "");
 }
+function normalizePreferenceId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function describePreference(p: Preference): string {
+  return p.id + " (profile " + p.profile + ", kind " + p.kind + ", status " + p.status + ")";
+}
+
+/** The preference gate for the preferences revoke door
+ *  (refusal-class sweep, 2026-11-28): every registry's
+ *  remove door now reads its registry through a
+ *  fold-corrected ONE source, but CLI `preferences revoke
+ *  <id>` rode PreferenceStore.revoke alone and carried no
+ *  description, so an unknown id - or a real id typed
+ *  folded (upper-case, or without its hyphens, the two
+ *  ways a UUID gets copied out of a `preferences list`) -
+ *  silently returned {revoked:false}, naming nothing, at
+ *  the door that kills standing LAW: a revoke the owner
+ *  believes landed leaves the law in force in every
+ *  prompt, and one that never existed reads exactly the
+ *  same; an already-revoked id read the same false again,
+ *  so revoked-now, revoked-before, and never-existed were
+ *  indistinguishable at the door. Preferences carry no
+ *  human name: the id IS the key, so the registry this
+ *  door names is the preferences themselves, each
+ *  described ONLY by id, profile, kind, and status - a
+ *  preference's STATEMENT is the owner's own words and
+ *  never enters a refusal, the drafts discipline.
+ *  preferenceRevokeBlocker is now the ONE source over the
+ *  preferences registry alone for this door (an exact
+ *  live id reads no blocker; an exact already-revoked id
+ *  refuses naming that state; anything else refuses with
+ *  the value echoed, the preferences named as the
+ *  registry, and a fold correction when exactly one
+ *  preference id matches folded for case and separators
+ *  via normalizePreferenceId); findPreference resolves a
+ *  live exact id or throws it, and the CLI revoke door
+ *  resolves through findPreference before anything is
+ *  revoked. PreferenceStore.revoke keeps its boolean
+ *  contract for internal callers - the store seam stays
+ *  permissive by design, and the dashboard revoke seam
+ *  (with its law-revoked ledgering) is untouched. */
+export function preferenceRevokeBlocker(root: string, id: string): string | null {
+  const store = new PreferenceStore(root);
+  let items: Preference[];
+  try { items = store.list(); } finally { store.close(); }
+  const exact = items.find(p => p.id === id);
+  if (exact && exact.status !== "revoked") return null;
+  const registry = items.length ? items.map(describePreference).join(", ") : "none registered";
+  if (exact) return "Preference \"" + id + "\" is already revoked. Preferences: " + registry;
+  const target = normalizePreferenceId(id ?? "");
+  const matches = target ? items.filter(p => normalizePreferenceId(p.id) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Preference not found: \"" + id + "\". Preferences: " + registry + (fix ? ". Did you mean \"" + fix.id + "\"?" : "");
+}
+
+export function findPreference(root: string, id: string): Preference {
+  const blocker = preferenceRevokeBlocker(root, id);
+  if (blocker) throw new Error(blocker);
+  const store = new PreferenceStore(root);
+  try {
+    const found = store.get(id);
+    if (!found) throw new Error(preferenceRevokeBlocker(root, id) ?? "Preference not found: \"" + id + "\"");
+    return found;
+  } finally { store.close(); }
+}
 function key(profile:string,statement:string):string{return createHash("sha256").update(profile+"\n"+normalize(statement).toLowerCase()).digest("hex");}
 // Failure visibility (gap found 2026-11-15, hourly run
 // 02:04 EST): preferences.db is the store every profile's
