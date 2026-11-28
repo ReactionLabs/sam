@@ -402,11 +402,61 @@ export function getSubagent(root: string, id: string): Subagent | null {
   return listSubagents(root).find(s => s.id === id) ?? null;
 }
 
+export function foldSubagentToolName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why a subagent door cannot name
+ *  this tool: a tool name is a registry name a person (or
+ *  the hiring turn) types at the spawn doors - CLI
+ *  `subagent spawn --tools` and the sam_spawn_subagent
+ *  chat tool, both riding narrowTools, the ONE seam every
+ *  spawn's allowlist rides - and that seam refused any
+ *  name outside the inherited set with the bare "Tool
+ *  allowlist cannot widen past the parent: X", naming
+ *  NONE of the tools the parent actually has and offering
+ *  NO fold correction, so a folded name ("Sam-Memory-
+ *  Search", "SAM_MEMORY_SEARCH") and a plain unknown name
+ *  dead-ended identically, even though the sibling team-
+ *  member door reads the same own-tools registry through
+ *  teamToolBlocker. The registry for this door is the
+ *  PARENT's tools - the pickable set: with no parent that
+ *  is profileToolNames, the full own-tools registry; with
+ *  a parent it is that parent's own narrower list, so a
+ *  correction is offered only within the parent set and
+ *  can never itself widen. Every exact parent tool reads
+ *  no blocker. Anything else is refused with the unknown
+ *  values echoed, the standing "Tool allowlist cannot
+ *  widen past the parent" prefix kept (its readers match
+ *  it), the parent tools named as the registry, and, for
+ *  each unknown where exactly one parent tool matches
+ *  folded for case and separators, that correction.
+ *  narrowTools throws this before anything spawns, and
+ *  the CLI spawn door throws it before opening the spawn
+ *  pool. Stored sub-agent tool lists stay permissive by
+ *  design - a stored list is read back as stored and the
+ *  run paths never re-validate it. Null means every tool
+ *  can be named. */
+export function subagentToolBlocker(tools: readonly unknown[], inherited?: readonly string[]): string | null {
+  const names = inherited ? [...inherited] : profileToolNames();
+  const known = new Set(names);
+  const unknown = [...new Set((tools ?? []).map(t => String(t)))].filter(t => !known.has(t));
+  if (!unknown.length) return null;
+  const fixes: string[] = [];
+  for (const value of unknown) {
+    const target = foldSubagentToolName(value);
+    const matches = target ? names.filter(n => foldSubagentToolName(n) === target) : [];
+    if (matches.length === 1) fixes.push(matches[0]!);
+  }
+  return "Tool allowlist cannot widen past the parent: " + unknown.join(", ")
+    + ". Parent tools: " + (names.length ? names.join(", ") : "none")
+    + (fixes.length ? ". Did you mean " + fixes.map(f => "\"" + f + "\"").join(", ") + "?" : "");
+}
+
 function narrowTools(requested: string[] | undefined, inherited: string[]): string[] {
   if (!requested || requested.length === 0) return [...inherited];
   const unique = [...new Set(requested)];
-  const widened = unique.filter(name => !inherited.includes(name));
-  if (widened.length) throw new Error("Tool allowlist cannot widen past the parent: " + widened.join(", "));
+  const blocker = subagentToolBlocker(unique, inherited);
+  if (blocker) throw new Error(blocker);
   if (!unique.length) throw new Error("Tool allowlist is empty");
   return unique;
 }
