@@ -363,6 +363,42 @@ export function removeHeartbeatJob(root:string,id:string):boolean{
  if(!heartbeatJobs(root).some(j=>j.id===id))return false;
  return deleteJobRow(root,id);
 }
+export function normalizeHeartbeatJobName(value:string):string{
+ return (value??"").toLowerCase().replace(/[^a-z0-9]+/g,"");
+}
+/** The ONE source for why a heartbeat-job door cannot pick
+ *  this job: the value names no job in the registry, so a
+ *  door acting on it would act on nothing - and the remove
+ *  door, riding removeHeartbeatJob's boolean alone, said
+ *  exactly that ({removed:false}) and nothing more, naming
+ *  none of the jobs the store holds. Jobs are created by
+ *  NAME (unique - heartbeatCreationBlocker refuses a
+ *  duplicate), listed by name, and diffed and delivered by
+ *  name in every ledger line, yet `sam heartbeats remove`
+ *  took an id ONLY and accepted no name at all (the
+ *  channel-remove shape). A value reads no blocker when it
+ *  names a job by exact id OR by exact name. Anything else
+ *  is refused with the jobs listed as name (id) and, when
+ *  exactly one job name matches the bad value folded for
+ *  case and separators, that correction. The CLI remove
+ *  door resolves through findHeartbeatJob, which throws
+ *  this text before anything is removed.
+ *  removeHeartbeatJob keeps its boolean contract (false on
+ *  a miss) for internal callers - the store seam stays
+ *  permissive by design. Null means the job can be named. */
+export function heartbeatJobBlocker(root:string,idOrName:string):string|null{
+ const known=heartbeatJobs(root);
+ if(known.some(j=>j.id===idOrName||j.name===idOrName))return null;
+ const target=normalizeHeartbeatJobName(idOrName??"");
+ const matches=target?known.filter(j=>normalizeHeartbeatJobName(j.name)===target):[];
+ const fix=matches.length===1?matches[0]:null;
+ return "Heartbeat job not found: \""+idOrName+"\". Heartbeat jobs: "+(known.length?known.map(j=>j.name+" ("+j.id+")").join(", "):"none registered")+(fix?". Did you mean \""+fix.name+"\" ("+fix.id+")?":"");
+}
+export function findHeartbeatJob(root:string,idOrName:string):HeartbeatJob{
+ const found=heartbeatJobs(root).find(j=>j.id===idOrName)??heartbeatJobs(root).find(j=>j.name===idOrName);
+ if(!found)throw Error(heartbeatJobBlocker(root,idOrName)??("Heartbeat job not found: "+idOrName));
+ return found;
+}
 export interface HeartbeatOutputRecord { hash:string; at:string; preview:string; sig?:string }
 interface HeartbeatState { chats:Record<string,string>; lastTick:string|null; outputs?:Record<string,HeartbeatOutputRecord> }
 // State convergence (UNIFICATION item 4, third store): the tick's
