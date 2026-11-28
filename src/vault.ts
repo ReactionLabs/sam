@@ -296,7 +296,14 @@ export function normalizeVaultCredentialName(name: string): string {
  *  slug shape folds through the same source instead of
  *  dying on a separate improvised text. An exact name
  *  reads no blocker. getVaultCredentialValue and the
- *  other stored-name readers stay permissive by design. */
+ *  other stored-name readers stay permissive by design.
+ *  The CLI `vault remove` door throws this same source
+ *  before removing (gap found 2026-11-27, hourly run
+ *  22:04 EST): removeVaultCredential alone let a folded
+ *  name die on the slug text and an unknown slug return
+ *  a silent false, naming nothing, at the door that
+ *  deletes a credential; the store seam keeps its
+ *  boolean contract for internal callers. */
 export function vaultCredentialBlocker(root: string, value: unknown): string | null {
   const names = listVaultCredentials(root).map(c => c.name);
   if (typeof value === "string" && names.includes(value)) return null;
