@@ -337,6 +337,59 @@ export function unbindEvent(root: string, name: string): boolean {
   return removed;
 }
 
+function describeEventBinding(binding: EventBinding): string {
+  return binding.name + " (profile " + binding.profile + ")";
+}
+
+/** The event gate for the events unbind door (refusal-class
+ *  census, 2026-11-28): every other registry's remove door
+ *  reads its registry through a fold-corrected ONE source
+ *  before removing anything, but CLI `events unbind <name>`
+ *  rode unbindEvent alone and carried no description, so an
+ *  unknown name - or a real binding name typed folded
+ *  ("Lead Arrived" for "lead-arrived") - silently returned
+ *  {removed:false}, naming nothing, at the door that closes
+ *  a signed webhook door: an unbind the owner believes
+ *  landed leaves the door open, and one that never existed
+ *  reads exactly the same. The accept door on this same
+ *  registry already carries eventBindingBlocker, but that
+ *  refusal names the bound events by name alone and speaks
+ *  for the accept act; the removal door names the registry
+ *  the way its sibling remove doors do, in the facts the
+ *  owner recognises (the binding's name and the profile it
+ *  wakes). A binding's secret env NAME never enters the
+ *  refusal: this module's failure discipline already holds
+ *  secret env names as door data, not refusal data.
+ *  eventUnbindBlocker is now the ONE source over the event
+ *  bindings registry alone for this door (an exact name
+ *  reads no blocker; anything else refuses with the value
+ *  echoed, the bindings named as the registry via
+ *  describeEventBinding, and a fold correction when exactly
+ *  one binding name matches folded for case and separators
+ *  via normalizeEventBindingName); findEventBinding
+ *  resolves an exact name or throws it, and the CLI unbind
+ *  door resolves through findEventBinding before anything
+ *  is removed. unbindEvent keeps its boolean contract for
+ *  internal callers - the store seam stays permissive by
+ *  design. */
+export function eventUnbindBlocker(root: string, name: string): string | null {
+  const items = eventBindings(root);
+  if (items.some(b => b.name === name)) return null;
+  const registry = items.length ? items.map(describeEventBinding).join(", ") : "none registered";
+  const target = normalizeEventBindingName(name ?? "");
+  const matches = target ? items.filter(b => normalizeEventBindingName(b.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0] : null;
+  return "Event binding not found: \"" + name + "\". Event bindings: " + registry + (fix ? ". Did you mean \"" + fix.name + "\"?" : "");
+}
+
+export function findEventBinding(root: string, name: string): EventBinding {
+  const blocker = eventUnbindBlocker(root, name);
+  if (blocker) throw new Error(blocker);
+  const found = eventBindings(root).find(b => b.name === name);
+  if (!found) throw new Error(eventUnbindBlocker(root, name) ?? "Event binding not found: \"" + name + "\"");
+  return found;
+}
+
 // The store's update door (the providers precedent): patch one
 // binding by name, validated exactly as bindEvent validates. The
 // name itself is immutable (it is the door's address); a profile
