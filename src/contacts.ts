@@ -379,6 +379,49 @@ export function removeContact(root: string, name: string): boolean {
   renderAddressBookQuietly(root);
   return true;
 }
+export function foldContactName(value: string): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+/** The ONE source for why the Address Book remove door
+ *  cannot name this contact: a contact name is a registry
+ *  name a person types at the CLI `contacts remove` door,
+ *  and that door rode removeContact alone - no description
+ *  at all - so an unknown name, or one typed without its
+ *  separator ("JohnnyDavis" for the slug johnny-davis),
+ *  silently returned {removed:false}, naming nothing, and
+ *  at the door that deletes a person's Address Book entry
+ *  (their permission note, their no-drafts mark, their
+ *  facts) the owner could not tell a fold or a typo from a
+ *  genuinely absent person, even though every sibling
+ *  registry's remove door (channels, heartbeats, vault,
+ *  minis, team members) reads its registry through a
+ *  fold-corrected ONE source. Contacts are keyed by slug:
+ *  a value whose slug (contactSlug, the door's own rule)
+ *  names a registered contact reads no blocker. Anything
+ *  else is refused with the value echoed, the registered
+ *  contacts named by slug as the registry, and, when
+ *  exactly one contact slug matches the bad value folded
+ *  for case and separators, that correction. findContact
+ *  throws this before anything is removed. removeContact
+ *  keeps its boolean contract (false on a miss) for
+ *  internal callers - the store seam stays permissive by
+ *  design. Null means the contact can be named. */
+export function contactRemoveBlocker(root: string, name: string): string | null {
+  const known = listContacts(root);
+  const slug = contactSlug(name ?? "");
+  if (slug && known.some(c => c.name === slug)) return null;
+  const target = foldContactName(name ?? "");
+  const matches = target ? known.filter(c => foldContactName(c.name) === target) : [];
+  const fix = matches.length === 1 ? matches[0]! : null;
+  const registry = known.length ? known.map(c => c.name).join(", ") : "none registered";
+  return "Contact not found: \"" + String(name) + "\". Contacts: " + registry
+    + (fix ? ". Did you mean \"" + fix.name + "\"?" : "");
+}
+export function findContact(root: string, name: string): Contact {
+  const found = getContact(root, name);
+  if (!found) throw new Error(contactRemoveBlocker(root, name) ?? ("Contact not found: " + name));
+  return found;
+}
 // The ONE writers for the contact ledger lines: an add, an
 // update, and a remove each ledger exactly one of these
 // shapes (the slug, plus the " (no drafts)" suffix on an add
